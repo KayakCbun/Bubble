@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: transparent;
+      overflow: hidden;
+    }
+    .list {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+      padding: 6px;
+    }
+    .cell {
+      width: 28px;
+      height: 28px;
+      border-radius: 8px;
+      cursor: pointer;
+      position: relative;
+    }
+    .cell.selected {
+      box-shadow: 0 0 0 2px rgba(91,127,229,0.95);
+    }
+    .preview {
+      width: 28px;
+      height: 28px;
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .fallback {
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+    }
+  </style>
+</head>
+<body>
+  <div class="list" id="list"></div>
+  <script src="avatar.js"></script>
+  <script>
+    let selected = 'bubble.avatar.json';
+
+    function notify(file) {
+      if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.selectAvatar) {
+        window.webkit.messageHandlers.selectAvatar.postMessage({ file: file });
+      }
+    }
+
+    function markSelected(file) {
+      selected = file;
+      document.querySelectorAll('.cell').forEach(function (el) {
+        el.classList.toggle('selected', el.dataset.file === selected);
+      });
+    }
+
+    function mount(preview, definition, name) {
+      try {
+        BibleAvatar.createAvatar(preview, {
+          definition: definition,
+          defaultAnimation: 'idle',
+          autoplay: true,
+          size: 28,
+          ariaLabel: name,
+          onError: function () {
+            paintFallback(preview, definition);
+          }
+        });
+      } catch (error) {
+        paintFallback(preview, definition);
+      }
+    }
+
+    function paintFallback(preview, definition) {
+      preview.innerHTML = '';
+      const dot = document.createElement('div');
+      dot.className = 'fallback';
+      dot.style.background = (definition && definition.colors && definition.colors.body) || '#888';
+      preview.appendChild(dot);
+    }
+
+    fetch('catalog.json')
+      .then(function (r) { return r.json(); })
+      .then(function (catalog) {
+        const list = document.getElementById('list');
+        return catalog.reduce(function (chain, item) {
+          return chain.then(function () {
+            const cell = document.createElement('div');
+            cell.className = 'cell' + (item.file === selected ? ' selected' : '');
+            cell.dataset.file = item.file;
+            const preview = document.createElement('div');
+            preview.className = 'preview';
+            cell.appendChild(preview);
+            cell.addEventListener('click', function () {
+              markSelected(item.file);
+              notify(item.file);
+            });
+            list.appendChild(cell);
+            return fetch(item.file)
+              .then(function (r) { return r.json(); })
+              .then(function (definition) {
+                mount(preview, definition, item.name);
+              })
+              .catch(function () {
+                paintFallback(preview, { colors: { body: '#888' } });
+              });
+          });
+        }, Promise.resolve());
+      });
+  </script>
+</body>
+</html>

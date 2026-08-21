@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: transparent;
+      overflow: hidden;
+      height: auto;
+    }
+    #graph {
+      width: 100%;
+      display: flex;
+      justify-content: center;
+      align-items: flex-start;
+    }
+    #graph svg {
+      display: block;
+      max-width: 100%;
+      height: auto;
+    }
+  </style>
+</head>
+<body>
+  <div id="graph"></div>
+  <script src="mermaid.min.js"></script>
+  <script>
+    mermaid.initialize({
+      startOnLoad: false,
+      theme: 'neutral',
+      securityLevel: 'loose',
+      fontFamily: '-apple-system, BlinkMacSystemFont, sans-serif',
+      fontSize: 14,
+      useMaxWidth: false,
+      flowchart: { htmlLabels: true, useMaxWidth: false, curve: 'basis' }
+    });
+
+    function decodeB64(b64) {
+      const bin = atob(b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return new TextDecoder('utf-8').decode(bytes);
+    }
+
+    function report(payload) {
+      if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.mermaidReady) {
+        window.webkit.messageHandlers.mermaidReady.postMessage(payload);
+      }
+    }
+
+    window.fxRenderB64 = async function (b64) {
+      const source = decodeB64(b64).trim();
+      const graph = document.getElementById('graph');
+      graph.innerHTML = '';
+      try {
+        const id = 'm' + Math.random().toString(36).slice(2);
+        const result = await mermaid.render(id, source);
+        graph.innerHTML = result.svg;
+        const svg = graph.querySelector('svg');
+        if (!svg) {
+          report({ ok: false, error: 'no svg' });
+          return;
+        }
+        const vb = svg.viewBox && svg.viewBox.baseVal;
+        let w = vb && vb.width > 1 ? vb.width : 0;
+        let h = vb && vb.height > 1 ? vb.height : 0;
+        if (!w || !h) {
+          try {
+            const box = svg.getBBox();
+            w = Math.max(w, box.width + box.x);
+            h = Math.max(h, box.height + box.y);
+          } catch (e) {}
+        }
+        svg.removeAttribute('width');
+        svg.removeAttribute('height');
+        svg.setAttribute('preserveAspectRatio', 'xMidYMin meet');
+        const parentW = document.documentElement.clientWidth || window.innerWidth || 640;
+        const scale = Math.min(1, parentW / Math.max(w, 1));
+        const dw = Math.max(1, Math.round(w * scale));
+        const dh = Math.max(1, Math.round(h * scale));
+        svg.style.maxWidth = '100%';
+        svg.style.width = dw + 'px';
+        svg.style.height = dh + 'px';
+        window.scrollTo(0, 0);
+        report({ ok: true, width: dw, height: dh });
+      } catch (error) {
+        report({ ok: false, error: String(error && error.message ? error.message : error) });
+      }
+    };
+
+    report({ ok: true, ready: true, width: 0, height: 0 });
+  </script>
+</body>
+</html>

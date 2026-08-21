@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>Bubble</string>
+	<key>CFBundleExecutable</key>
+	<string>Bubble</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleIdentifier</key>
+	<string>local.bubble</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>Bubble</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>26.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+	<key>NSAccessibilityUsageDescription</key>
+	<string>Bubble uses Accessibility so double-tap Command can summon the chat panel from any app.</string>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>Bubble previews markdown files you click in the conversation, including files in Documents.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>Bubble previews markdown files you click in the conversation, including files in Downloads.</string>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>Bubble previews markdown files you click in the conversation, including files on the Desktop.</string>
+</dict>
+</plist>

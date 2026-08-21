@@ -1,0 +1,57 @@
+[
+  {
+    "id": "bubble",
+    "name": "Bubble",
+    "file": "bubble.avatar.json"
+  },
+  {
+    "id": "strobi",
+    "name": "Strobi",
+    "file": "strobi.avatar.json"
+  },
+  {
+    "id": "freddy",
+    "name": "Freddy",
+    "file": "freddy.avatar.json"
+  },
+  {
+    "id": "citrus",
+    "name": "Citrus",
+    "file": "citrus.avatar.json"
+  },
+  {
+    "id": "nova",
+    "name": "Nova",
+    "file": "nova.avatar.json"
+  },
+  {
+    "id": "grok-bot",
+    "name": "Grok bot",
+    "file": "grok-bot.avatar.json"
+  },
+  {
+    "id": "sunee",
+    "name": "Sunee",
+    "file": "sunee.avatar.json"
+  },
+  {
+    "id": "kirby",
+    "name": "Kirby",
+    "file": "kirby.avatar.json"
+  },
+  {
+    "id": "cloudee",
+    "name": "Cloudee",
+    "file": "cloudee.avatar.json"
+  },
+  {
+    "id": "cubee",
+    "name": "Cubee",
+    "file": "cubee.avatar.json"
+  },
+  {
+    "id": "onee",
+    "name": "Onee",
+    "file": "onee.avatar.json"
+  }
+]

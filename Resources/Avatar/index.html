@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; width: 100%; height: 100%; }
+    #avatar { width: 100%; height: 100%; cursor: pointer; }
+    .bs-avatar { display: block !important; }
+  </style>
+</head>
+<body>
+  <div id="avatar"></div>
+  <script src="avatar.js"></script>
+  <script>
+    let controller = null;
+    let pending = 'idle';
+    let currentFile = '';
+
+    window.fxAvatarPlay = function (name) {
+      pending = name;
+      if (controller) controller.play(name);
+    };
+
+    window.fxAvatarLoad = function (file, animation) {
+      if (animation) pending = animation;
+      if (file && file !== currentFile) {
+        currentFile = file;
+        fetch(currentFile)
+          .then(function (r) { return r.json(); })
+          .then(function (definition) {
+            if (controller) {
+              controller.destroy();
+              document.getElementById('avatar').innerHTML = '';
+            }
+            controller = BibleAvatar.createAvatar('#avatar', {
+              definition: definition,
+              defaultAnimation: pending || 'idle',
+              autoplay: true,
+              size: '100%',
+              ariaLabel: 'fx'
+            });
+          });
+        return;
+      }
+      if (controller && pending) controller.play(pending);
+    };
+
+    document.getElementById('avatar').addEventListener('click', function () {
+      if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.togglePicker) {
+        window.webkit.messageHandlers.togglePicker.postMessage({});
+      }
+    });
+
+    const params = new URLSearchParams(location.search);
+    window.fxAvatarLoad(params.get('avatar') || 'bubble.avatar.json', params.get('animation') || 'idle');
+  </script>
+</body>
+</html>
