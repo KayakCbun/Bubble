@@ -12,11 +12,30 @@ The agent runs in `~/.bubble/workspace`. API keys still come from Pi (`~/.pi/age
   <img src="docs/images/bubble-screenshot.png" alt="Bubble running on macOS">
 </p>
 
-## Setup
+## Install
+
+Bubble requires macOS 26 on Apple silicon and [Node.js 22.19+](https://nodejs.org/en/download).
+
+1. Download the latest `Bubble-*-macOS-arm64.zip` from
+   [Releases](https://github.com/KayakCbun/Bubble/releases).
+2. Unzip it and move `Bubble.app` to `/Applications`.
+3. Open Bubble and type `/setup`. That installs Pi and `pi-acp` into
+   `~/.bubble/runtime` and reconnects.
+
+Release builds are ad-hoc signed but not Apple-notarized. On first launch,
+macOS may require **System Settings → Privacy & Security → Open Anyway**.
+
+## Build from source
 
 1. Install [Node.js 22.19+](https://nodejs.org/en/download). Bubble does not ship Node.
 
-2. Open Bubble and type `/setup`. That installs Pi and `pi-acp` into `~/.bubble/runtime` and reconnects. If Node is missing or too old, `/setup` opens the Node download page instead.
+2. Build and launch:
+
+   ```bash
+   ./scripts/run.sh
+   ```
+
+3. Open Bubble and type `/setup`. That installs Pi and `pi-acp` into `~/.bubble/runtime` and reconnects. If Node is missing or too old, `/setup` opens the Node download page instead.
 
    Manual fallback, if you already use Pi from a terminal:
 
@@ -25,19 +44,13 @@ The agent runs in `~/.bubble/workspace`. API keys still come from Pi (`~/.pi/age
    npm install -g pi-acp
    ```
 
-3. Sign in:
+4. Sign in:
 
 - Type `/login` and pick a provider, or
 - `/login xai sk-...` to store an API key, or
 - Menu bar → **Sign in with Pi…** (opens Terminal; in Pi type `/login`).
 
 Then pick a model with `/model`. If Node, Pi, or a provider is missing, Bubble shows a setup card instead of failing silently. Type `/setup` from that card.
-
-3. Build and launch:
-
-```bash
-./scripts/run.sh
-```
 
 A menu-bar icon appears. There is no Dock icon.
 
