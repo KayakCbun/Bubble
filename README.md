@@ -1,8 +1,16 @@
-# Bubble
+<p align="center">
+  <img src="Resources/AppIcon.png" width="128" alt="Bubble app icon">
+</p>
 
-A tiny macOS overlay around [Pi](https://pi.dev): double-tap **Command** to open a Liquid Glass input, talk to the agent, and keep everything in **one session**.
+<h1 align="center">Bubble</h1>
+
+Bubble is a tiny macOS overlay around [Pi](https://pi.dev). Double-tap **Command** to open its floating input and conversation window, talk to the agent, and keep everything in **one session**.
 
 The agent runs in `~/.bubble/workspace`. API keys still come from Pi (`~/.pi/agent/`). Bubble keeps its own `AGENTS.md` and model in `~/.bubble/`, so changing them does not change the Pi TUI.
+
+<p align="center">
+  <img src="docs/images/bubble-screenshot.png" alt="Bubble running on macOS">
+</p>
 
 ## Setup
 
