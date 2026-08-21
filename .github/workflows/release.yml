@@ -1,0 +1,102 @@
+name: Build and release
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - "Package.resolved"
+      - "Package.swift"
+      - "Resources/**"
+      - "Sources/**"
+      - "Tests/**"
+      - "scripts/**"
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+jobs:
+  package:
+    name: Package macOS arm64
+    runs-on: macos-26
+    timeout-minutes: 30
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          swift --version
+          uname -m
+
+      - name: Build app
+        run: ./scripts/package.sh
+
+      - name: Sign and verify app
+        run: |
+          set -euo pipefail
+          test -x dist/Bubble.app/Contents/MacOS/Bubble
+          test "$(plutil -extract CFBundleExecutable raw dist/Bubble.app/Contents/Info.plist)" = "Bubble"
+          test "$(lipo -archs dist/Bubble.app/Contents/MacOS/Bubble)" = "arm64"
+          codesign --force --deep --sign - dist/Bubble.app
+          codesign --verify --deep --strict --verbose=2 dist/Bubble.app
+
+      - name: Create release archive
+        id: archive
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_REF_TYPE}" = "tag" ]]; then
+            version="${GITHUB_REF_NAME#v}"
+            plist_version="$(plutil -extract CFBundleShortVersionString raw dist/Bubble.app/Contents/Info.plist)"
+            if [[ "${version}" != "${plist_version}" ]]; then
+              echo "Tag ${GITHUB_REF_NAME} does not match app version ${plist_version}." >&2
+              exit 1
+            fi
+          else
+            version="dev-${GITHUB_SHA:0:7}"
+          fi
+
+          archive="Bubble-${version}-macOS-arm64.zip"
+          ditto -c -k --sequesterRsrc --keepParent dist/Bubble.app "${archive}"
+          shasum -a 256 "${archive}" > "${archive}.sha256"
+
+          echo "archive=${archive}" >> "${GITHUB_OUTPUT}"
+          echo "checksum=${archive}.sha256" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload workflow artifact
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v7
+        with:
+          name: Bubble-macOS-arm64
+          path: |
+            ${{ steps.archive.outputs.archive }}
+            ${{ steps.archive.outputs.checksum }}
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARCHIVE: ${{ steps.archive.outputs.archive }}
+          CHECKSUM: ${{ steps.archive.outputs.checksum }}
+        run: |
+          set -euo pipefail
+          gh release create "${GITHUB_REF_NAME}" \
+            "${ARCHIVE}" \
+            "${CHECKSUM}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "Bubble ${GITHUB_REF_NAME}" \
+            --generate-notes \
+            --verify-tag
