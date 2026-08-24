@@ -339,11 +339,6 @@ struct OverlayView: View {
         ZStack {
             if SideStagePresentationPolicy.mountsTranscript(phase: store.workspacePanePresentationPhase) {
                 workspaceSessionPane(stage)
-                    .opacity(
-                        SideStagePresentationPolicy.transcriptOpacity(
-                            coverVisible: store.workspacePaneCoverVisible
-                        )
-                    )
             }
             if content != .hidden {
                 workspaceSessionPlaceholder(stage)
@@ -425,7 +420,7 @@ struct OverlayView: View {
     }
 
     private var workspaceTranscriptList: some View {
-        let rows = groupedRows(from: store.visibleWorkspacePaneItems, collapsePrefix: "ws-pane")
+        let rows = workspaceRows(from: store.visibleWorkspacePaneItems)
         let live = store.childBusy && store.workspaceStage?.path == store.activeWorkspaceBrief?.path
         return ScrollViewReader { proxy in
             ScrollView {
@@ -433,15 +428,27 @@ struct OverlayView: View {
                     ForEach(rows) { row in
                         Group {
                             switch row {
-                            case .collapsedTools:
-                                transcriptRow(row, interactive: false)
-                            case .message, .tool:
-                                EquatableSection(value: rowRenderKey(row)) {
-                                    transcriptRow(row, interactive: false)
+                            case .transcript(let transcript):
+                                switch transcript {
+                                case .collapsedTools:
+                                    transcriptRow(transcript, interactive: false)
+                                case .message, .tool:
+                                    EquatableSection(value: rowRenderKey(transcript)) {
+                                        transcriptRow(transcript, interactive: false)
+                                    }
+                                    .equatable()
+                                }
+                            case .assistantChunk(_, _, let text, let copyText):
+                                EquatableSection(value: WorkspaceChunkRenderKey(
+                                    id: row.id,
+                                    text: text
+                                )) {
+                                    workspaceAssistantChunk(text: text, copyText: copyText)
                                 }
                                 .equatable()
                             }
                         }
+                        .padding(.top, row.isContinuation ? -10 : 0)
                         .id(workspaceRowScrollId(row))
                     }
                     if live, let started = store.items.first(where: { $0.id == store.workspaceStage?.cardId })?.workspaceStartedAt {
@@ -490,17 +497,55 @@ struct OverlayView: View {
         }
     }
 
-    private func workspaceRowScrollId(_ row: TranscriptRow) -> String {
-        switch row {
-        case .message(let item):
-            if item.kind == .user, let entry = item.sourceEntryId, !entry.isEmpty {
-                return "ws-entry-\(entry)"
+    private func workspaceRows(from items: [ChatItem]) -> [WorkspaceTranscriptRow] {
+        groupedRows(from: items, collapsePrefix: "ws-pane").flatMap { row -> [WorkspaceTranscriptRow] in
+            guard case .message(let item) = row,
+                  item.kind == .assistant,
+                  !(store.childBusy && store.workspacePaneStreamingAssistantId == item.id) else {
+                return [.transcript(row)]
             }
-            return "ws-\(item.id.uuidString)"
-        case .tool(let item):
-            return "ws-\(item.id.uuidString)"
-        case .collapsedTools(let id, _):
-            return "ws-\(id)"
+            let chunks = WorkspaceTranscriptChunker.chunks(
+                item.text,
+                identity: item.id.uuidString
+            )
+            guard chunks.count > 1 else { return [.transcript(row)] }
+            return chunks.enumerated().map { index, text in
+                .assistantChunk(
+                    itemID: item.id,
+                    index: index,
+                    text: text,
+                    copyText: index == chunks.count - 1 ? item.text : nil
+                )
+            }
+        }
+    }
+
+    private func workspaceAssistantChunk(text: String, copyText: String?) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            MessageBody(text: text)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if let copyText {
+                AssistantCopyButton(text: copyText.trimmingCharacters(in: .whitespacesAndNewlines))
+            }
+        }
+    }
+
+    private func workspaceRowScrollId(_ row: WorkspaceTranscriptRow) -> String {
+        switch row {
+        case .assistantChunk:
+            return "ws-\(row.id)"
+        case .transcript(let transcript):
+            switch transcript {
+            case .message(let item):
+                if item.kind == .user, let entry = item.sourceEntryId, !entry.isEmpty {
+                    return "ws-entry-\(entry)"
+                }
+                return "ws-\(item.id.uuidString)"
+            case .tool(let item):
+                return "ws-\(item.id.uuidString)"
+            case .collapsedTools(let id, _):
+                return "ws-\(id)"
+            }
         }
     }
 
@@ -2125,6 +2170,32 @@ private struct EquatableSection<Value: Equatable, Content: View>: View, Equatabl
 
     var body: some View {
         content
+    }
+}
+
+private struct WorkspaceChunkRenderKey: Equatable {
+    var id: String
+    var text: String
+}
+
+private enum WorkspaceTranscriptRow: Identifiable {
+    case transcript(TranscriptRow)
+    case assistantChunk(itemID: UUID, index: Int, text: String, copyText: String?)
+
+    var id: String {
+        switch self {
+        case .transcript(let row):
+            return row.id
+        case .assistantChunk(let itemID, let index, _, let copyText):
+            return copyText != nil ? itemID.uuidString : "assistant-\(itemID.uuidString)-\(index)"
+        }
+    }
+
+    var isContinuation: Bool {
+        if case .assistantChunk(_, let index, _, _) = self {
+            return index > 0
+        }
+        return false
     }
 }
 

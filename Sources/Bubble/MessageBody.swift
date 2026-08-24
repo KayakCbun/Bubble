@@ -51,6 +51,14 @@ enum MessagePart {
         }
     }
 
+    static func prewarmDisplay(_ text: String) {
+        for part in displayParts(text) {
+            guard case .markdown(let markdown) = part,
+                  !PathChipStyle.needsClassicMarkdown(markdown) else { continue }
+            _ = ProseParser.blocks(in: markdown)
+        }
+    }
+
     private static func parseDisplayParts(_ text: String) -> [MessagePart] {
         var parts: [MessagePart] = []
         for part in split(text) {
@@ -149,7 +157,7 @@ enum MessagePart {
     private static func appendSplitUnfenced(_ raw: String, into parts: inout [MessagePart]) {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
-        guard let match = firstMermaidRange(in: text) else {
+        guard let match = MermaidTextDetector.firstRange(in: text) else {
             parts.append(.markdown(text))
             return
         }
@@ -163,22 +171,6 @@ enum MessagePart {
         if !split.after.isEmpty {
             parts.append(.markdown(split.after))
         }
-    }
-
-    private static func firstMermaidRange(in text: String) -> Range<String.Index>? {
-        let pattern = #"(?i)(?:^|[\n：:]|\s)(?:mermaid[\s_]*)?(flowchart|graph(?:\s+[TDLRBA]{1,3})?|sequenceDiagram|classDiagram|stateDiagram(?:-v2)?|erDiagram|journey|gantt|pie|mindmap|gitGraph|xychart(?:-beta)?)\b"#
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.anchorsMatchLines]) else { return nil }
-        let ns = text as NSString
-        guard let match = regex.firstMatch(in: text, range: NSRange(location: 0, length: ns.length)),
-              match.numberOfRanges > 1,
-              let range = Range(match.range(at: 1), in: text) else {
-            return nil
-        }
-        if let mermaid = text[..<range.lowerBound].range(of: "mermaid", options: [.backwards, .caseInsensitive]),
-           text[mermaid.upperBound..<range.lowerBound].allSatisfy({ $0.isWhitespace || $0 == "_" }) {
-            return mermaid.lowerBound..<range.upperBound
-        }
-        return range
     }
 
     private static func splitMermaidTail(_ text: String) -> (diagram: String, after: String) {
@@ -289,7 +281,7 @@ enum MessagePart {
     }
 
     private static func looksLikeMermaid(_ body: String) -> Bool {
-        firstMermaidRange(in: body) != nil
+        MermaidTextDetector.firstRange(in: body) != nil
     }
 
     private static func newlineCount(_ text: String) -> Int {

@@ -10,13 +10,23 @@ swiftc -parse-as-library Sources/Bubble/AcpUpdateDelivery.swift scripts/check_ac
 swiftc -parse-as-library Sources/Bubble/ProseFormat.swift scripts/check_prose.swift -o /tmp/bubble-check-prose
 /tmp/bubble-check-prose
 
+swiftc -O -parse-as-library \
+  Sources/Bubble/ProseFormat.swift \
+  Sources/Bubble/MarkdownFiles.swift \
+  Sources/Bubble/OverlayLayoutPolicy.swift \
+  Sources/Bubble/WorkspaceTranscriptRenderPlan.swift \
+  Sources/Bubble/TranscriptProse.swift \
+  scripts/check_workspace_render_perf.swift \
+  -o /tmp/bubble-check-workspace-render-perf
+/tmp/bubble-check-workspace-render-perf
+
 swiftc -parse-as-library Sources/Bubble/TranscriptStream.swift Sources/Bubble/ProseFormat.swift scripts/check_transcript_stream.swift -o /tmp/bubble-check-stream
 /tmp/bubble-check-stream
 
 swiftc -parse-as-library Sources/Bubble/OverlayLayoutPolicy.swift Sources/Bubble/OverlayRenderPolicy.swift scripts/check_overlay_layout.swift -o /tmp/bubble-check-layout
 /tmp/bubble-check-layout
 
-swiftc -parse-as-library Sources/Bubble/SideStage.swift scripts/check_side_stage.swift -o /tmp/bubble-check-side-stage
+swiftc -parse-as-library Sources/Bubble/SideStage.swift Sources/Bubble/WorkspaceTranscriptRenderPlan.swift scripts/check_side_stage.swift -o /tmp/bubble-check-side-stage
 /tmp/bubble-check-side-stage
 
 swiftc -parse-as-library Sources/Bubble/TranscriptInteractionPolicy.swift scripts/check_transcript_interactions.swift -o /tmp/bubble-check-transcript-interactions

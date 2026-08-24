@@ -110,6 +110,12 @@ enum ProseBlock: Equatable {
 
 enum ProseParser {
     static func blocks(in text: String) -> [ProseBlock] {
+        ProseBlockCache.shared.blocks(for: text) {
+            parseBlocks(in: text)
+        }
+    }
+
+    private static func parseBlocks(in text: String) -> [ProseBlock] {
         let lines = text.components(separatedBy: "\n")
         var blocks: [ProseBlock] = []
         var paragraph: [String] = []
@@ -456,6 +462,60 @@ enum ProseParser {
             index = text.index(after: index)
         }
         return nil
+    }
+}
+
+private final class ProseBlockBox {
+    let blocks: [ProseBlock]
+
+    init(_ blocks: [ProseBlock]) {
+        self.blocks = blocks
+    }
+}
+
+/// Lazy transcript rows are discarded while scrolling and can be constructed
+/// again when they re-enter the viewport. Keep the semantic parse separate
+/// from the SwiftUI view lifetime so revisiting a long answer stays cheap.
+private final class ProseBlockCache {
+    static let shared = ProseBlockCache()
+
+    private let cache: NSCache<NSString, ProseBlockBox> = {
+        let cache = NSCache<NSString, ProseBlockBox>()
+        cache.countLimit = 256
+        cache.totalCostLimit = 12 * 1_024 * 1_024
+        return cache
+    }()
+
+    func blocks(for text: String, build: () -> [ProseBlock]) -> [ProseBlock] {
+        let key = text as NSString
+        if let cached = cache.object(forKey: key) {
+            return cached.blocks
+        }
+        let blocks = build()
+        cache.setObject(ProseBlockBox(blocks), forKey: key, cost: text.utf8.count)
+        return blocks
+    }
+}
+
+struct WorkspaceTranscriptWarmupItem: Sendable {
+    var identity: String
+    var text: String
+}
+
+enum WorkspaceTranscriptWarmup {
+    static func prepare(_ items: [WorkspaceTranscriptWarmupItem]) {
+        for item in items {
+            guard !Task.isCancelled else { return }
+            guard WorkspaceTranscriptChunker.isParagraphLocal(item.text) else { continue }
+            let visibleEdges = WorkspaceTranscriptChunker.visibleEdges(
+                item.text,
+                identity: item.identity
+            )
+            for chunk in visibleEdges {
+                guard !Task.isCancelled else { return }
+                _ = ProseParser.blocks(in: chunk)
+            }
+        }
     }
 }
 

@@ -58,6 +58,13 @@ enum SideStageContent: Equatable {
 }
 
 enum SideStagePresentationPolicy {
+    static func waitsForContent(
+        loadState: WorkspacePaneLoadState,
+        renderReady: Bool
+    ) -> Bool {
+        loadState == .loading || !renderReady
+    }
+
     static func content(
         workspacePresented: Bool,
         phase: WorkspacePanePresentationPhase
@@ -70,10 +77,6 @@ enum SideStagePresentationPolicy {
     /// content has been mounted, so the swap cannot flash an empty frame.
     static func placeholderOpacity(coverVisible: Bool) -> Double {
         coverVisible ? 1 : 0
-    }
-
-    static func transcriptOpacity(coverVisible: Bool) -> Double {
-        coverVisible ? 0 : 1
     }
 
     static func mountsTranscript(phase: WorkspacePanePresentationPhase) -> Bool {

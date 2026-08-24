@@ -82,6 +82,14 @@ struct SideStageCheck {
             "the Bubble placeholder remains until workspace content is available"
         )
         expect(
+            SideStagePresentationPolicy.waitsForContent(loadState: .ready, renderReady: false),
+            "the placeholder remains while transcript rendering warms in the background"
+        )
+        expect(
+            !SideStagePresentationPolicy.waitsForContent(loadState: .ready, renderReady: true),
+            "the side stage may reveal only after both data and rendering are ready"
+        )
+        expect(
             SideStagePresentationPolicy.content(
                 workspacePresented: false,
                 phase: .ready
@@ -97,14 +105,6 @@ struct SideStageCheck {
             "the placeholder fades out only after content has already been mounted"
         )
         expect(
-            SideStagePresentationPolicy.transcriptOpacity(coverVisible: true) == 0,
-            "mounted transcript stays hidden until the cover lifts"
-        )
-        expect(
-            SideStagePresentationPolicy.transcriptOpacity(coverVisible: false) == 1,
-            "settled transcript is fully visible after the cover lifts"
-        )
-        expect(
             SideStagePresentationPolicy.mountsTranscript(phase: .placeholder) == false,
             "session transcript is not mounted while the extra card is still a placeholder"
         )
@@ -112,6 +112,37 @@ struct SideStageCheck {
             SideStagePresentationPolicy.mountsTranscript(phase: .ready),
             "session transcript mounts under the cover before the placeholder fades"
         )
+        let paragraph = "一段需要被虚拟化的 workspace 助手输出。\n\n"
+        let source = String(repeating: paragraph, count: 120) + "结尾"
+        let chunks = WorkspaceTranscriptChunker.chunks(source, target: 500)
+        expect(chunks.count > 4, "large assistant output is split into lazy render units")
+        expect(chunks.joined() == source, "chunking preserves the exact assistant output")
+        let referenceMarkdown = String(repeating: "See [the result][report].\n\n", count: 80)
+            + "[report]: https://example.com/report"
+        expect(
+            WorkspaceTranscriptChunker.chunks(referenceMarkdown, target: 300) == [referenceMarkdown],
+            "document-scoped reference Markdown remains one render unit"
+        )
+        let embeddedFence = String(repeating: "paragraph\n\n", count: 80)
+            + "````text\nliteral ``` inside\n\nstill fenced\n````"
+        expect(
+            WorkspaceTranscriptChunker.chunks(embeddedFence, target: 300) == [embeddedFence],
+            "all fenced Markdown remains one render unit"
+        )
+        for root in ["graph TD", "journey", "gantt", "pie", "mindmap", "gitGraph", "xychart-beta"] {
+            let diagram = root + "\n\n" + String(repeating: "A --> B\n\n", count: 100)
+            expect(
+                WorkspaceTranscriptChunker.chunks(diagram, target: 300) == [diagram],
+                "unfenced \(root) Mermaid remains one render unit"
+            )
+        }
+        for root in ["mermaid journey", "mermaid_gantt", "Diagram: graph TD"] {
+            let diagram = root + "\n\n" + String(repeating: "A --> B\n\n", count: 100)
+            expect(
+                WorkspaceTranscriptChunker.chunks(diagram, target: 300) == [diagram],
+                "production-recognized \(root) Mermaid remains one render unit"
+            )
+        }
         expect(
             !SideStageChromePolicy.waitsForPanelSettleToRevealChrome(),
             "the extra card fades immediately instead of waiting for the panel spring"

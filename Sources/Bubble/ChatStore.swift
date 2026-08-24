@@ -166,6 +166,9 @@ final class ChatStore {
     var workspacePaneLoadState: WorkspacePaneLoadState = .idle
     var workspacePanePresentationPhase: WorkspacePanePresentationPhase = .ready
     var workspacePaneCoverVisible = true
+    private var workspacePaneRenderReady = true
+    private var workspacePaneRenderGeneration = 0
+    @ObservationIgnored private var workspacePaneWarmupTask: Task<Void, Never>?
     var sideStageChromeVisible = false
     var visibleScreenWidth: CGFloat = 1512
     var slashCommands: [SlashCommand] = SlashCommand.builtIn
@@ -471,6 +474,7 @@ final class ChatStore {
             ]
             workspacePaneLoadState = .loading
         }
+        prewarmWorkspacePaneRendering(workspacePaneItems)
         workspacePaneLoadGeneration += 1
         let generation = workspacePaneLoadGeneration
         workspacePaneScrollToken += 1
@@ -500,6 +504,10 @@ final class ChatStore {
     }
 
     private func clearWorkspaceStage(keepingItems: Bool) {
+        workspacePaneWarmupTask?.cancel()
+        workspacePaneWarmupTask = nil
+        workspacePaneRenderGeneration += 1
+        workspacePaneRenderReady = true
         workspaceStage = nil
         workspacePanePresentationPhase = .ready
         workspacePaneCoverVisible = true
@@ -513,7 +521,10 @@ final class ChatStore {
 
     func revealWorkspacePaneContent() {
         guard workspaceStage != nil else { return }
-        if workspacePaneLoadState == .loading {
+        if SideStagePresentationPolicy.waitsForContent(
+            loadState: workspacePaneLoadState,
+            renderReady: workspacePaneRenderReady
+        ) {
             workspacePanePresentationPhase = .waitingForContent
             workspacePaneCoverVisible = true
             return
@@ -527,7 +538,11 @@ final class ChatStore {
     }
 
     private func workspacePaneContentDidBecomeAvailable() {
-        guard workspacePanePresentationPhase == .waitingForContent else { return }
+        guard workspacePanePresentationPhase == .waitingForContent,
+              !SideStagePresentationPolicy.waitsForContent(
+                  loadState: workspacePaneLoadState,
+                  renderReady: workspacePaneRenderReady
+              ) else { return }
         workspacePanePresentationPhase = .placeholder
         onWorkspacePanePresentationRequested?()
     }
@@ -746,6 +761,7 @@ final class ChatStore {
             visibleRows = projected
         }
         workspacePaneItems = visibleRows
+        prewarmWorkspacePaneRendering(visibleRows)
         if childBusy {
             workspacePaneRowsBySession[sessionId] = visibleRows
             workspacePaneLoadState = .ready
@@ -762,6 +778,51 @@ final class ChatStore {
         }
         cacheWorkspacePaneRows(projected)
         workspacePaneScrollToken += 1
+    }
+
+    private func prewarmWorkspacePaneRendering(_ rows: [ChatItem]) {
+        workspacePaneWarmupTask?.cancel()
+        workspacePaneWarmupTask = nil
+        let streamingID = workspacePaneStreamingAssistantId
+        let items = rows.compactMap { item -> WorkspaceTranscriptWarmupItem? in
+            guard item.kind == .assistant,
+                  item.id != streamingID,
+                  !item.text.isEmpty else { return nil }
+            return WorkspaceTranscriptWarmupItem(
+                identity: item.id.uuidString,
+                text: item.text
+            )
+        }
+        workspacePaneRenderGeneration += 1
+        let generation = workspacePaneRenderGeneration
+        guard !items.isEmpty else {
+            workspacePaneRenderReady = true
+            workspacePaneContentDidBecomeAvailable()
+            return
+        }
+        workspacePaneRenderReady = false
+        let warmupTask = Task.detached(priority: .userInitiated) {
+            for item in items {
+                guard !Task.isCancelled else { return }
+                for edge in WorkspaceTranscriptChunker.visibleEdges(
+                    item.text,
+                    identity: item.identity
+                ) {
+                    MessagePart.prewarmDisplay(edge)
+                }
+            }
+            WorkspaceTranscriptWarmup.prepare(items)
+        }
+        workspacePaneWarmupTask = warmupTask
+        Task { @MainActor [weak self] in
+            await warmupTask.value
+            guard let self,
+                  generation == self.workspacePaneRenderGeneration,
+                  self.workspaceStage != nil else { return }
+            self.workspacePaneWarmupTask = nil
+            self.workspacePaneRenderReady = true
+            self.workspacePaneContentDidBecomeAvailable()
+        }
     }
 
     private func cacheWorkspacePaneRows(_ rows: [ChatItem]) {
