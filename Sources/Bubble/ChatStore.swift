@@ -1764,6 +1764,7 @@ final class ChatStore {
                     applyConversationTree(snapshot, replacingTranscript: true, persistSelection: false)
                     appendUserItem(for: prompt)
                 }
+                let promptSessionID = client.sessionId
                 let wrapped = wrappedText(for: prompt)
                 let stop = try await client.prompt(
                     wrapped,
@@ -1772,7 +1773,10 @@ final class ChatStore {
                 )
                 guard nonce == self.runNonce else { return }
                 status = stop == "end_turn" || stop == "cancelled" ? "ready" : stop
-                await refreshConversationTree()
+                await refreshConversationTree(
+                    expectedRunNonce: nonce,
+                    expectedSessionID: promptSessionID
+                )
             } catch {
                 guard nonce == self.runNonce else { return }
                 if let branch = prompt.branch {
@@ -2385,8 +2389,9 @@ final class ChatStore {
         let trimmed = args.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
             draft = "/tree "
+            let treeSessionID = client.sessionId
             Task { @MainActor in
-                await refreshConversationTree()
+                await refreshConversationTree(expectedSessionID: treeSessionID)
                 requestFocus()
             }
             requestFocus()
@@ -2824,9 +2829,14 @@ final class ChatStore {
         return nil
     }
 
-    private func refreshConversationTree() async {
+    private func refreshConversationTree(
+        expectedRunNonce: Int? = nil,
+        expectedSessionID: String? = nil
+    ) async {
         do {
             let snapshot = try await client.conversationTree()
+            if let expectedRunNonce, expectedRunNonce != runNonce { return }
+            if let expectedSessionID, expectedSessionID != client.sessionId { return }
             applyConversationTree(snapshot, replacingTranscript: false)
         } catch {
             OverlayLog.write("conversation tree refresh failed: \(friendly(error))")
@@ -2838,9 +2848,9 @@ final class ChatStore {
             var snapshot = try await client.conversationTree()
             if let sessionID = client.sessionId,
                let savedLeaf = Self.savedConversationLeaf(sessionID: sessionID),
-               savedLeaf != snapshot.leafID,
-               snapshot.entries.contains(where: { $0.id == savedLeaf }) {
-                snapshot = try await client.selectConversationLeaf(savedLeaf)
+               let restoredLeaf = snapshot.restoredLeafID(savedLeafID: savedLeaf),
+               restoredLeaf != snapshot.leafID {
+                snapshot = try await client.selectConversationLeaf(restoredLeaf)
             }
             applyConversationTree(snapshot, replacingTranscript: replacingTranscript)
         } catch {
@@ -3714,10 +3724,18 @@ final class ChatStore {
                 if !isConnected {
                     await connect()
                 }
+                let relaySessionID = client.sessionId
                 let text = WorkspaceRegistry.injectionPrompt(brief, home: OverlayPaths.home.path)
                 _ = try await client.prompt(text)
                 guard nonce == self.runNonce else { return }
                 status = "ready"
+                // The relay is a real continuation of the main Pi session.
+                // Refresh its leaf before persisting so a later restore cannot
+                // stop at the preceding workspace tool call.
+                await refreshConversationTree(
+                    expectedRunNonce: nonce,
+                    expectedSessionID: relaySessionID
+                )
             } catch {
                 guard nonce == self.runNonce else { return }
                 items.append(ChatItem(kind: .system, text: friendly(error)))

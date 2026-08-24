@@ -125,6 +125,22 @@ struct ConversationTreeSnapshot: Equatable, Sendable {
         ConversationTreeSnapshot(entries: entries, leafID: leafID)
     }
 
+    /// Saved selections normally name terminal branch tips. If the physical
+    /// path has continued directly from that entry, the saved value is only a
+    /// stale cursor and restoring it would hide the continuation. A selection
+    /// on a sibling branch remains intentional and still wins.
+    func restoredLeafID(savedLeafID: String?) -> String? {
+        guard let savedLeafID,
+              entries.contains(where: { $0.id == savedLeafID }) else {
+            return leafID
+        }
+        guard savedLeafID != leafID else { return savedLeafID }
+        if activePath.contains(where: { $0.id == savedLeafID }) {
+            return leafID
+        }
+        return savedLeafID
+    }
+
     func variants(around entryID: String) -> [ConversationVariant] {
         guard let selected = entries.first(where: { $0.id == entryID }), selected.isUserMessage else {
             return []

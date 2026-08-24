@@ -104,6 +104,14 @@ require(transcript.first?.branchable == true, "plain text user messages remain b
 let oldBranch = snapshot.selecting(leafID: "a2a")
 require(oldBranch.activePath.map(\.id) == ["model", "u1", "a1", "u2a", "a2a"], "selecting an older leaf is deterministic")
 require(oldBranch.variants(around: "u2a").map(\.isCurrent) == [true, false], "variant selection follows restored leaf")
+require(
+    snapshot.restoredLeafID(savedLeafID: "a1") == "a2b",
+    "a stale saved cursor that became an ancestor advances to the physical leaf"
+)
+require(
+    snapshot.restoredLeafID(savedLeafID: "a2a") == "a2a",
+    "an explicitly selected sibling branch remains selected"
+)
 require(oldBranch.transcript.first(where: { $0.entryID == "u2a" })?.branchable == false, "structured user messages stay branch-protected")
 let structuredAssistant = ConversationTreeSnapshot(entries: [
     ConversationEntry(
