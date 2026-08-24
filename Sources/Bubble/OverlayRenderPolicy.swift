@@ -1,6 +1,12 @@
 import Foundation
 
 enum OverlayRenderPolicy {
+    /// AppKit's display-link animator owns side-stage geometry. Animating the
+    /// SwiftUI HStack as well interpolates the transcript width at subpixels,
+    /// which makes text look softer while the panel opens.
+    static let shouldAnimateSideStageContentLayout = false
+    static let shouldRefreshHostingSurfaceAfterFrameSettle = true
+
     /// AppKit frame updates are for chrome size, not streaming text.
     static func layoutNeedsApply(previous: OverlayLayout?, next: OverlayLayout) -> Bool {
         previous != next

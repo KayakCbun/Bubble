@@ -6,6 +6,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
 
     private let panel = OverlayPanel()
     private let rootView = OverlayRootView(frame: .zero)
+    private weak var hostingView: NSView?
     private let tapMonitor = CommandTapMonitor()
     private var mouseMonitor: Any?
     private var localKeys: Any?
@@ -24,6 +25,8 @@ final class OverlayController: NSObject, NSWindowDelegate {
     private var lastAppliedLayout: OverlayLayout?
     private let frameAnimator = OverlayFrameAnimator()
     private var commandReturnApplication: NSRunningApplication?
+    private var workspaceRevealGeneration = 0
+    private var workspaceRevealPending = false
 
     private let positionCenterXKey = "bubble.position.centerX"
     private let positionBottomYKey = "bubble.position.bottomY"
@@ -248,6 +251,9 @@ final class OverlayController: NSObject, NSWindowDelegate {
         store.onHideOverlay = { [weak self] in
             self?.hide()
         }
+        store.onWorkspacePanePresentationRequested = { [weak self] in
+            self?.requestWorkspacePaneReveal()
+        }
         let root = OverlayView(
             store: store,
             onEscape: { [weak self] in self?.hide() },
@@ -257,6 +263,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
             self?.scheduleApply(layout)
         }
         let hosting = NSHostingView(rootView: root)
+        hostingView = hosting
         hosting.wantsLayer = true
         hosting.safeAreaRegions = []
         hosting.layer?.backgroundColor = NSColor.clear.cgColor
@@ -389,6 +396,9 @@ final class OverlayController: NSObject, NSWindowDelegate {
             applyMask(layout: applied, width: chatWidth)
         }
         lastAppliedLayout = applied
+        if workspaceRevealPending, layout.previewWidth > 0, !destChanged {
+            scheduleWorkspacePaneRevealOnNextFrame()
+        }
     }
 
     private func position() {
@@ -512,11 +522,53 @@ final class OverlayController: NSObject, NSWindowDelegate {
         }
         targetPanelFrame = nil
         isUpdatingFrame = false
-        if OverlayRenderPolicy.shouldResumeStream(
+        if workspaceRevealPending,
+           OverlayRenderPolicy.shouldRefreshHostingSurfaceAfterFrameSettle {
+            hostingView?.needsDisplay = true
+        }
+        scheduleWorkspacePaneRevealOnNextFrame()
+        if !workspaceRevealPending,
+           OverlayRenderPolicy.shouldResumeStream(
             panelVisible: panel.isVisible,
             isMoving: isHiding || frameAnimator.isAnimating
         ) {
             store.setStreamUISuspended(false)
+        }
+    }
+
+    private func requestWorkspacePaneReveal() {
+        workspaceRevealPending = true
+        workspaceRevealGeneration += 1
+        store.setStreamUISuspended(true)
+        if (lastAppliedLayout?.previewWidth ?? 0) > 0,
+           !isUpdatingFrame,
+           !frameAnimator.isAnimating {
+            scheduleWorkspacePaneRevealOnNextFrame()
+        }
+    }
+
+    private func scheduleWorkspacePaneRevealOnNextFrame() {
+        guard workspaceRevealPending else { return }
+        let generation = workspaceRevealGeneration
+        OverlayPulse.shared.onNextFrame { [weak self] in
+            guard let self,
+                  generation == self.workspaceRevealGeneration,
+                  self.workspaceRevealPending,
+                  !self.isUpdatingFrame,
+                  !self.frameAnimator.isAnimating else { return }
+            self.workspaceRevealPending = false
+            self.store.revealWorkspacePaneContent()
+            OverlayPulse.shared.onNextFrame { [weak self] in
+                guard let self,
+                      generation == self.workspaceRevealGeneration,
+                      !self.workspaceRevealPending else { return }
+                if OverlayRenderPolicy.shouldResumeStream(
+                    panelVisible: self.panel.isVisible,
+                    isMoving: self.isHiding || self.frameAnimator.isAnimating
+                ) {
+                    self.store.setStreamUISuspended(false)
+                }
+            }
         }
     }
 

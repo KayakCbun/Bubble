@@ -53,6 +53,42 @@ struct SideStageCheck {
         expect(SideStagePolicy.followLatest(status: "waiting"), "waiting cards follow the tail")
         expect(!SideStagePolicy.followLatest(status: "done"), "finished cards do not follow")
         expect(
+            !SideStagePolicy.shouldReloadWorkspacePaneOnResume(.loading),
+            "resuming presentation does not restart an in-flight workspace load"
+        )
+        expect(
+            SideStagePolicy.shouldReloadWorkspacePaneOnResume(.fallback),
+            "a fallback workspace pane can refresh after presentation resumes"
+        )
+        expect(
+            SideStagePresentationPolicy.content(
+                workspacePresented: true,
+                phase: .placeholder
+            ) == .placeholder,
+            "opening a workspace stage paints the lightweight placeholder first"
+        )
+        expect(
+            SideStagePresentationPolicy.content(
+                workspacePresented: true,
+                phase: .ready
+            ) == .transcript,
+            "workspace transcript mounts only after the panel settles"
+        )
+        expect(
+            SideStagePresentationPolicy.content(
+                workspacePresented: true,
+                phase: .waitingForContent
+            ) == .placeholder,
+            "the Bubble placeholder remains until workspace content is available"
+        )
+        expect(
+            SideStagePresentationPolicy.content(
+                workspacePresented: false,
+                phase: .ready
+            ) == .hidden,
+            "a closed workspace stage mounts neither placeholder nor transcript"
+        )
+        expect(
             SideStagePolicy.escapeAction(
                 showingMarkdown: true,
                 workspaceStacked: true,

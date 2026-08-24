@@ -100,6 +100,14 @@ struct OverlayLayoutCheck {
             OverlayRenderPolicy.shouldAnimateSideStageResize(previousPreviewWidth: 560, nextPreviewWidth: 560),
             "same-width settled layouts retain ordinary panel animation policy"
         )
+        expect(
+            !OverlayRenderPolicy.shouldAnimateSideStageContentLayout,
+            "AppKit owns side-stage geometry so SwiftUI must not rescale transcript text"
+        )
+        expect(
+            OverlayRenderPolicy.shouldRefreshHostingSurfaceAfterFrameSettle,
+            "pixel-aligned frame settle refreshes the hosting surface for crisp text"
+        )
         let closedOrigin = OverlayLayoutPolicy.panelOriginX(centerX: 500, contentWidth: 760, bleed: 16)
         let openOrigin = OverlayLayoutPolicy.panelOriginX(centerX: 500, contentWidth: 760 + 448, bleed: 16)
         expect(closedOrigin == 500 - (760 + 32) / 2, "closed panel is centered on the composer")

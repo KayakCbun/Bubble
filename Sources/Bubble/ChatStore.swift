@@ -164,6 +164,7 @@ final class ChatStore {
     var workspacePaneStreamingThoughtId: UUID?
     var workspacePaneScrollToken = 0
     var workspacePaneLoadState: WorkspacePaneLoadState = .idle
+    var workspacePanePresentationPhase: WorkspacePanePresentationPhase = .ready
     var visibleScreenWidth: CGFloat = 1512
     var slashCommands: [SlashCommand] = SlashCommand.builtIn
     var skills: [PiSkill] = []
@@ -178,6 +179,7 @@ final class ChatStore {
     var macEpoch = 0
     var slashHighlight = 0
     var onHideOverlay: (() -> Void)?
+    var onWorkspacePanePresentationRequested: (() -> Void)?
     var workspaceState = WorkspaceStoreFile()
     var draftClips: [DraftClip] = []
     var draftImages: [DraftImage] = []
@@ -291,6 +293,7 @@ final class ChatStore {
 
     func returnToWorkspaceStage() {
         markdownPreview = nil
+        revealWorkspacePaneContent()
         workspacePaneScrollToken += 1
     }
 
@@ -357,7 +360,12 @@ final class ChatStore {
     }
 
     func openWorkspaceStage(from item: ChatItem) {
+        let opensSideStage = workspaceStage == nil && markdownPreview == nil
+        let changesWorkspace = workspaceStage?.cardId != item.id
         markdownPreview = nil
+        if opensSideStage || changesWorkspace {
+            workspacePanePresentationPhase = .placeholder
+        }
         let status = item.workspaceStatus
         let follow = SideStagePolicy.followLatest(status: status)
         let sessionId = item.workspaceSessionId
@@ -438,16 +446,33 @@ final class ChatStore {
                 generation: generation
             )
         }
+        if workspacePanePresentationPhase == .placeholder {
+            onWorkspacePanePresentationRequested?()
+        }
     }
 
     private func clearWorkspaceStage(keepingItems: Bool) {
         workspaceStage = nil
+        workspacePanePresentationPhase = .ready
         if !keepingItems {
             workspacePaneItems = []
             workspacePaneLoadState = .idle
             workspacePaneStreamingAssistantId = nil
             workspacePaneStreamingThoughtId = nil
         }
+    }
+
+    func revealWorkspacePaneContent() {
+        guard workspaceStage != nil else { return }
+        workspacePanePresentationPhase = workspacePaneLoadState == .loading
+            ? .waitingForContent
+            : .ready
+    }
+
+    private func workspacePaneContentDidBecomeAvailable() {
+        guard workspacePanePresentationPhase == .waitingForContent else { return }
+        workspacePanePresentationPhase = .placeholder
+        onWorkspacePanePresentationRequested?()
     }
 
     private func fallbackWorkspacePaneItems(card: ChatItem) -> [ChatItem] {
@@ -575,6 +600,7 @@ final class ChatStore {
               workspacePaneLoadState == .loading else { return }
         workspacePaneItems = fallbackWorkspacePaneItems(card: item)
         workspacePaneLoadState = .fallback
+        workspacePaneContentDidBecomeAvailable()
         workspacePaneScrollToken += 1
         OverlayLog.write("workspace pane used local fallback after \(SideStagePolicy.workspaceLoadFallbackDelay)s")
     }
@@ -587,6 +613,7 @@ final class ChatStore {
         guard workspacePaneRequestIsCurrent(cardId: item.id, generation: generation) else { return }
         workspacePaneItems = fallbackWorkspacePaneItems(card: item)
         workspacePaneLoadState = .failed
+        workspacePaneContentDidBecomeAvailable()
         workspacePaneScrollToken += 1
     }
 
@@ -649,6 +676,7 @@ final class ChatStore {
             workspacePaneInvalidatedSessionIds.remove(sessionId)
             workspacePaneLoadState = .ready
         }
+        workspacePaneContentDidBecomeAvailable()
         cacheWorkspacePaneRows(projected)
         workspacePaneScrollToken += 1
     }
@@ -2518,12 +2546,14 @@ final class ChatStore {
         if !suspended {
             queueStreamFlush()
             if !childBusy,
-               workspacePaneLoadState != .ready,
+               SideStagePolicy.shouldReloadWorkspacePaneOnResume(workspacePaneLoadState),
                let stage = workspaceStage,
                let sessionId = stage.sessionId,
                !sessionId.isEmpty,
                let item = items.first(where: { $0.id == stage.cardId }) {
-                workspacePaneItems = [ChatItem(kind: .system, text: Self.workspacePaneLoadingText)]
+                if workspacePaneItems.isEmpty {
+                    workspacePanePresentationPhase = .waitingForContent
+                }
                 workspacePaneLoadState = .loading
                 workspacePaneLoadGeneration += 1
                 let generation = workspacePaneLoadGeneration

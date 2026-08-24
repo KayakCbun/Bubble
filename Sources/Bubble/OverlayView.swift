@@ -190,10 +190,14 @@ struct OverlayView: View {
                         }
                     if store.sideStagePresented {
                         sideStagePane
-                            .transition(.opacity)
                     }
                 }
-                .animation(OverlayMotion.panel, value: store.sideStagePresented)
+                .animation(
+                    OverlayRenderPolicy.shouldAnimateSideStageContentLayout
+                        ? OverlayMotion.panel
+                        : nil,
+                    value: store.sideStagePresented
+                )
             }
             VStack(spacing: 8) {
                 if let brief = store.activeWorkspaceBrief, brief.isActive {
@@ -295,7 +299,7 @@ struct OverlayView: View {
     private var sideStagePane: some View {
         ZStack {
             if let stage = store.workspaceStage {
-                workspaceSessionPane(stage)
+                workspaceStageContent(stage)
                     .opacity(store.markdownPreview == nil ? 1 : 0)
                     .allowsHitTesting(store.markdownPreview == nil)
             }
@@ -308,6 +312,52 @@ struct OverlayView: View {
         .environment(\.openMarkdownPreview) { path in
             store.openMarkdownPreview(path, fromWorkspacePane: store.workspaceStage != nil)
         }
+    }
+
+    @ViewBuilder
+    private func workspaceStageContent(_ stage: WorkspaceStage) -> some View {
+        switch SideStagePresentationPolicy.content(
+            workspacePresented: store.workspaceStage != nil,
+            phase: store.workspacePanePresentationPhase
+        ) {
+        case .hidden:
+            EmptyView()
+        case .placeholder:
+            workspaceSessionPlaceholder(stage)
+        case .transcript:
+            workspaceSessionPane(stage)
+        }
+    }
+
+    private func workspaceSessionPlaceholder(_ stage: WorkspaceStage) -> some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: "folder")
+                    .font(.system(size: 12, weight: .semibold))
+                Text(stage.name)
+                    .font(.system(size: 13, weight: .semibold))
+                    .lineLimit(1)
+                Spacer()
+            }
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            Divider().opacity(0.28)
+            VStack(spacing: 12) {
+                Image(nsImage: NSApp.applicationIconImage)
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFit()
+                    .frame(width: 46, height: 46)
+                    .opacity(0.72)
+                Text("Opening workspace…")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.tertiary)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .frame(width: previewWidth, height: transcriptHeight)
+        .frostedGlass(in: transcriptShape)
     }
 
     private func workspaceSessionPane(_ stage: WorkspaceStage) -> some View {

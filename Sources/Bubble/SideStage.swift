@@ -45,6 +45,28 @@ enum WorkspacePaneLoadState: Equatable {
     case failed
 }
 
+enum WorkspacePanePresentationPhase: Equatable {
+    case ready
+    case placeholder
+    case waitingForContent
+}
+
+enum SideStageContent: Equatable {
+    case hidden
+    case placeholder
+    case transcript
+}
+
+enum SideStagePresentationPolicy {
+    static func content(
+        workspacePresented: Bool,
+        phase: WorkspacePanePresentationPhase
+    ) -> SideStageContent {
+        guard workspacePresented else { return .hidden }
+        return phase == .ready ? .transcript : .placeholder
+    }
+}
+
 enum WorkspaceTurnRowKind: Equatable {
     case user
     case assistant
@@ -64,6 +86,10 @@ enum SideStagePolicy {
 
     static func shouldFallbackWorkspaceLoad(elapsed: TimeInterval) -> Bool {
         elapsed >= workspaceLoadFallbackDelay
+    }
+
+    static func shouldReloadWorkspacePaneOnResume(_ state: WorkspacePaneLoadState) -> Bool {
+        state != .ready && state != .loading
     }
 
     static func paneSeed(_ context: WorkspacePaneSeedContext) -> WorkspacePaneSeed {
