@@ -155,21 +155,33 @@ struct WorkspaceMountsCheck {
 
     static func injectionRoundTrip() {
         let brief = WorkspaceBrief(
+            runId: "run-123",
             path: "/Users/ada/Documents/work",
             name: "work",
             status: .done,
-            goal: "first line\nsecond line",
-            summary: "summary line one\nsummary line two",
+            goal: "first line\nsummary: this belongs to the goal",
+            summary: "summary line one\nquestion: this belongs to the summary",
             question: "continue?",
-            changedPaths: ["/tmp/report.json"]
+            changedPaths: ["/tmp/report,final.json"]
         )
-        let prompt = WorkspaceRegistry.injectionPrompt(brief, home: home.path)
+        let prompt = WorkspaceRegistry.injectionPrompt(
+            brief,
+            home: home.path,
+            sessionId: "child-456",
+            anchorEntryId: "user-789"
+        )
         let restored = WorkspaceRegistry.parseInjectionPrompt(prompt, home: home.path)
-        expect(restored?.path == brief.path, "relay prompt restores the workspace path")
-        expect(restored?.goal == brief.goal, "relay prompt restores a multiline goal")
-        expect(restored?.summary == brief.summary, "relay prompt restores a multiline summary")
-        expect(restored?.question == brief.question, "relay prompt restores the question")
-        expect(restored?.changedPaths == brief.changedPaths, "relay prompt restores changed paths")
+        expect(restored?.brief == brief, "structured relay payload restores the complete brief losslessly")
+        expect(restored?.sessionId == "child-456", "relay prompt restores the child session")
+        expect(restored?.anchorEntryId == "user-789", "relay prompt restores the workspace turn anchor")
+
+        let legacy = prompt
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { !$0.hasPrefix("bubble_workspace_relay_v1: ") }
+            .joined(separator: "\n")
+        let legacyRestored = WorkspaceRegistry.parseInjectionPrompt(legacy, home: home.path)
+        expect(legacyRestored?.brief.path == brief.path, "legacy relay prompts remain readable")
+        expect(legacyRestored?.brief.runId == nil, "legacy relays do not invent a run identity")
     }
 
     static func inferWaiting() {

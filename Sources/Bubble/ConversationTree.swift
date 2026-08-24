@@ -258,9 +258,13 @@ struct ConversationTreeSnapshot: Equatable, Sendable {
 
     private static func isWorkspaceRelayText(_ text: String) -> Bool {
         text.hasPrefix(
-            "The workspace run already finished. Summarize the result for the user in your own voice, then stop.\n"
+            """
+            The workspace run already finished. Summarize the result for the user in your own voice, then stop.
+            Do not call workspace_run, mount_workspace, bash, or any other tool.
+            Do not greet. Do not repeat the goal. Do not paste this block verbatim.
+
+            """
         )
-            && text.contains("\nDo not call workspace_run, mount_workspace, bash, or any other tool.\n")
             && text.contains("\nname: ")
             && text.contains("\npath: ")
             && text.contains("\nstatus: ")

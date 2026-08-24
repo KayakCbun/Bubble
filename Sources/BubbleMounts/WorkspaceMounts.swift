@@ -43,6 +43,24 @@ public struct WorkspaceBrief: Codable, Equatable, Sendable {
     }
 }
 
+public struct WorkspaceRelayRecord: Equatable, Sendable {
+    public var brief: WorkspaceBrief
+    public var sessionId: String?
+    public var anchorEntryId: String?
+
+    public init(brief: WorkspaceBrief, sessionId: String? = nil, anchorEntryId: String? = nil) {
+        self.brief = brief
+        self.sessionId = sessionId
+        self.anchorEntryId = anchorEntryId
+    }
+}
+
+private struct WorkspaceRelayPayloadV1: Codable {
+    var brief: WorkspaceBrief
+    var sessionId: String?
+    var anchorEntryId: String?
+}
+
 public struct WorkspaceMount: Codable, Equatable, Sendable {
     public var path: String
     public var name: String
@@ -452,7 +470,12 @@ public enum WorkspaceRegistry {
         """
     }
 
-    public static func injectionPrompt(_ brief: WorkspaceBrief, home: String) -> String {
+    public static func injectionPrompt(
+        _ brief: WorkspaceBrief,
+        home: String,
+        sessionId: String? = nil,
+        anchorEntryId: String? = nil
+    ) -> String {
         var lines = [
             "The workspace run already finished. Summarize the result for the user in your own voice, then stop.",
             "Do not call workspace_run, mount_workspace, bash, or any other tool.",
@@ -462,6 +485,11 @@ public enum WorkspaceRegistry {
             "status: \(brief.status.rawValue)",
             "goal: \(brief.goal)",
         ]
+        let payload = WorkspaceRelayPayloadV1(
+            brief: brief,
+            sessionId: sessionId,
+            anchorEntryId: anchorEntryId
+        )
         if !brief.summary.isEmpty {
             lines.append("summary: \(clip(brief.summary, maxSummaryChars))")
         }
@@ -471,16 +499,31 @@ public enum WorkspaceRegistry {
         if !brief.changedPaths.isEmpty {
             lines.append("changed_paths: \(brief.changedPaths.prefix(maxChangedPaths).joined(separator: ", "))")
         }
+        if let data = try? JSONEncoder().encode(payload) {
+            lines.append("bubble_workspace_relay_v1: \(data.base64EncodedString())")
+        }
         return lines.joined(separator: "\n")
     }
 
-    public static func parseInjectionPrompt(_ prompt: String, home: String) -> WorkspaceBrief? {
+    public static func parseInjectionPrompt(_ prompt: String, home: String) -> WorkspaceRelayRecord? {
         let signature = """
         The workspace run already finished. Summarize the result for the user in your own voice, then stop.
         Do not call workspace_run, mount_workspace, bash, or any other tool.
         Do not greet. Do not repeat the goal. Do not paste this block verbatim.
         """
         guard prompt.hasPrefix(signature + "\n") else { return nil }
+
+        if let encoded = prompt.split(separator: "\n").first(where: {
+            $0.hasPrefix("bubble_workspace_relay_v1: ")
+        })?.dropFirst("bubble_workspace_relay_v1: ".count),
+           let data = Data(base64Encoded: String(encoded)),
+           let payload = try? JSONDecoder().decode(WorkspaceRelayPayloadV1.self, from: data) {
+            return WorkspaceRelayRecord(
+                brief: payload.brief,
+                sessionId: payload.sessionId,
+                anchorEntryId: payload.anchorEntryId
+            )
+        }
 
         let labels = ["name", "path", "status", "goal", "summary", "question", "changed_paths"]
         func value(_ label: String) -> String? {
@@ -503,14 +546,16 @@ public enum WorkspaceRegistry {
         let changedPaths = value("changed_paths")?.split(separator: ",").map {
             $0.trimmingCharacters(in: .whitespacesAndNewlines)
         } ?? []
-        return WorkspaceBrief(
-            path: expandPath(shownPath, home: URL(fileURLWithPath: home)),
-            name: name,
-            status: status,
-            goal: goal,
-            summary: value("summary") ?? "",
-            question: value("question"),
-            changedPaths: changedPaths
+        return WorkspaceRelayRecord(
+            brief: WorkspaceBrief(
+                path: expandPath(shownPath, home: URL(fileURLWithPath: home)),
+                name: name,
+                status: status,
+                goal: goal,
+                summary: value("summary") ?? "",
+                question: value("question"),
+                changedPaths: changedPaths
+            )
         )
     }
 

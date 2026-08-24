@@ -400,9 +400,11 @@ final class ChatStore {
         }
         let status = item.workspaceStatus
         let follow = SideStagePolicy.followLatest(status: status)
-        let sessionId = item.workspaceSessionId
-            ?? workspaceState.mounts.first(where: { $0.path == item.workspacePath })?.sessionId
-            ?? childSessionId
+        let sessionId = follow
+            ? item.workspaceSessionId
+                ?? workspaceState.mounts.first(where: { $0.path == item.workspacePath })?.sessionId
+                ?? childSessionId
+            : item.workspaceSessionId
         let previousSessionId = workspaceStage?.sessionId
         let previousCardId = workspaceStage?.cardId
         let cachedRows = sessionId.flatMap { workspacePaneRowsBySession[$0] }
@@ -2990,16 +2992,22 @@ final class ChatStore {
         existingItems: [ChatItem],
         matchedLocalRows: inout Set<UUID>
     ) -> ChatItem {
-        guard let brief = WorkspaceRegistry.parseInjectionPrompt(record.text, home: OverlayPaths.home.path) else {
+        guard let relay = WorkspaceRegistry.parseInjectionPrompt(record.text, home: OverlayPaths.home.path) else {
             return Self.chatItem(record)
         }
+        let brief = relay.brief
         let prior = richTranscriptRows[Self.richKey(entryID: record.entryID, kind: .workspaceRun)]
-            ?? existingItems.last(where: { item in
+            ?? existingItems.first(where: { item in
                 item.kind == .workspaceRun
                     && !matchedLocalRows.contains(item.id)
-                    && item.workspacePath.map(WorkspaceRegistry.normalize) == WorkspaceRegistry.normalize(brief.path)
-                    && item.workspaceGoal?.trimmingCharacters(in: .whitespacesAndNewlines)
-                        == brief.goal.trimmingCharacters(in: .whitespacesAndNewlines)
+                    && (
+                        (brief.runId?.isEmpty == false && item.workspaceRunId == brief.runId)
+                            || (
+                                item.workspacePath.map(WorkspaceRegistry.normalize) == WorkspaceRegistry.normalize(brief.path)
+                                    && item.workspaceGoal?.trimmingCharacters(in: .whitespacesAndNewlines)
+                                        == brief.goal.trimmingCharacters(in: .whitespacesAndNewlines)
+                            )
+                    )
             })
         var card = prior ?? ChatItem(
             kind: .workspaceRun,
@@ -3022,6 +3030,9 @@ final class ChatStore {
         card.workspaceSummary = brief.summary
         card.workspaceQuestion = brief.question
         card.workspaceChangedPaths = brief.changedPaths
+        card.workspaceRunId = brief.runId ?? card.workspaceRunId
+        card.workspaceSessionId = relay.sessionId ?? card.workspaceSessionId
+        card.workspaceAnchorEntryId = relay.anchorEntryId ?? card.workspaceAnchorEntryId
         card.sourceEntryId = record.entryID
         card.sourceBranchable = false
         return card
@@ -3835,7 +3846,15 @@ final class ChatStore {
                     await connect()
                 }
                 let relaySessionID = client.sessionId
-                let text = WorkspaceRegistry.injectionPrompt(brief, home: OverlayPaths.home.path)
+                let card = items.last(where: {
+                    $0.kind == .workspaceRun && $0.workspaceRunId == brief.runId
+                })
+                let text = WorkspaceRegistry.injectionPrompt(
+                    brief,
+                    home: OverlayPaths.home.path,
+                    sessionId: card?.workspaceSessionId ?? childSessionId,
+                    anchorEntryId: card?.workspaceAnchorEntryId
+                )
                 _ = try await client.prompt(text)
                 guard nonce == self.runNonce else { return }
                 status = "ready"
