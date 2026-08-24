@@ -480,6 +480,10 @@ enum ProseReflow {
         let window = String(text.prefix(36))
         if let numbered = window.range(of: #"\d{1,2}\.\s"#, options: .regularExpression) {
             if window.distance(from: window.startIndex, to: numbered.lowerBound) <= 24 {
+                let prefix = window[..<numbered.lowerBound]
+                if prefix.hasSuffix("**") {
+                    return window.index(numbered.lowerBound, offsetBy: -2)
+                }
                 return numbered.lowerBound
             }
         }
@@ -498,7 +502,10 @@ enum ProseReflow {
 
     private static func matchNumbered(_ text: String, from start: String.Index, lineStart: Bool) -> Piece? {
         var index = start
-        if text[index] == "*" {
+        let boldTitle = peek(text, from: start, count: 2) == "**"
+        if boldTitle {
+            index = text.index(index, offsetBy: 2)
+        } else if text[index] == "*" {
             while index < text.endIndex, text[index] == "*" {
                 index = text.index(after: index)
             }
@@ -523,7 +530,7 @@ enum ProseReflow {
         if consumed < text.endIndex, text[consumed] == " " {
             consumed = text.index(after: consumed)
         }
-        return Piece(markup: "\(digits). ", next: consumed)
+        return Piece(markup: "\(digits). \(boldTitle ? "**" : "")", next: consumed)
     }
 
     private static func matchBullet(_ text: String, from start: String.Index, lineStart: Bool) -> Piece? {

@@ -23,6 +23,7 @@ struct ProseCheck {
         testChecklistReflow()
         testCodeSpanProtected()
         testEmphasisBoundaryWhitespace()
+        testBoldNumberedTitles()
         testKinsokuWrap()
         testTableReflow()
         print("PASS: prose reflow and code tokens")
@@ -120,6 +121,21 @@ struct ProseCheck {
                 == [.strong("边界划得很干净。\n但数据库风险仍需解决。"), .text(" ")],
             "the production delimiter seam emits semantic strong text with trailing whitespace outside"
         )
+    }
+
+    static func testBoldNumberedTitles() {
+        let source = """
+        ## 主要风险，按严重度排
+
+        **1. 多维表格是唯一存储（10.1、9.3）。** 业务数据、全量版本都在 Base。
+
+        **2. 检索快照同步保存门槛（5.4）。** 每次在线检索必须先写完快照再返回。
+        """
+        let rendered = ProseReflow.reflow(source)
+        expectContains(rendered, "\n1. **多维表格是唯一存储（10.1、9.3）。** 业务数据", "preserve the first bold numbered title")
+        expectContains(rendered, "\n2. **检索快照同步保存门槛（5.4）。** 每次在线检索", "preserve the second bold numbered title")
+        expect(!rendered.contains("\n**\n"), "do not leave an orphan emphasis marker\n---\n\(rendered)\n---")
+        expect(!rendered.contains("。 **"), "do not move closing emphasis after punctuation\n---\n\(rendered)\n---")
     }
 
     static func testKinsokuWrap() {
