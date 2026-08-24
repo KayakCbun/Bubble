@@ -199,14 +199,11 @@ private struct MermaidZoomView: View {
 
     private func renderHiRes() {
         let src = MessagePart.nativeMermaidSource(source)
-        DispatchQueue.global(qos: .userInitiated).async {
-            var theme = DiagramTheme.zincLight
-            theme.transparent = !MermaidCanvasAppearance.isOpaqueWhite
-            let rendered = try? MermaidRenderer.renderImage(source: src, theme: theme, scale: 3.0)
-            DispatchQueue.main.async {
-                if let rendered {
-                    hiRes = MermaidImageFix.upright(rendered)
-                }
+        var theme = DiagramTheme.zincLight
+        theme.transparent = !MermaidCanvasAppearance.isOpaqueWhite
+        MermaidImageRenderer.render(source: src, theme: theme, scale: 3.0) { result in
+            if case .success(let upright) = result, let upright {
+                hiRes = upright
             }
         }
     }

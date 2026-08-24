@@ -58,7 +58,6 @@ struct OverlayView: View {
     @State private var expandedToolGroups: Set<String> = []
     @State private var expandedTools: Set<UUID> = []
     @State private var expandedWorkspaceRuns: Set<UUID> = []
-    @State private var hoveredUserMessage: UUID?
     @State private var followLatest = true
     @State private var followQueued = false
     @StateObject private var ime = IMEComposingMonitor()
@@ -1136,11 +1135,9 @@ struct OverlayView: View {
         let names = item.imageNames ?? []
         let variants = store.variants(for: item)
         let currentVariant = variants.firstIndex(where: \.isCurrent)
-        let showBranchControls = ConversationBranchControlsPolicy.showsInlineRow(
-            isHovered: hoveredUserMessage == item.id,
+        let showVariantSwitcher = ConversationBranchControlsPolicy.showsUserVariantSwitcher(
             variantCount: variants.count
         )
-        let showHoverBranchButton = hoveredUserMessage == item.id && variants.isEmpty
         return HStack {
             Spacer(minLength: 72)
             VStack(alignment: .trailing, spacing: 8) {
@@ -1163,33 +1160,30 @@ struct OverlayView: View {
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.secondary)
                 }
-                if showBranchControls, item.sourceEntryId != nil, item.deliveryState == nil {
+                if showVariantSwitcher, item.sourceEntryId != nil, item.deliveryState == nil,
+                   let currentVariant {
                     HStack(spacing: 7) {
-                        userBranchButton(item, imageNames: names)
-
-                        if variants.count > 1, let currentVariant {
-                            Button {
-                                store.switchConversationBranch(to: variants[currentVariant - 1])
-                            } label: {
-                                Image(systemName: "chevron.left")
-                                    .font(.system(size: 10, weight: .semibold))
-                            }
-                            .buttonStyle(.plain)
-                            .disabled(currentVariant == 0 || store.isBusy || store.childBusy || store.isSwitchingBranch)
-
-                            Text("\(currentVariant + 1) / \(variants.count)")
-                                .font(.system(size: 10, weight: .medium).monospacedDigit())
-                                .foregroundStyle(.tertiary)
-
-                            Button {
-                                store.switchConversationBranch(to: variants[currentVariant + 1])
-                            } label: {
-                                Image(systemName: "chevron.right")
-                                    .font(.system(size: 10, weight: .semibold))
-                            }
-                            .buttonStyle(.plain)
-                            .disabled(currentVariant + 1 >= variants.count || store.isBusy || store.childBusy || store.isSwitchingBranch)
+                        Button {
+                            store.switchConversationBranch(to: variants[currentVariant - 1])
+                        } label: {
+                            Image(systemName: "chevron.left")
+                                .font(.system(size: 10, weight: .semibold))
                         }
+                        .buttonStyle(.plain)
+                        .disabled(currentVariant == 0 || store.isBusy || store.childBusy || store.isSwitchingBranch)
+
+                        Text("\(currentVariant + 1) / \(variants.count)")
+                            .font(.system(size: 10, weight: .medium).monospacedDigit())
+                            .foregroundStyle(.tertiary)
+
+                        Button {
+                            store.switchConversationBranch(to: variants[currentVariant + 1])
+                        } label: {
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 10, weight: .semibold))
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(currentVariant + 1 >= variants.count || store.isBusy || store.childBusy || store.isSwitchingBranch)
                     }
                 }
             }
@@ -1199,55 +1193,7 @@ struct OverlayView: View {
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
                     .fill(Color.primary.opacity(0.08))
             )
-            if item.sourceEntryId != nil, item.deliveryState == nil, variants.isEmpty {
-                userBranchButton(item, imageNames: names)
-                    .opacity(showHoverBranchButton ? 1 : 0)
-                    .allowsHitTesting(showHoverBranchButton)
-                    .accessibilityHidden(!showHoverBranchButton)
-                    .frame(width: 22, height: 20)
-            }
         }
-        .onHover { hovering in
-            if hovering {
-                hoveredUserMessage = item.id
-            } else if hoveredUserMessage == item.id {
-                hoveredUserMessage = nil
-            }
-        }
-        .animation(OverlayMotion.quick, value: showHoverBranchButton)
-        .contextMenu {
-            if item.sourceEntryId != nil, item.deliveryState == nil, names.isEmpty, item.sourceBranchable != false {
-                Button("Edit and branch") { store.beginBranch(from: item) }
-                    .disabled(store.isBusy || store.childBusy || store.isSwitchingBranch)
-            }
-        }
-        .accessibilityAction(named: "Edit and branch") {
-            store.beginBranch(from: item)
-        }
-    }
-
-    private func userBranchButton(_ item: ChatItem, imageNames: [String]) -> some View {
-        Button {
-            store.beginBranch(from: item)
-        } label: {
-            Image(systemName: "arrow.triangle.branch")
-                .font(.system(size: 11, weight: .semibold))
-                .frame(width: 22, height: 20)
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(.secondary)
-        .disabled(
-            store.isBusy
-                || store.childBusy
-                || store.isSwitchingBranch
-                || !imageNames.isEmpty
-                || item.sourceBranchable == false
-        )
-        .help(
-            imageNames.isEmpty && item.sourceBranchable != false
-                ? "Edit this message and branch"
-                : "Messages with attachments cannot be branched yet"
-        )
     }
 
     private func queuedUserBubble(_ message: QueuedUserMessage) -> some View {
@@ -1343,7 +1289,10 @@ struct OverlayView: View {
     private func assistantBubble(_ item: ChatItem) -> some View {
         let live = store.isBusy && store.streamingAssistantId == item.id
         let text = item.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let showBranchControl = hoveredUserMessage == item.id && item.sourceEntryId != nil
+        let showBranchControl = ConversationBranchControlsPolicy.showsAssistantBranchAction(
+            hasSourceEntry: item.sourceEntryId != nil,
+            isStreaming: live
+        )
         return VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 MessageBody(text: item.text, streaming: live)
@@ -1359,28 +1308,20 @@ struct OverlayView: View {
                         Button {
                             store.beginBranch(from: item)
                         } label: {
-                            HStack(spacing: 4) {
-                                Image(systemName: "arrow.triangle.branch")
-                                Text("Branch from here")
-                            }
-                            .font(.system(size: 10.5, weight: .medium))
+                            Image(systemName: "arrow.triangle.branch")
+                                .font(.system(size: 11, weight: .medium))
+                                .frame(width: 28, height: 28)
+                                .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                         .foregroundStyle(.secondary)
                         .disabled(store.isBusy || store.childBusy || store.isSwitchingBranch || item.sourceBranchable == false)
-                        .help("Start an alternative after this response")
+                        .help("Branch from here")
+                        .accessibilityLabel("Branch from here")
                     }
                 }
             }
         }
-        .onHover { hovering in
-            if hovering {
-                hoveredUserMessage = item.id
-            } else if hoveredUserMessage == item.id {
-                hoveredUserMessage = nil
-            }
-        }
-        .animation(OverlayMotion.quick, value: showBranchControl)
         .contextMenu {
             if item.sourceEntryId != nil, item.sourceBranchable != false {
                 Button("Branch from here") { store.beginBranch(from: item) }

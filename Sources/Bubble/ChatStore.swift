@@ -261,8 +261,14 @@ final class ChatStore {
     }
 
     let client = AcpClient()
+    private static let catalogRefreshQueue = DispatchQueue(
+        label: "local.bubble.catalog-refresh",
+        qos: .userInitiated,
+        autoreleaseFrequency: .workItem
+    )
     private var persistWork: DispatchWorkItem?
     private var richTranscriptRows: [String: ChatItem] = [:]
+    private var mountSkillRefreshGeneration = 0
 
     init() {
         OverlayPaths.bootstrap()
@@ -676,7 +682,7 @@ final class ChatStore {
 
     func refreshCatalog() {
         let workspace = OverlayPaths.workspace
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        Self.catalogRefreshQueue.async { [weak self] in
             let skills = PiCatalog.loadSkills(workspace: workspace)
             let prompts = PiCatalog.loadPrompts(workspace: workspace)
             let files = PiCatalog.indexFiles(workspace: workspace)
@@ -2499,11 +2505,20 @@ final class ChatStore {
     }
 
     private func refreshMountSkills() {
-        var map: [String: [String]] = [:]
-        for mount in workspaceState.mounts {
-            map[mount.path] = PiCatalog.projectSkillNames(at: URL(fileURLWithPath: mount.path))
+        mountSkillRefreshGeneration += 1
+        let generation = mountSkillRefreshGeneration
+        let paths = workspaceState.mounts.map(\.path)
+        Self.catalogRefreshQueue.async { [weak self] in
+            var map: [String: [String]] = [:]
+            for path in paths {
+                map[path] = PiCatalog.projectSkillNames(at: URL(fileURLWithPath: path))
+            }
+            DispatchQueue.main.async {
+                guard let self, self.mountSkillRefreshGeneration == generation else { return }
+                self.mountSkillNames = map
+                self.macEpoch += 1
+            }
         }
-        mountSkillNames = map
     }
 
     @discardableResult

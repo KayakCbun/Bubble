@@ -11,8 +11,12 @@ enum StartupTranscriptPolicy {
 }
 
 enum ConversationBranchControlsPolicy {
-    static func showsInlineRow(isHovered: Bool, variantCount: Int) -> Bool {
-        variantCount > 0
+    static func showsUserVariantSwitcher(variantCount: Int) -> Bool {
+        variantCount > 1
+    }
+
+    static func showsAssistantBranchAction(hasSourceEntry: Bool, isStreaming: Bool) -> Bool {
+        hasSourceEntry && !isStreaming
     }
 }
 

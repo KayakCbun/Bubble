@@ -30,12 +30,20 @@ private enum TranscriptInteractionCheck {
             "a ready signed-in runtime must not restore the stale setup card"
         )
         expect(
-            !ConversationBranchControlsPolicy.showsInlineRow(isHovered: true, variantCount: 0),
-            "hovering an unbranched user message must not insert a height-changing row"
+            !ConversationBranchControlsPolicy.showsUserVariantSwitcher(variantCount: 1),
+            "a user message with no alternatives must not show a branch action row"
         )
         expect(
-            ConversationBranchControlsPolicy.showsInlineRow(isHovered: false, variantCount: 2),
+            ConversationBranchControlsPolicy.showsUserVariantSwitcher(variantCount: 2),
             "existing branch variants keep their stable inline switcher"
+        )
+        expect(
+            ConversationBranchControlsPolicy.showsAssistantBranchAction(hasSourceEntry: true, isStreaming: false),
+            "a persisted assistant response must always show its branch action"
+        )
+        expect(
+            !ConversationBranchControlsPolicy.showsAssistantBranchAction(hasSourceEntry: true, isStreaming: true),
+            "a streaming assistant response must wait before offering a branch action"
         )
         expect(
             !TranscriptFollowPolicy.followsContentHeightChange(isBusy: false),

@@ -897,28 +897,26 @@ struct MermaidView: View {
     }
 
     private func renderNative(_ src: String, dark: Bool, token: UUID) {
-        DispatchQueue.global(qos: .userInitiated).async {
-            var theme = dark ? DiagramTheme.zincDark : DiagramTheme.zincLight
-            theme.transparent = true
-            let native = MessagePart.nativeMermaidSource(src)
-            do {
-                let rendered = try MermaidRenderer.renderImage(source: native, theme: theme, scale: 2.0)
-                DispatchQueue.main.async {
-                    guard renderID == token else { return }
-                    if let rendered {
-                        image = MermaidImageFix.upright(rendered)
-                        useWeb = false
-                    } else {
-                        OverlayLog.write("beautiful-mermaid returned nil, falling back to mermaid.js")
-                        useWeb = true
-                    }
-                }
-            } catch {
-                OverlayLog.write("beautiful-mermaid failed: \(error.localizedDescription)")
-                DispatchQueue.main.async {
-                    guard renderID == token else { return }
+        var theme = dark ? DiagramTheme.zincDark : DiagramTheme.zincLight
+        theme.transparent = true
+        MermaidImageRenderer.render(
+            source: MessagePart.nativeMermaidSource(src),
+            theme: theme,
+            scale: 2.0
+        ) { result in
+            guard renderID == token else { return }
+            switch result {
+            case .success(let upright):
+                if let upright {
+                    image = upright
+                    useWeb = false
+                } else {
+                    OverlayLog.write("beautiful-mermaid returned nil, falling back to mermaid.js")
                     useWeb = true
                 }
+            case .failure(let error):
+                OverlayLog.write("beautiful-mermaid failed: \(error.localizedDescription)")
+                useWeb = true
             }
         }
     }
@@ -1067,6 +1065,34 @@ enum MermaidImageFix {
         ctx.scaleBy(x: 1, y: -1)
         ctx.draw(cgImage, in: CGRect(origin: .zero, size: size))
         return flipped
+    }
+}
+
+enum MermaidImageRenderer {
+    private static let queue = DispatchQueue(
+        label: "local.bubble.mermaid-render",
+        qos: .userInitiated,
+        autoreleaseFrequency: .workItem
+    )
+
+    static func render(
+        source: String,
+        theme: DiagramTheme,
+        scale: CGFloat,
+        completion: @escaping (Result<NSImage?, Error>) -> Void
+    ) {
+        queue.async {
+            let result: Result<NSImage?, Error>
+            do {
+                let image = try MermaidRenderer.renderImage(source: source, theme: theme, scale: scale)
+                result = .success(image.map(MermaidImageFix.upright))
+            } catch {
+                result = .failure(error)
+            }
+            DispatchQueue.main.async {
+                completion(result)
+            }
+        }
     }
 }
 
