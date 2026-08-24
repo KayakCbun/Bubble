@@ -16,6 +16,9 @@ swiftc -parse-as-library Sources/Bubble/TranscriptStream.swift Sources/Bubble/Pr
 swiftc -parse-as-library Sources/Bubble/OverlayLayoutPolicy.swift scripts/check_overlay_layout.swift -o /tmp/bubble-check-layout
 /tmp/bubble-check-layout
 
+swiftc -parse-as-library Sources/Bubble/TranscriptInteractionPolicy.swift scripts/check_transcript_interactions.swift -o /tmp/bubble-check-transcript-interactions
+/tmp/bubble-check-transcript-interactions
+
 swiftc -parse-as-library Sources/Bubble/OverlayComposer.swift scripts/check_composer.swift -o /tmp/bubble-check-composer
 /tmp/bubble-check-composer
 

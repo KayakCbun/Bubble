@@ -404,7 +404,6 @@ struct OverlayView: View {
                 if abs(height - transcriptContentHeight) > 0.5 {
                     transcriptContentHeight = height
                 }
-                requestFollowLatest(proxy)
             }
             .onAppear { requestFollowLatest(proxy) }
             .onChange(of: store.items.count) { _, _ in
@@ -432,7 +431,9 @@ struct OverlayView: View {
                 requestFollowLatest(proxy)
             }
             .onChange(of: transcriptContentHeight) { _, _ in
-                requestFollowLatest(proxy)
+                if TranscriptFollowPolicy.followsContentHeightChange(isBusy: store.isBusy) {
+                    requestFollowLatest(proxy)
+                }
             }
         }
     }
@@ -1135,7 +1136,11 @@ struct OverlayView: View {
         let names = item.imageNames ?? []
         let variants = store.variants(for: item)
         let currentVariant = variants.firstIndex(where: \.isCurrent)
-        let showBranchControls = hoveredUserMessage == item.id || !variants.isEmpty
+        let showBranchControls = ConversationBranchControlsPolicy.showsInlineRow(
+            isHovered: hoveredUserMessage == item.id,
+            variantCount: variants.count
+        )
+        let showHoverBranchButton = hoveredUserMessage == item.id && variants.isEmpty
         return HStack {
             Spacer(minLength: 72)
             VStack(alignment: .trailing, spacing: 8) {
@@ -1160,17 +1165,7 @@ struct OverlayView: View {
                 }
                 if showBranchControls, item.sourceEntryId != nil, item.deliveryState == nil {
                     HStack(spacing: 7) {
-                        Button {
-                            store.beginBranch(from: item)
-                        } label: {
-                            Image(systemName: "arrow.triangle.branch")
-                                .font(.system(size: 11, weight: .semibold))
-                                .frame(width: 22, height: 20)
-                        }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(.secondary)
-                        .disabled(store.isBusy || store.childBusy || store.isSwitchingBranch || !names.isEmpty || item.sourceBranchable == false)
-                        .help(names.isEmpty && item.sourceBranchable != false ? "Edit this message and branch" : "Messages with attachments cannot be branched yet")
+                        userBranchButton(item, imageNames: names)
 
                         if variants.count > 1, let currentVariant {
                             Button {
@@ -1196,7 +1191,6 @@ struct OverlayView: View {
                             .disabled(currentVariant + 1 >= variants.count || store.isBusy || store.childBusy || store.isSwitchingBranch)
                         }
                     }
-                    .transition(.opacity)
                 }
             }
             .padding(.horizontal, names.isEmpty ? 16 : 10)
@@ -1205,6 +1199,13 @@ struct OverlayView: View {
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
                     .fill(Color.primary.opacity(0.08))
             )
+            if item.sourceEntryId != nil, item.deliveryState == nil, variants.isEmpty {
+                userBranchButton(item, imageNames: names)
+                    .opacity(showHoverBranchButton ? 1 : 0)
+                    .allowsHitTesting(showHoverBranchButton)
+                    .accessibilityHidden(!showHoverBranchButton)
+                    .frame(width: 22, height: 20)
+            }
         }
         .onHover { hovering in
             if hovering {
@@ -1213,7 +1214,7 @@ struct OverlayView: View {
                 hoveredUserMessage = nil
             }
         }
-        .animation(OverlayMotion.quick, value: showBranchControls)
+        .animation(OverlayMotion.quick, value: showHoverBranchButton)
         .contextMenu {
             if item.sourceEntryId != nil, item.deliveryState == nil, names.isEmpty, item.sourceBranchable != false {
                 Button("Edit and branch") { store.beginBranch(from: item) }
@@ -1223,6 +1224,30 @@ struct OverlayView: View {
         .accessibilityAction(named: "Edit and branch") {
             store.beginBranch(from: item)
         }
+    }
+
+    private func userBranchButton(_ item: ChatItem, imageNames: [String]) -> some View {
+        Button {
+            store.beginBranch(from: item)
+        } label: {
+            Image(systemName: "arrow.triangle.branch")
+                .font(.system(size: 11, weight: .semibold))
+                .frame(width: 22, height: 20)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
+        .disabled(
+            store.isBusy
+                || store.childBusy
+                || store.isSwitchingBranch
+                || !imageNames.isEmpty
+                || item.sourceBranchable == false
+        )
+        .help(
+            imageNames.isEmpty && item.sourceBranchable != false
+                ? "Edit this message and branch"
+                : "Messages with attachments cannot be branched yet"
+        )
     }
 
     private func queuedUserBubble(_ message: QueuedUserMessage) -> some View {

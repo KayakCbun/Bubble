@@ -267,7 +267,9 @@ final class ChatStore {
     init() {
         OverlayPaths.bootstrap()
         let restored = Self.loadTranscript()
-        items = restored.items
+        items = restored.items.filter {
+            !StartupTranscriptPolicy.isSetupCard($0.text, isSystem: $0.kind == .system)
+        }
         for item in restored.richItems + restored.items {
             if let key = Self.richKey(item) { richTranscriptRows[key] = item }
         }
@@ -786,12 +788,14 @@ final class ChatStore {
             _ = try await client.connectAndResume()
             isConnected = true
             status = "ready"
+            removeSetupCards(persistNow: true)
             syncSessionConfig()
             refreshCatalog()
             await restoreConversationTree(replacingTranscript: !isBusy && !isStartingSession)
             announceInterruptedWorkspaceIfNeeded()
-            if client.availableModels.isEmpty && !PiSetup.diagnose().hasCredentials {
-                presentSetup(PiSetup.diagnose(), error: "Pi is running, but no provider is signed in.")
+            let readyReport = PiSetup.diagnose()
+            if StartupTranscriptPolicy.shouldPresentAfterConnection(hasCredentials: readyReport.hasCredentials) {
+                presentSetup(readyReport, error: "Pi is running, but no provider is signed in.")
             }
         } catch {
             isConnected = false
@@ -1523,7 +1527,18 @@ final class ChatStore {
     }
 
     private func setupCardIndex() -> Int? {
-        items.lastIndex(where: { $0.kind == .system && $0.text.hasPrefix("Set up Bubble") })
+        items.lastIndex(where: {
+            StartupTranscriptPolicy.isSetupCard($0.text, isSystem: $0.kind == .system)
+        })
+    }
+
+    private func removeSetupCards(persistNow: Bool) {
+        let previousCount = items.count
+        items.removeAll {
+            StartupTranscriptPolicy.isSetupCard($0.text, isSystem: $0.kind == .system)
+        }
+        guard persistNow, items.count != previousCount else { return }
+        persist(immediate: true)
     }
 
     private func replaceSetupCard(_ card: String, persistNow: Bool) {
