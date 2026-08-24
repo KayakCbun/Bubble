@@ -202,8 +202,7 @@ struct OverlayView: View {
                             .allowsHitTesting(store.sideStageChromeVisible)
                     }
                 }
-                .fixedSize(horizontal: true, vertical: false)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: OverlayRenderPolicy.pinsConversationToLeadingEdge ? .leading : .center)
                 .animation(
                     OverlayRenderPolicy.shouldAnimateSideStageContentLayout
                         ? OverlayMotion.panel
@@ -246,7 +245,11 @@ struct OverlayView: View {
             }
             .frame(maxWidth: .infinity)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+        .frame(
+            maxWidth: .infinity,
+            maxHeight: .infinity,
+            alignment: OverlayRenderPolicy.pinsConversationToLeadingEdge ? .bottomLeading : .bottom
+        )
         .padding(OverlayMetrics.shadowInset)
         .environment(\.openMarkdownPreview) { path in
             store.openMarkdownPreview(path)

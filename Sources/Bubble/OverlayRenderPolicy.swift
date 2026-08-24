@@ -6,6 +6,9 @@ enum OverlayRenderPolicy {
     /// which makes text look softer while the panel opens.
     static let shouldAnimateSideStageContentLayout = false
     static let shouldRefreshHostingSurfaceAfterFrameSettle = true
+    /// Pin the conversation to the current panel's leading edge while AppKit
+    /// animates width, so target layout cannot clip the left side of the card.
+    static let pinsConversationToLeadingEdge = true
 
     /// AppKit frame updates are for chrome size, not streaming text.
     static func layoutNeedsApply(previous: OverlayLayout?, next: OverlayLayout) -> Bool {

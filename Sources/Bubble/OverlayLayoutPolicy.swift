@@ -87,6 +87,17 @@ enum OverlayLayoutPolicy {
         bleed + (panelWidth - bleed * 2 - composerWidth) / 2
     }
 
+    /// Centering a target-width card stack in a still-animating smaller panel
+    /// chops the conversation's leading edge. Pinning to leading does not.
+    static func conversationLeadingClip(
+        currentContentWidth: CGFloat,
+        stackWidth: CGFloat,
+        pinToLeading: Bool
+    ) -> CGFloat {
+        if pinToLeading { return 0 }
+        return max(0, (stackWidth - currentContentWidth) / 2)
+    }
+
     static func constrainedFrame(
         _ frame: CGRect,
         to visibleFrame: CGRect,

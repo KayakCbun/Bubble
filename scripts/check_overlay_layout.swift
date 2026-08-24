@@ -114,6 +114,26 @@ struct OverlayLayoutCheck {
             OverlayRenderPolicy.shouldRefreshHostingSurfaceAfterFrameSettle,
             "pixel-aligned frame settle refreshes the hosting surface for crisp text"
         )
+        expect(
+            OverlayRenderPolicy.pinsConversationToLeadingEdge,
+            "the conversation stays pinned to the current panel while width animates"
+        )
+        expect(
+            OverlayLayoutPolicy.conversationLeadingClip(
+                currentContentWidth: 760,
+                stackWidth: 1328,
+                pinToLeading: false
+            ) == 284,
+            "centering the target stack in a smaller panel chops the conversation's left edge"
+        )
+        expect(
+            OverlayLayoutPolicy.conversationLeadingClip(
+                currentContentWidth: 760,
+                stackWidth: 1328,
+                pinToLeading: true
+            ) == 0,
+            "leading-pinned conversation stays fully visible while the panel grows"
+        )
         let closedOrigin = OverlayLayoutPolicy.panelOriginX(centerX: 500, contentWidth: 760, bleed: 16)
         let openOrigin = OverlayLayoutPolicy.panelOriginX(centerX: 500, contentWidth: 760 + 448, bleed: 16)
         expect(closedOrigin == 500 - (760 + 32) / 2, "closed panel is centered on the composer")

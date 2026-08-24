@@ -68,11 +68,17 @@ enum SideStagePresentationPolicy {
 }
 
 enum SideStageChromePolicy {
-    static let revealDuration: TimeInterval = 0.22
-    static let hideDuration: TimeInterval = 0.16
+    static let revealDuration: TimeInterval = 0.16
+    static let hideDuration: TimeInterval = 0.14
 
-    /// A collapsed overlay first slides the conversation left; the extra card
-    /// fades in only after that width is in place.
+    /// The extra card fades on the next frame. Waiting for the panel spring to
+    /// settle leaves an empty gap that reads as lag.
+    static func waitsForPanelSettleToRevealChrome() -> Bool {
+        false
+    }
+
+    /// A collapsed overlay inserts the extra card at opacity 0 so the fade can
+    /// start immediately, with the Bubble placeholder if session content is not ready.
     static func opensHidden(wasPresented: Bool) -> Bool {
         !wasPresented
     }

@@ -89,8 +89,12 @@ struct SideStageCheck {
             "a closed workspace stage mounts neither placeholder nor transcript"
         )
         expect(
+            !SideStageChromePolicy.waitsForPanelSettleToRevealChrome(),
+            "the extra card fades immediately instead of waiting for the panel spring"
+        )
+        expect(
             SideStageChromePolicy.opensHidden(wasPresented: false),
-            "opening from collapsed hides chrome until the conversation has slid left"
+            "opening from collapsed inserts chrome at opacity 0 so it can fade immediately"
         )
         expect(
             !SideStageChromePolicy.opensHidden(wasPresented: true),
