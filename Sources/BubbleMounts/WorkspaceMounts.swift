@@ -559,6 +559,14 @@ public enum WorkspaceRegistry {
         )
     }
 
+    public static func canMatchLegacyRelay(
+        cardRunId: String?,
+        structuredRelayRunIds: Set<String>
+    ) -> Bool {
+        guard let cardRunId, !cardRunId.isEmpty else { return true }
+        return !structuredRelayRunIds.contains(cardRunId)
+    }
+
     public static func inferWaiting(from summary: String) -> String? {
         let trimmed = summary.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }

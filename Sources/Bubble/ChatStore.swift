@@ -2913,12 +2913,22 @@ final class ChatStore {
             let existingItems = items
             cacheRichRows(items)
             var matchedLocalRows = Set<UUID>()
+            let structuredRelayRunIDs = Set(snapshot.transcript.compactMap { record -> String? in
+                guard record.kind == .workspaceRelay,
+                      let runId = WorkspaceRegistry.parseInjectionPrompt(
+                          record.text,
+                          home: OverlayPaths.home.path
+                      )?.brief.runId,
+                      !runId.isEmpty else { return nil }
+                return runId
+            })
             let projected = snapshot.transcript.map { record in
                 if record.kind == .workspaceRelay {
                     return workspaceCard(
                         for: record,
                         existingItems: existingItems,
-                        matchedLocalRows: &matchedLocalRows
+                        matchedLocalRows: &matchedLocalRows,
+                        structuredRelayRunIDs: structuredRelayRunIDs
                     )
                 }
                 var projected = Self.chatItem(record)
@@ -2990,7 +3000,8 @@ final class ChatStore {
     private func workspaceCard(
         for record: ConversationTranscriptRecord,
         existingItems: [ChatItem],
-        matchedLocalRows: inout Set<UUID>
+        matchedLocalRows: inout Set<UUID>,
+        structuredRelayRunIDs: Set<String>
     ) -> ChatItem {
         guard let relay = WorkspaceRegistry.parseInjectionPrompt(record.text, home: OverlayPaths.home.path) else {
             return Self.chatItem(record)
@@ -3003,7 +3014,10 @@ final class ChatStore {
             runId.isEmpty ? nil : availableCards.first(where: { $0.workspaceRunId == runId })
         }
         let legacyCard = brief.runId?.isEmpty != false ? availableCards.first(where: { item in
-            item.workspaceRunId?.isEmpty != false
+            WorkspaceRegistry.canMatchLegacyRelay(
+                cardRunId: item.workspaceRunId,
+                structuredRelayRunIds: structuredRelayRunIDs
+            )
                 && item.workspacePath.map(WorkspaceRegistry.normalize) == WorkspaceRegistry.normalize(brief.path)
                 && item.workspaceGoal?.trimmingCharacters(in: .whitespacesAndNewlines)
                     == brief.goal.trimmingCharacters(in: .whitespacesAndNewlines)

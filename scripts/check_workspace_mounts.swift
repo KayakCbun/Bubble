@@ -182,6 +182,20 @@ struct WorkspaceMountsCheck {
         let legacyRestored = WorkspaceRegistry.parseInjectionPrompt(legacy, home: home.path)
         expect(legacyRestored?.brief.path == brief.path, "legacy relay prompts remain readable")
         expect(legacyRestored?.brief.runId == nil, "legacy relays do not invent a run identity")
+        expect(
+            WorkspaceRegistry.canMatchLegacyRelay(
+                cardRunId: "legacy-local-run",
+                structuredRelayRunIds: ["modern-run"]
+            ),
+            "a first restore may reuse the identified local card belonging to a legacy relay"
+        )
+        expect(
+            !WorkspaceRegistry.canMatchLegacyRelay(
+                cardRunId: "modern-run",
+                structuredRelayRunIds: ["modern-run"]
+            ),
+            "a legacy relay cannot consume a card reserved by a structured relay"
+        )
     }
 
     static func inferWaiting() {
