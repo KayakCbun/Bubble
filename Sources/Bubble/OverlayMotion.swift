@@ -21,6 +21,7 @@ enum OverlayMotion {
     static let scroll = Animation.spring(response: 0.28, dampingFraction: 0.96, blendDuration: 0)
     static let sideStageReveal = Animation.easeOut(duration: SideStageChromePolicy.revealDuration)
     static let sideStageHide = Animation.easeIn(duration: SideStageChromePolicy.hideDuration)
+    static let sideStageContent = Animation.easeOut(duration: 0.12)
 
     static var frameRate: CAFrameRateRange {
         CAFrameRateRange(minimum: 80, maximum: 120, preferred: 120)

@@ -173,42 +173,21 @@ struct OverlayView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: OverlayMetrics.stackSpacing) {
             if isTranscriptPresented {
-                HStack(alignment: .top, spacing: OverlayMetrics.stackSpacing) {
-                    transcriptList
-                        .frame(width: chatWidth, height: transcriptHeight)
-                        .frostedGlass(in: transcriptShape)
-                        .overlay(alignment: .topTrailing) {
-                            HStack(spacing: 2) {
-                                TranscriptPinButton(pinned: store.overlayPinned) {
-                                    store.toggleOverlayPin()
-                                }
-                                TranscriptWidthButton(wide: store.transcriptWide) {
-                                    onToggleWidth()
-                                }
+                transcriptList
+                    .frame(width: chatWidth, height: transcriptHeight)
+                    .frostedGlass(in: transcriptShape)
+                    .overlay(alignment: .topTrailing) {
+                        HStack(spacing: 2) {
+                            TranscriptPinButton(pinned: store.overlayPinned) {
+                                store.toggleOverlayPin()
                             }
-                            .padding(.trailing, 6)
-                            .padding(.top, 6)
+                            TranscriptWidthButton(wide: store.transcriptWide) {
+                                onToggleWidth()
+                            }
                         }
-                    if store.sideStagePresented {
-                        sideStagePane
-                            .compositingGroup()
-                            .opacity(SideStageChromePolicy.opacity(visible: store.sideStageChromeVisible))
-                            .animation(
-                                store.sideStageChromeVisible
-                                    ? OverlayMotion.sideStageReveal
-                                    : OverlayMotion.sideStageHide,
-                                value: store.sideStageChromeVisible
-                            )
-                            .allowsHitTesting(store.sideStageChromeVisible)
+                        .padding(.trailing, 6)
+                        .padding(.top, 6)
                     }
-                }
-                .frame(maxWidth: .infinity, alignment: OverlayRenderPolicy.pinsConversationToLeadingEdge ? .leading : .center)
-                .animation(
-                    OverlayRenderPolicy.shouldAnimateSideStageContentLayout
-                        ? OverlayMotion.panel
-                        : nil,
-                    value: store.sideStagePresented
-                )
             }
             VStack(spacing: 8) {
                 if let brief = store.activeWorkspaceBrief, brief.isActive {
@@ -250,6 +229,27 @@ struct OverlayView: View {
             maxHeight: .infinity,
             alignment: OverlayRenderPolicy.pinsConversationToLeadingEdge ? .bottomLeading : .bottom
         )
+        .overlay(alignment: .bottomLeading) {
+            if isTranscriptPresented, store.sideStagePresented {
+                sideStagePane
+                    .padding(
+                        .leading,
+                        OverlayLayoutPolicy.extraPaneOriginX(
+                            conversationWidth: chatWidth,
+                            gap: OverlayMetrics.stackSpacing
+                        )
+                    )
+                    .padding(.bottom, composerHeight + OverlayMetrics.stackSpacing)
+                    .opacity(SideStageChromePolicy.opacity(visible: store.sideStageChromeVisible))
+                    .animation(
+                        store.sideStageChromeVisible
+                            ? OverlayMotion.sideStageReveal
+                            : OverlayMotion.sideStageHide,
+                        value: store.sideStageChromeVisible
+                    )
+                    .allowsHitTesting(store.sideStageChromeVisible)
+            }
+        }
         .padding(OverlayMetrics.shadowInset)
         .environment(\.openMarkdownPreview) { path in
             store.openMarkdownPreview(path)
@@ -323,6 +323,7 @@ struct OverlayView: View {
             }
         }
         .frame(width: previewWidth, height: transcriptHeight)
+        .frostedGlass(in: transcriptShape)
         .clipped()
         .environment(\.openMarkdownPreview) { path in
             store.openMarkdownPreview(path, fromWorkspacePane: store.workspaceStage != nil)
@@ -331,17 +332,30 @@ struct OverlayView: View {
 
     @ViewBuilder
     private func workspaceStageContent(_ stage: WorkspaceStage) -> some View {
-        switch SideStagePresentationPolicy.content(
+        let content = SideStagePresentationPolicy.content(
             workspacePresented: store.workspaceStage != nil,
             phase: store.workspacePanePresentationPhase
-        ) {
-        case .hidden:
-            EmptyView()
-        case .placeholder:
-            workspaceSessionPlaceholder(stage)
-        case .transcript:
-            workspaceSessionPane(stage)
+        )
+        ZStack {
+            if SideStagePresentationPolicy.mountsTranscript(phase: store.workspacePanePresentationPhase) {
+                workspaceSessionPane(stage)
+                    .opacity(
+                        SideStagePresentationPolicy.transcriptOpacity(
+                            coverVisible: store.workspacePaneCoverVisible
+                        )
+                    )
+            }
+            if content != .hidden {
+                workspaceSessionPlaceholder(stage)
+                    .opacity(
+                        SideStagePresentationPolicy.placeholderOpacity(
+                            coverVisible: store.workspacePaneCoverVisible
+                        )
+                    )
+                    .allowsHitTesting(store.workspacePaneCoverVisible)
+            }
         }
+        .animation(OverlayMotion.sideStageContent, value: store.workspacePaneCoverVisible)
     }
 
     private func workspaceSessionPlaceholder(_ stage: WorkspaceStage) -> some View {
@@ -371,8 +385,7 @@ struct OverlayView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(width: previewWidth, height: transcriptHeight)
-        .frostedGlass(in: transcriptShape)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private func workspaceSessionPane(_ stage: WorkspaceStage) -> some View {
@@ -401,8 +414,7 @@ struct OverlayView: View {
             Divider().opacity(0.28)
             workspaceTranscriptList
         }
-        .frame(width: previewWidth, height: transcriptHeight)
-        .frostedGlass(in: transcriptShape)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .overlay(alignment: .topTrailing) {
             PreviewChromeButton(symbol: "xmark", help: "Close workspace session") {
                 store.closeSideStage()
@@ -434,11 +446,11 @@ struct OverlayView: View {
                     }
                     if live, let started = store.items.first(where: { $0.id == store.workspaceStage?.cardId })?.workspaceStartedAt {
                         WorkingRow(startedAt: Date(timeIntervalSince1970: started))
-                            .id("workspace-working")
+                            .id("ws-workspace-working")
                     }
                     Color.clear
                         .frame(height: OverlayMetrics.transcriptCornerRadius)
-                        .id("workspace-end")
+                        .id("ws-workspace-end")
                 }
                 .padding(.horizontal, OverlayMetrics.transcriptInset)
                 .padding(.top, OverlayMetrics.transcriptInset)
@@ -448,9 +460,20 @@ struct OverlayView: View {
             }
             .scrollIndicators(.never)
             .scrollBounceBehavior(.basedOnSize)
-            .onAppear { scrollWorkspacePane(proxy) }
+            .onAppear {
+                if !store.workspacePaneCoverVisible {
+                    scrollWorkspacePane(proxy)
+                }
+            }
+            .onChange(of: store.workspacePaneCoverVisible) { _, visible in
+                if !visible {
+                    scrollWorkspacePane(proxy)
+                }
+            }
             .onChange(of: store.workspacePaneScrollToken) { _, _ in
-                scrollWorkspacePane(proxy)
+                if !store.workspacePaneCoverVisible {
+                    scrollWorkspacePane(proxy)
+                }
             }
             .onChange(of: store.workspacePaneItems.count) { _, _ in
                 followWorkspacePane(proxy)
@@ -471,13 +494,13 @@ struct OverlayView: View {
         switch row {
         case .message(let item):
             if item.kind == .user, let entry = item.sourceEntryId, !entry.isEmpty {
-                return "entry-\(entry)"
+                return "ws-entry-\(entry)"
             }
-            return item.id.uuidString
+            return "ws-\(item.id.uuidString)"
         case .tool(let item):
-            return item.id.uuidString
+            return "ws-\(item.id.uuidString)"
         case .collapsedTools(let id, _):
-            return id
+            return "ws-\(id)"
         }
     }
 
@@ -492,7 +515,7 @@ struct OverlayView: View {
             var transaction = Transaction()
             transaction.disablesAnimations = true
             withTransaction(transaction) {
-                proxy.scrollTo(target, anchor: .bottom)
+                proxy.scrollTo("ws-\(target)", anchor: .bottom)
             }
         }
     }
@@ -503,7 +526,7 @@ struct OverlayView: View {
             var transaction = Transaction()
             transaction.disablesAnimations = true
             withTransaction(transaction) {
-                proxy.scrollTo("workspace-end", anchor: .bottom)
+                proxy.scrollTo("ws-workspace-end", anchor: .bottom)
             }
         }
     }
@@ -548,8 +571,7 @@ struct OverlayView: View {
                 .scrollIndicators(.never)
             }
         }
-        .frame(width: previewWidth, height: transcriptHeight)
-        .frostedGlass(in: transcriptShape)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .overlay(alignment: .topTrailing) {
             HStack(spacing: 2) {
                 PreviewChromeButton(symbol: "folder", help: "Show in Finder") {
@@ -662,7 +684,9 @@ struct OverlayView: View {
                 requestFollowLatest(proxy)
             }
             .onChange(of: store.transcriptRevision) { _, _ in
-                requestFollowLatest(proxy)
+                if TranscriptFollowPolicy.followsRevisionChange(isBusy: store.isBusy) {
+                    requestFollowLatest(proxy)
+                }
             }
             .onChange(of: store.branchDraft?.sourceItemID) { _, sourceID in
                 guard let sourceID else { return }

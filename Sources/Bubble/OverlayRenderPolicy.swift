@@ -40,4 +40,13 @@ enum OverlayRenderPolicy {
     ) -> Bool {
         true
     }
+
+    /// Batch ordinary chrome layout on the next display pulse. Side-stage width
+    /// changes must apply in the click's turn so the panel starts moving immediately.
+    static func shouldDeferLayoutPulse(
+        previousPreviewWidth: CGFloat,
+        nextPreviewWidth: CGFloat
+    ) -> Bool {
+        abs(previousPreviewWidth - nextPreviewWidth) < 1
+    }
 }

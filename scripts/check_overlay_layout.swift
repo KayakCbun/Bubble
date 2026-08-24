@@ -107,6 +107,22 @@ struct OverlayLayoutCheck {
             "same-width settled layouts retain ordinary panel animation policy"
         )
         expect(
+            !OverlayRenderPolicy.shouldDeferLayoutPulse(previousPreviewWidth: 0, nextPreviewWidth: 560),
+            "opening a side stage must apply layout in the click's turn"
+        )
+        expect(
+            !OverlayRenderPolicy.shouldDeferLayoutPulse(previousPreviewWidth: 560, nextPreviewWidth: 0),
+            "closing a side stage must apply layout without waiting a display pulse"
+        )
+        expect(
+            OverlayRenderPolicy.shouldDeferLayoutPulse(previousPreviewWidth: 560, nextPreviewWidth: 560),
+            "ordinary chrome layout can still batch on the next pulse"
+        )
+        expect(
+            OverlayLayoutPolicy.extraPaneOriginX(conversationWidth: 760, gap: 8) == 768,
+            "the extra card sits beside the conversation and does not share its layout width"
+        )
+        expect(
             !OverlayRenderPolicy.shouldAnimateSideStageContentLayout,
             "AppKit owns side-stage geometry so SwiftUI must not rescale transcript text"
         )

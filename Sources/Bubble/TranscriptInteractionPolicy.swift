@@ -24,6 +24,12 @@ enum TranscriptFollowPolicy {
     static func followsContentHeightChange(isBusy: Bool) -> Bool {
         isBusy
     }
+
+    /// Metadata persists (workspace anchors, etc.) bump the revision while idle.
+    /// Those must not yank the main transcript to the bottom.
+    static func followsRevisionChange(isBusy: Bool) -> Bool {
+        isBusy
+    }
 }
 
 enum TranscriptExpansionPolicy {

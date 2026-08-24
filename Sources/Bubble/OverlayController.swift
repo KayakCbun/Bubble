@@ -273,6 +273,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         }
         store.onSideStageChromePresentationRequested = { [weak self] in
             self?.requestSideStageChromeReveal()
+            self?.position()
         }
         store.onSideStageChromeDismissalRequested = { [weak self] in
             self?.requestSideStageChromeHide()
@@ -336,6 +337,14 @@ final class OverlayController: NSObject, NSWindowDelegate {
             return
         }
         let previousPreviewWidth = lastAppliedLayout?.previewWidth ?? 0
+        if !OverlayRenderPolicy.shouldDeferLayoutPulse(
+            previousPreviewWidth: previousPreviewWidth,
+            nextPreviewWidth: layout.previewWidth
+        ) {
+            pendingLayout = nil
+            apply(layout)
+            return
+        }
         if !OverlayRenderPolicy.shouldAnimateSideStageResize(
             previousPreviewWidth: previousPreviewWidth,
             nextPreviewWidth: layout.previewWidth
@@ -624,11 +633,16 @@ final class OverlayController: NSObject, NSWindowDelegate {
                 guard let self,
                       generation == self.workspaceRevealGeneration,
                       !self.workspaceRevealPending else { return }
-                if OverlayRenderPolicy.shouldResumeStream(
-                    panelVisible: self.panel.isVisible,
-                    isMoving: self.isHiding || self.frameAnimator.isAnimating
-                ) {
-                    self.store.setStreamUISuspended(false)
+                OverlayPulse.shared.onNextFrame { [weak self] in
+                    guard let self,
+                          generation == self.workspaceRevealGeneration else { return }
+                    self.store.uncoverWorkspacePane()
+                    if OverlayRenderPolicy.shouldResumeStream(
+                        panelVisible: self.panel.isVisible,
+                        isMoving: self.isHiding || self.frameAnimator.isAnimating
+                    ) {
+                        self.store.setStreamUISuspended(false)
+                    }
                 }
             }
         }

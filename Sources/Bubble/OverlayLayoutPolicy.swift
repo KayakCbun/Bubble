@@ -55,6 +55,13 @@ enum OverlayLayoutPolicy {
         previewWidth > 1 ? previewWidth + gap : 0
     }
 
+    /// Extra card origin relative to the conversation. The extra pane is painted
+    /// beside the conversation and must not participate in the conversation's
+    /// layout width, or SwiftUI will shift the card left of the current panel.
+    static func extraPaneOriginX(conversationWidth: CGFloat, gap: CGFloat) -> CGFloat {
+        conversationWidth + gap
+    }
+
     static func contentWidth(chatWidth: CGFloat, previewWidth: CGFloat, gap: CGFloat) -> CGFloat {
         chatWidth + previewExtraWidth(previewWidth, gap: gap)
     }

@@ -65,6 +65,20 @@ enum SideStagePresentationPolicy {
         guard workspacePresented else { return .hidden }
         return phase == .ready ? .transcript : .placeholder
     }
+
+    /// Keep the Bubble placeholder covering the extra card until transcript
+    /// content has been mounted, so the swap cannot flash an empty frame.
+    static func placeholderOpacity(coverVisible: Bool) -> Double {
+        coverVisible ? 1 : 0
+    }
+
+    static func transcriptOpacity(coverVisible: Bool) -> Double {
+        coverVisible ? 0 : 1
+    }
+
+    static func mountsTranscript(phase: WorkspacePanePresentationPhase) -> Bool {
+        phase == .ready
+    }
 }
 
 enum SideStageChromePolicy {

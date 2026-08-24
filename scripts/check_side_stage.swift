@@ -89,6 +89,30 @@ struct SideStageCheck {
             "a closed workspace stage mounts neither placeholder nor transcript"
         )
         expect(
+            SideStagePresentationPolicy.placeholderOpacity(coverVisible: true) == 1,
+            "loading keeps the Bubble placeholder covering the extra card"
+        )
+        expect(
+            SideStagePresentationPolicy.placeholderOpacity(coverVisible: false) == 0,
+            "the placeholder fades out only after content has already been mounted"
+        )
+        expect(
+            SideStagePresentationPolicy.transcriptOpacity(coverVisible: true) == 0,
+            "mounted transcript stays hidden until the cover lifts"
+        )
+        expect(
+            SideStagePresentationPolicy.transcriptOpacity(coverVisible: false) == 1,
+            "settled transcript is fully visible after the cover lifts"
+        )
+        expect(
+            SideStagePresentationPolicy.mountsTranscript(phase: .placeholder) == false,
+            "session transcript is not mounted while the extra card is still a placeholder"
+        )
+        expect(
+            SideStagePresentationPolicy.mountsTranscript(phase: .ready),
+            "session transcript mounts under the cover before the placeholder fades"
+        )
+        expect(
             !SideStageChromePolicy.waitsForPanelSettleToRevealChrome(),
             "the extra card fades immediately instead of waiting for the panel spring"
         )

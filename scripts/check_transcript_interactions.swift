@@ -53,6 +53,14 @@ private enum TranscriptInteractionCheck {
             TranscriptFollowPolicy.followsContentHeightChange(isBusy: true),
             "streaming content growth should continue following the latest response"
         )
+        expect(
+            !TranscriptFollowPolicy.followsRevisionChange(isBusy: false),
+            "idle transcript metadata writes must not yank the main conversation to the bottom"
+        )
+        expect(
+            TranscriptFollowPolicy.followsRevisionChange(isBusy: true),
+            "a live main turn still follows revision while streaming"
+        )
         let collapsed = TranscriptExpansionPolicy.renderKey(
             containerExpanded: false,
             expandedChildIDs: []
