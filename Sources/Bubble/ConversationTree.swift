@@ -125,6 +125,13 @@ struct ConversationTreeSnapshot: Equatable, Sendable {
         }
     }
 
+    var allWorkspaceRelayTexts: [String] {
+        entries.compactMap { entry in
+            guard entry.isUserMessage, Self.isWorkspaceRelayText(entry.text) else { return nil }
+            return entry.text
+        }
+    }
+
     func selecting(leafID: String?) -> ConversationTreeSnapshot {
         ConversationTreeSnapshot(entries: entries, leafID: leafID)
     }

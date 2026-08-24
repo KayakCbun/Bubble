@@ -178,10 +178,15 @@ let relaySnapshot = ConversationTreeSnapshot(entries: [
     ConversationEntry(id: "dispatch", parentID: nil, type: "message", role: "assistant", text: "I sent it.", thinking: "", toolName: nil, toolCallID: nil, isError: false, hasStructuredContent: false, order: 0),
     ConversationEntry(id: "relay", parentID: "dispatch", type: "message", role: "user", text: relayText, thinking: "", toolName: nil, toolCallID: nil, isError: false, hasStructuredContent: false, order: 1),
     ConversationEntry(id: "answer", parentID: "relay", type: "message", role: "assistant", text: "Here is the result.", thinking: "", toolName: nil, toolCallID: nil, isError: false, hasStructuredContent: false, order: 2),
+    ConversationEntry(id: "sibling-relay", parentID: "dispatch", type: "message", role: "user", text: relayText.replacingOccurrences(of: "goal: inspect", with: "goal: sibling inspect"), thinking: "", toolName: nil, toolCallID: nil, isError: false, hasStructuredContent: false, order: 3),
 ], leafID: "answer")
 require(
     relaySnapshot.transcript.map(\.kind) == [.assistant, .workspaceRelay, .assistant],
     "internal workspace relay prompts project as run-card anchors instead of user messages"
+)
+require(
+    relaySnapshot.allWorkspaceRelayTexts.count == 2,
+    "structured workspace identities are reserved across sibling branches, not only the active path"
 )
 require(ConversationBranchInteraction.canSend(isSwitchingBranch: false), "composer sends when the active path is stable")
 require(!ConversationBranchInteraction.canSend(isSwitchingBranch: true), "composer cannot race an in-flight branch switch")

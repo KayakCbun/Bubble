@@ -165,6 +165,7 @@ final class ChatStore {
     var workspacePaneScrollToken = 0
     var workspacePaneLoadState: WorkspacePaneLoadState = .idle
     var workspacePanePresentationPhase: WorkspacePanePresentationPhase = .ready
+    var workspacePaneCoverVisible = true
     var sideStageChromeVisible = false
     var visibleScreenWidth: CGFloat = 1512
     var slashCommands: [SlashCommand] = SlashCommand.builtIn
@@ -325,6 +326,7 @@ final class ChatStore {
     func returnToWorkspaceStage() {
         markdownPreview = nil
         revealWorkspacePaneContent()
+        uncoverWorkspacePane()
         workspacePaneScrollToken += 1
     }
 
@@ -397,6 +399,7 @@ final class ChatStore {
         markdownPreview = nil
         if opensSideStage || changesWorkspace {
             workspacePanePresentationPhase = .placeholder
+            workspacePaneCoverVisible = true
         }
         let status = item.workspaceStatus
         let follow = SideStagePolicy.followLatest(status: status)
@@ -499,6 +502,7 @@ final class ChatStore {
     private func clearWorkspaceStage(keepingItems: Bool) {
         workspaceStage = nil
         workspacePanePresentationPhase = .ready
+        workspacePaneCoverVisible = true
         if !keepingItems {
             workspacePaneItems = []
             workspacePaneLoadState = .idle
@@ -509,9 +513,17 @@ final class ChatStore {
 
     func revealWorkspacePaneContent() {
         guard workspaceStage != nil else { return }
-        workspacePanePresentationPhase = workspacePaneLoadState == .loading
-            ? .waitingForContent
-            : .ready
+        if workspacePaneLoadState == .loading {
+            workspacePanePresentationPhase = .waitingForContent
+            workspacePaneCoverVisible = true
+            return
+        }
+        workspacePanePresentationPhase = .ready
+    }
+
+    func uncoverWorkspacePane() {
+        guard workspaceStage != nil, workspacePanePresentationPhase == .ready else { return }
+        workspacePaneCoverVisible = false
     }
 
     private func workspacePaneContentDidBecomeAvailable() {
@@ -2913,10 +2925,9 @@ final class ChatStore {
             let existingItems = items
             cacheRichRows(items)
             var matchedLocalRows = Set<UUID>()
-            let structuredRelayRunIDs = Set(snapshot.transcript.compactMap { record -> String? in
-                guard record.kind == .workspaceRelay,
-                      let runId = WorkspaceRegistry.parseInjectionPrompt(
-                          record.text,
+            let structuredRelayRunIDs = Set(snapshot.allWorkspaceRelayTexts.compactMap { text -> String? in
+                guard let runId = WorkspaceRegistry.parseInjectionPrompt(
+                          text,
                           home: OverlayPaths.home.path
                       )?.brief.runId,
                       !runId.isEmpty else { return nil }
