@@ -22,6 +22,7 @@ struct ChatItem: Identifiable, Codable, Equatable {
     var toolInput: String?
     var toolOutput: String?
     var workspacePath: String?
+    var workspaceRunId: String?
     var workspaceName: String?
     var workspaceStatus: String?
     var workspaceGoal: String?
@@ -30,6 +31,8 @@ struct ChatItem: Identifiable, Codable, Equatable {
     var workspaceChangedPaths: [String]?
     var workspaceChildren: [ChatItem]?
     var workspaceStartedAt: TimeInterval?
+    var workspaceAnchorEntryId: String?
+    var workspaceSessionId: String?
     var imageNames: [String]?
     var deliveryState: MessageDeliveryState?
     var sourceEntryId: String?
@@ -45,6 +48,7 @@ struct ChatItem: Identifiable, Codable, Equatable {
         toolInput: String? = nil,
         toolOutput: String? = nil,
         workspacePath: String? = nil,
+        workspaceRunId: String? = nil,
         workspaceName: String? = nil,
         workspaceStatus: String? = nil,
         workspaceGoal: String? = nil,
@@ -53,6 +57,8 @@ struct ChatItem: Identifiable, Codable, Equatable {
         workspaceChangedPaths: [String]? = nil,
         workspaceChildren: [ChatItem]? = nil,
         workspaceStartedAt: TimeInterval? = nil,
+        workspaceAnchorEntryId: String? = nil,
+        workspaceSessionId: String? = nil,
         imageNames: [String]? = nil,
         deliveryState: MessageDeliveryState? = nil,
         sourceEntryId: String? = nil,
@@ -67,6 +73,7 @@ struct ChatItem: Identifiable, Codable, Equatable {
         self.toolInput = toolInput
         self.toolOutput = toolOutput
         self.workspacePath = workspacePath
+        self.workspaceRunId = workspaceRunId
         self.workspaceName = workspaceName
         self.workspaceSummary = workspaceSummary
         self.workspaceStatus = workspaceStatus
@@ -75,6 +82,8 @@ struct ChatItem: Identifiable, Codable, Equatable {
         self.workspaceChangedPaths = workspaceChangedPaths
         self.workspaceChildren = workspaceChildren
         self.workspaceStartedAt = workspaceStartedAt
+        self.workspaceAnchorEntryId = workspaceAnchorEntryId
+        self.workspaceSessionId = workspaceSessionId
         self.imageNames = imageNames
         self.deliveryState = deliveryState
         self.sourceEntryId = sourceEntryId
@@ -149,6 +158,11 @@ final class ChatStore {
     var transcriptWide = UserDefaults.standard.bool(forKey: "bubble.transcript.wide")
     var overlayPinned = UserDefaults.standard.bool(forKey: "bubble.overlay.pinned")
     var markdownPreview: MarkdownDocument?
+    var workspaceStage: WorkspaceStage?
+    var workspacePaneItems: [ChatItem] = []
+    var workspacePaneStreamingAssistantId: UUID?
+    var workspacePaneStreamingThoughtId: UUID?
+    var workspacePaneScrollToken = 0
     var slashCommands: [SlashCommand] = SlashCommand.builtIn
     var skills: [PiSkill] = []
     var prompts: [PiPrompt] = []
@@ -166,6 +180,9 @@ final class ChatStore {
     var draftClips: [DraftClip] = []
     var draftImages: [DraftImage] = []
     var childBusy = false
+    var streamUISuspended = true
+    var transcriptRevision: UInt64 = 0
+    var workspacePaneRevision: UInt64 = 0
     var conversationTree: ConversationTreeSnapshot?
     var branchDraft: ConversationBranchDraft?
     var isSwitchingBranch = false
@@ -181,7 +198,7 @@ final class ChatStore {
     private var childChanged: [String] = []
     private var pendingInjection: WorkspaceBrief?
     private var injecting = false
-    private var pendingChildSteer: String?
+    private var pendingChildSteer: WorkspaceBrief?
     private var pendingPrompts: [PendingPrompt] = []
     private var steeringMessageIds: Set<UUID> = []
     private var runNonce = 0
@@ -218,7 +235,7 @@ final class ChatStore {
         requestFocus()
     }
 
-    func openMarkdownPreview(_ raw: String) {
+    func openMarkdownPreview(_ raw: String, fromWorkspacePane: Bool = false) {
         let path = MarkdownFiles.resolve(
             raw,
             workspace: OverlayPaths.workspace.path,
@@ -227,6 +244,9 @@ final class ChatStore {
         if markdownPreview?.path == path {
             markdownPreview = nil
             return
+        }
+        if !SideStagePolicy.keepWorkspaceWhenOpeningMarkdown(fromWorkspacePane: fromWorkspacePane) {
+            clearWorkspaceStage(keepingItems: false)
         }
         markdownPreview = MarkdownFiles.load(path: path)
     }
@@ -258,6 +278,370 @@ final class ChatStore {
 
     func closeMarkdownPreview() {
         markdownPreview = nil
+        if workspaceStage == nil {
+            clearWorkspaceStage(keepingItems: false)
+        }
+    }
+
+    func closeSideStage() {
+        markdownPreview = nil
+        clearWorkspaceStage(keepingItems: false)
+    }
+
+    func returnToWorkspaceStage() {
+        markdownPreview = nil
+        workspacePaneScrollToken += 1
+    }
+
+    @discardableResult
+    func handleSideStageEscape() -> Bool {
+        switch SideStagePolicy.escapeAction(
+            showingMarkdown: markdownPreview != nil,
+            workspaceStacked: workspaceStage != nil,
+            showingWorkspace: workspaceStage != nil
+        ) {
+        case .returnToWorkspace:
+            returnToWorkspaceStage()
+            return true
+        case .closeStage:
+            closeSideStage()
+            return true
+        case .ignore:
+            return false
+        }
+    }
+
+    var sideStagePresented: Bool {
+        SideStagePolicy.isPresented(
+            showingMarkdown: markdownPreview != nil,
+            showingWorkspace: workspaceStage != nil
+        )
+    }
+
+    var showsWorkspaceTranscript: Bool {
+        SideStagePolicy.showsWorkspaceTranscript(
+            showingMarkdown: markdownPreview != nil,
+            showingWorkspace: workspaceStage != nil
+        )
+    }
+
+    var canReturnToWorkspace: Bool {
+        SideStagePolicy.canReturnToWorkspace(
+            showingMarkdown: markdownPreview != nil,
+            workspaceStacked: workspaceStage != nil
+        )
+    }
+
+    var sideStageIdentity: String {
+        if let preview = markdownPreview {
+            return "md:\(preview.path)"
+        }
+        if let stage = workspaceStage {
+            return "ws:\(stage.cardId.uuidString)"
+        }
+        return ""
+    }
+
+    func toggleWorkspaceStage(from item: ChatItem) {
+        if SideStagePolicy.shouldToggleClosed(
+            openCardId: workspaceStage?.cardId,
+            tappedCardId: item.id
+        ) {
+            closeSideStage()
+            return
+        }
+        openWorkspaceStage(from: item)
+    }
+
+    func openActiveWorkspaceStage() {
+        guard let brief = activeWorkspaceBrief, brief.isActive else { return }
+        if let item = items.last(where: {
+            $0.kind == .workspaceRun && $0.workspacePath == brief.path
+        }) {
+            if workspaceStage?.cardId == item.id, markdownPreview == nil {
+                return
+            }
+            openWorkspaceStage(from: item)
+        }
+    }
+
+    func openWorkspaceStage(from item: ChatItem) {
+        markdownPreview = nil
+        let status = item.workspaceStatus
+        let follow = SideStagePolicy.followLatest(status: status)
+        let sessionId = item.workspaceSessionId
+            ?? workspaceState.mounts.first(where: { $0.path == item.workspacePath })?.sessionId
+            ?? childSessionId
+        workspaceStage = WorkspaceStage(
+            path: item.workspacePath ?? "",
+            name: item.workspaceName ?? item.text,
+            runId: item.workspaceRunId,
+            sessionId: sessionId,
+            cardId: item.id,
+            followLatest: follow,
+            anchorEntryId: item.workspaceAnchorEntryId
+        )
+        workspacePaneStreamingAssistantId = nil
+        workspacePaneStreamingThoughtId = nil
+        workspacePaneItems = fallbackWorkspacePaneItems(path: item.workspacePath ?? "")
+        workspacePaneRevision &+= 1
+        workspacePaneLoadGeneration += 1
+        let generation = workspacePaneLoadGeneration
+        workspacePaneScrollToken += 1
+        Task { @MainActor in
+            await loadWorkspacePane(from: item, generation: generation)
+        }
+    }
+
+    private func clearWorkspaceStage(keepingItems: Bool) {
+        workspaceStage = nil
+        if !keepingItems {
+            workspacePaneItems = []
+            workspacePaneStreamingAssistantId = nil
+            workspacePaneStreamingThoughtId = nil
+            workspacePaneRevision &+= 1
+        }
+    }
+
+    private func fallbackWorkspacePaneItems(path: String) -> [ChatItem] {
+        guard !path.isEmpty else { return [] }
+        return items.compactMap { card -> [ChatItem]? in
+            guard card.kind == .workspaceRun, card.workspacePath == path else { return nil }
+            var rows: [ChatItem] = []
+            let goal = card.workspaceGoal?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !goal.isEmpty {
+                rows.append(
+                    ChatItem(
+                        kind: .user,
+                        text: goal,
+                        sourceEntryId: card.workspaceAnchorEntryId
+                    )
+                )
+            }
+            rows.append(contentsOf: card.workspaceChildren ?? [])
+            let summary = card.workspaceSummary?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !SideStagePolicy.followLatest(status: card.workspaceStatus), !summary.isEmpty {
+                let hasAssistant = rows.contains { $0.kind == .assistant }
+                if !hasAssistant {
+                    rows.append(ChatItem(kind: .assistant, text: summary))
+                }
+            }
+            return rows
+        }.flatMap { $0 }
+    }
+
+    private func loadWorkspacePane(from item: ChatItem, generation: Int) async {
+        let path = item.workspacePath ?? ""
+        let sessionId = workspaceStage?.sessionId
+            ?? item.workspaceSessionId
+            ?? workspaceState.mounts.first(where: { $0.path == path })?.sessionId
+        guard let sessionId, !sessionId.isEmpty, !path.isEmpty else { return }
+        if !isConnected {
+            await connect()
+        }
+        if SideStagePolicy.shouldAttachSession(
+            sessionId: sessionId,
+            liveSessionIds: childSessionIds,
+            childBusy: childBusy
+        ) {
+            let cwd = URL(fileURLWithPath: path)
+            _ = try? await client.attach(sessionId, cwd: cwd)
+        } else {
+            OverlayLog.write("workspace pane skip attach \(sessionId)")
+        }
+        guard generation == workspacePaneLoadGeneration else { return }
+        guard let snapshot = try? await client.conversationTree(sessionId: sessionId) else { return }
+        guard generation == workspacePaneLoadGeneration else { return }
+        applyWorkspaceTree(snapshot, path: path, cardId: item.id, goal: item.workspaceGoal ?? "")
+    }
+
+    private func applyWorkspaceTree(
+        _ snapshot: ConversationTreeSnapshot,
+        path: String,
+        cardId: UUID,
+        goal: String
+    ) {
+        cacheWorkspacePaneRows(workspacePaneItems)
+        let turns = snapshot.activePath.filter(\.isUserMessage).map {
+            ($0.id, ConversationTreeSnapshot.displayUserText($0.text))
+        }
+        let ordered = items.filter { $0.kind == .workspaceRun && $0.workspacePath == path }
+        let cardIndex = ordered.firstIndex(where: { $0.id == cardId })
+        let stored = items.first(where: { $0.id == cardId })?.workspaceAnchorEntryId
+            ?? workspaceStage?.anchorEntryId
+        let anchor = SideStagePolicy.anchorEntryId(
+            stored: stored,
+            goal: goal,
+            cardIndex: cardIndex,
+            turns: turns
+        )
+        if let index = items.firstIndex(where: { $0.id == cardId }) {
+            items[index].workspaceAnchorEntryId = anchor
+            items[index].workspaceSessionId = workspaceStage?.sessionId ?? items[index].workspaceSessionId
+            persist()
+        }
+        if var stage = workspaceStage, stage.cardId == cardId {
+            stage.anchorEntryId = anchor
+            workspaceStage = stage
+        }
+        if childBusy, workspacePaneIsCurrent(), SideStagePolicy.followLatest(
+            status: items.first(where: { $0.id == cardId })?.workspaceStatus
+        ) {
+            return
+        }
+        let projected = snapshot.transcript.map { record in
+            var projected = Self.chatItem(record)
+            if let prior = workspacePaneRichRows[Self.richKey(entryID: record.entryID, kind: projected.kind)] {
+                var rich = prior
+                rich.text = projected.text
+                rich.toolStatus = projected.toolStatus ?? rich.toolStatus
+                rich.toolKind = projected.toolKind ?? rich.toolKind
+                rich.toolInput = projected.toolInput ?? rich.toolInput
+                rich.toolOutput = projected.toolOutput ?? rich.toolOutput
+                rich.sourceEntryId = record.entryID
+                projected = rich
+            }
+            return projected
+        }
+        workspacePaneItems = projected
+        cacheWorkspacePaneRows(projected)
+        workspacePaneScrollToken += 1
+    }
+
+    private func cacheWorkspacePaneRows(_ rows: [ChatItem]) {
+        workspacePaneRevision &+= 1
+        for item in rows {
+            guard let key = Self.richKey(item) else { continue }
+            workspacePaneRichRows[key] = item
+        }
+    }
+
+    private func captureWorkspaceAnchor(sessionId: String, goal: String, path: String) async {
+        guard let snapshot = try? await client.conversationTree(sessionId: sessionId) else { return }
+        let turns = snapshot.activePath.filter(\.isUserMessage).map {
+            ($0.id, ConversationTreeSnapshot.displayUserText($0.text))
+        }
+        let ordered = items.filter { $0.kind == .workspaceRun && $0.workspacePath == path }
+        guard let card = ordered.last else { return }
+        let cardIndex = max(0, ordered.count - 1)
+        let anchor = SideStagePolicy.anchorEntryId(
+            stored: card.workspaceAnchorEntryId,
+            goal: goal,
+            cardIndex: cardIndex,
+            turns: turns
+        )
+        if let index = items.firstIndex(where: { $0.id == card.id }) {
+            items[index].workspaceAnchorEntryId = anchor
+            items[index].workspaceSessionId = sessionId
+            persist()
+        }
+        if workspaceStage?.cardId == card.id {
+            workspaceStage?.sessionId = sessionId
+            workspaceStage?.anchorEntryId = anchor
+            applyWorkspaceTree(snapshot, path: path, cardId: card.id, goal: goal)
+        }
+    }
+
+    private func workspacePaneIsCurrent(
+        path: String? = nil,
+        sessionId: String? = nil,
+        runId: String? = nil
+    ) -> Bool {
+        guard !streamUISuspended else { return false }
+        guard let stage = workspaceStage else { return false }
+        if let runId, !runId.isEmpty, let current = stage.runId, !current.isEmpty,
+           current != runId {
+            return false
+        }
+        if let sessionId, !sessionId.isEmpty, let current = stage.sessionId, !current.isEmpty {
+            guard current == sessionId else { return false }
+        }
+        if let path, !path.isEmpty {
+            guard stage.path == path else { return false }
+        }
+        return true
+    }
+
+    private func appendWorkspacePaneAssistant(
+        _ raw: String,
+        path: String?,
+        sessionId: String?,
+        runId: String?
+    ) {
+        guard workspacePaneIsCurrent(path: path, sessionId: sessionId, runId: runId) else { return }
+        if let id = workspacePaneStreamingAssistantId,
+           let index = workspacePaneItems.firstIndex(where: { $0.id == id }) {
+            workspacePaneItems[index].text = Self.stripDiagnostics(workspacePaneItems[index].text + raw)
+            cacheWorkspacePaneRows([workspacePaneItems[index]])
+            return
+        }
+        if let index = TranscriptStream.resumeAssistantIndex(kinds: workspacePaneItems.map(\.kind.rawValue)) {
+            workspacePaneItems[index].text = Self.stripDiagnostics(workspacePaneItems[index].text + raw)
+            workspacePaneStreamingAssistantId = workspacePaneItems[index].id
+            cacheWorkspacePaneRows([workspacePaneItems[index]])
+            return
+        }
+        let cleaned = Self.stripDiagnostics(raw)
+        guard !cleaned.isEmpty else { return }
+        let item = ChatItem(kind: .assistant, text: cleaned)
+        workspacePaneStreamingAssistantId = item.id
+        workspacePaneItems.append(item)
+        cacheWorkspacePaneRows([item])
+    }
+
+    private func appendWorkspacePaneThought(
+        _ raw: String,
+        path: String?,
+        sessionId: String?,
+        runId: String?
+    ) {
+        guard workspacePaneIsCurrent(path: path, sessionId: sessionId, runId: runId) else { return }
+        if let id = workspacePaneStreamingThoughtId,
+           let index = workspacePaneItems.firstIndex(where: { $0.id == id }) {
+            workspacePaneItems[index].text = Self.stripDiagnostics(workspacePaneItems[index].text + raw)
+            cacheWorkspacePaneRows([workspacePaneItems[index]])
+            return
+        }
+        let cleaned = Self.stripDiagnostics(raw)
+        guard !cleaned.isEmpty else { return }
+        let item = ChatItem(kind: .thought, text: cleaned)
+        workspacePaneStreamingThoughtId = item.id
+        workspacePaneItems.append(item)
+        cacheWorkspacePaneRows([item])
+    }
+
+    private func upsertWorkspacePaneTool(
+        _ update: [String: Any],
+        isUpdate: Bool,
+        path: String?,
+        sessionId: String?,
+        runId: String?
+    ) {
+        guard workspacePaneIsCurrent(path: path, sessionId: sessionId, runId: runId) else { return }
+        workspacePaneStreamingAssistantId = nil
+        workspacePaneStreamingThoughtId = nil
+        let callId = update.string("toolCallId") ?? UUID().uuidString
+        let title = update.string("title") ?? update.string("kind") ?? "tool"
+        let status = update.string("status") ?? "pending"
+        let payload = extractToolPayload(update)
+        if let index = workspacePaneItems.lastIndex(where: { $0.kind == .tool && $0.toolId == callId }) {
+            workspacePaneItems[index].text = title
+            workspacePaneItems[index].toolStatus = status
+            if let input = payload.input { workspacePaneItems[index].toolInput = input }
+            if let output = payload.output { workspacePaneItems[index].toolOutput = output }
+            cacheWorkspacePaneRows([workspacePaneItems[index]])
+        } else if !isUpdate || title != "tool" {
+            let item = ChatItem(
+                kind: .tool,
+                text: title,
+                toolId: callId,
+                toolStatus: status,
+                toolInput: payload.input,
+                toolOutput: payload.output
+            )
+            workspacePaneItems.append(item)
+            cacheWorkspacePaneRows([item])
+        }
     }
 
     let client = AcpClient()
@@ -269,6 +653,8 @@ final class ChatStore {
     private var persistWork: DispatchWorkItem?
     private var richTranscriptRows: [String: ChatItem] = [:]
     private var mountSkillRefreshGeneration = 0
+    private var workspacePaneLoadGeneration = 0
+    private var workspacePaneRichRows: [String: ChatItem] = [:]
 
     init() {
         OverlayPaths.bootstrap()
@@ -317,6 +703,7 @@ final class ChatStore {
     }
 
     func prepareToQuit() {
+        closeSideStage()
         WorkspaceRegistry.interruptActive(in: &workspaceState)
         persistWorkspaceState()
         control.stop()
@@ -330,6 +717,22 @@ final class ChatStore {
             case .thought:
                 if item.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     return isBusy && item.id == streamingThoughtId
+                }
+                return true
+            default:
+                return true
+            }
+        }
+    }
+
+    var visibleWorkspacePaneItems: [ChatItem] {
+        workspacePaneItems.filter { item in
+            switch item.kind {
+            case .assistant:
+                return !item.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            case .thought:
+                if item.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    return item.id == workspacePaneStreamingThoughtId
                 }
                 return true
             default:
@@ -426,7 +829,11 @@ final class ChatStore {
     }
 
     var slashMenuVisible: Bool {
-        !paletteSuppressed && !showAvatarPicker && !isBusy && !visiblePaletteItems.isEmpty
+        PromptTriggerPolicy.hasActiveTrigger(in: draft)
+            && !paletteSuppressed
+            && !showAvatarPicker
+            && !isBusy
+            && !visiblePaletteItems.isEmpty
     }
 
     var isAppPalette: Bool {
@@ -1288,7 +1695,7 @@ final class ChatStore {
                 || (mainId != nil && sessionId != mainId)))
             || (sessionId.isEmpty && (childBusy || hushMainAssistant))
         if isChild {
-            applyChildUpdateData(data)
+            applyChildUpdateData(data, sessionId: sessionId)
             return
         }
         applyUpdateData(data)
@@ -1660,7 +2067,7 @@ final class ChatStore {
         isStartingSession = true
         items = []
         richTranscriptRows = [:]
-        markdownPreview = nil
+        closeSideStage()
         status = "resuming"
         Task { @MainActor in
             do {
@@ -1761,7 +2168,7 @@ final class ChatStore {
         streamingAssistantId = nil
         streamingThoughtId = nil
         lastTurnDuration = 0
-        markdownPreview = nil
+        closeSideStage()
         clearActiveWorkspaceRun()
         status = "new session"
         Task { @MainActor in
@@ -1929,7 +2336,30 @@ final class ChatStore {
         queueStreamFlush()
     }
 
+    func setStreamUISuspended(_ suspended: Bool) {
+        if streamUISuspended == suspended { return }
+        streamUISuspended = suspended
+        if !suspended {
+            queueStreamFlush()
+            if SideStagePolicy.shouldReloadOnShow(hasCachedRows: !workspacePaneItems.isEmpty),
+               let item = items.first(where: { $0.id == workspaceStage?.cardId }) {
+                workspacePaneLoadGeneration += 1
+                let generation = workspacePaneLoadGeneration
+                Task { @MainActor in
+                    await self.loadWorkspacePane(from: item, generation: generation)
+                }
+            }
+        }
+    }
+
     private func queueStreamFlush() {
+        guard OverlayRenderPolicy.shouldFlushStreamToUI(
+            overlayVisible: !streamUISuspended,
+            isHiding: false
+        ) else {
+            streamFlushQueued = false
+            return
+        }
         guard !streamFlushQueued else { return }
         streamFlushQueued = true
         OverlayPulse.shared.onNextFrame { [weak self] in
@@ -1968,7 +2398,6 @@ final class ChatStore {
         streamingAssistantId = item.id
         items.append(item)
         persist()
-        status = "streaming"
     }
 
     private func applyAssistant(_ raw: String, at index: Int) {
@@ -1984,7 +2413,6 @@ final class ChatStore {
             streamingAssistantId = items[index].id
         }
         persist()
-        status = "streaming"
     }
 
     private func commitThought(_ raw: String) {
@@ -1999,7 +2427,6 @@ final class ChatStore {
             items.append(item)
         }
         persist()
-        status = "thinking"
     }
 
     private func upsertTool(_ update: [String: Any], isUpdate: Bool) {
@@ -2284,6 +2711,11 @@ final class ChatStore {
     }
 
     private func persist(immediate: Bool = false) {
+        transcriptRevision &+= 1
+        if !immediate,
+           !OverlayRenderPolicy.shouldPersistStreamChunk(isBusy: isBusy, childBusy: childBusy) {
+            return
+        }
         if items.count > 80 {
             items = Array(items.suffix(80))
         }
@@ -2380,6 +2812,14 @@ final class ChatStore {
         for var item in items {
             if item.kind == .workspaceRun {
                 item.workspaceChildren = coalesceWorkspaceChildren(item.workspaceChildren ?? [])
+                let incoming = workspaceRunRecord(item)
+                if let duplicate = result.firstIndex(where: {
+                    $0.kind == .workspaceRun
+                        && TranscriptStream.areDuplicateWorkspaceRuns(workspaceRunRecord($0), incoming)
+                }) {
+                    result[duplicate] = mergeWorkspaceRun(result[duplicate], item)
+                    continue
+                }
             }
             if let last = result.indices.last,
                TranscriptStream.canMergeAdjacent(
@@ -2414,6 +2854,54 @@ final class ChatStore {
             }
             return true
         }
+    }
+
+    private static func workspaceRunRecord(_ item: ChatItem) -> TranscriptStream.WorkspaceRunRecord {
+        TranscriptStream.WorkspaceRunRecord(
+            path: item.workspacePath ?? "",
+            runId: item.workspaceRunId,
+            sessionId: item.workspaceSessionId,
+            goal: item.workspaceGoal ?? "",
+            status: item.workspaceStatus,
+            summary: item.workspaceSummary ?? "",
+            anchorEntryId: item.workspaceAnchorEntryId
+        )
+    }
+
+    private static func mergeWorkspaceRun(_ earlier: ChatItem, _ later: ChatItem) -> ChatItem {
+        var merged = earlier
+        merged.workspaceAnchorEntryId = earlier.workspaceAnchorEntryId ?? later.workspaceAnchorEntryId
+        merged.workspaceRunId = earlier.workspaceRunId ?? later.workspaceRunId
+        merged.workspaceSessionId = earlier.workspaceSessionId ?? later.workspaceSessionId
+        if later.text.count > earlier.text.count { merged.text = later.text }
+        if (later.workspaceName?.count ?? 0) > (earlier.workspaceName?.count ?? 0) {
+            merged.workspaceName = later.workspaceName
+        }
+        if (later.workspaceGoal?.count ?? 0) > (earlier.workspaceGoal?.count ?? 0) {
+            merged.workspaceGoal = later.workspaceGoal
+        }
+        if (later.workspaceSummary?.count ?? 0) > (earlier.workspaceSummary?.count ?? 0) {
+            merged.workspaceSummary = later.workspaceSummary
+        }
+        if (later.workspaceQuestion?.count ?? 0) > (earlier.workspaceQuestion?.count ?? 0) {
+            merged.workspaceQuestion = later.workspaceQuestion
+        }
+        if let status = later.workspaceStatus, !status.isEmpty {
+            merged.workspaceStatus = status
+        }
+        let changed = (earlier.workspaceChangedPaths ?? []) + (later.workspaceChangedPaths ?? [])
+        if !changed.isEmpty {
+            merged.workspaceChangedPaths = Array(NSOrderedSet(array: changed)) as? [String]
+        }
+        if let left = earlier.workspaceStartedAt, let right = later.workspaceStartedAt {
+            merged.workspaceStartedAt = min(left, right)
+        } else {
+            merged.workspaceStartedAt = earlier.workspaceStartedAt ?? later.workspaceStartedAt
+        }
+        if (later.workspaceChildren?.count ?? 0) > (earlier.workspaceChildren?.count ?? 0) {
+            merged.workspaceChildren = later.workspaceChildren
+        }
+        return merged
     }
 
     private static func coalesceWorkspaceChildren(_ children: [ChatItem]) -> [ChatItem] {
@@ -2667,18 +3155,15 @@ final class ChatStore {
         hushMainAssistant = true
         WorkspaceRegistry.rememberSession(path: resolved.path, sessionId: sessionId, in: &workspaceState)
         let brief = WorkspaceBrief(
+            runId: UUID().uuidString,
             path: resolved.path,
             name: resolved.name,
             status: .running,
             goal: prompt,
             summary: activeWorkspaceBrief?.path == resolved.path ? (activeWorkspaceBrief?.summary ?? "") : ""
         )
-        workspaceState.active = brief
-        persistWorkspaceState()
-        upsertWorkspaceCard(brief)
-        try? await client.applyBubblePreferences(sessionId: sessionId)
         if childBusy {
-            pendingChildSteer = prompt
+            pendingChildSteer = brief
             return [
                 "status": "started",
                 "name": resolved.name,
@@ -2686,11 +3171,22 @@ final class ChatStore {
                 "note": "queued follow-up on the running workspace",
             ]
         }
+        workspaceState.active = brief
+        persistWorkspaceState()
+        upsertWorkspaceCard(brief)
+        if let index = items.lastIndex(where: { $0.kind == .workspaceRun && $0.workspacePath == resolved.path }) {
+            items[index].workspaceSessionId = sessionId
+        }
+        try? await client.applyBubblePreferences(sessionId: sessionId)
         childBusy = true
         childAssistant = ""
         childChanged = []
         Task { @MainActor in
             await self.awaitChildPrompt(sessionId: sessionId, prompt: prompt, mount: resolved)
+        }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            await self.captureWorkspaceAnchor(sessionId: sessionId, goal: prompt, path: resolved.path)
         }
         return [
             "status": "started",
@@ -2731,17 +3227,13 @@ final class ChatStore {
             childBusy = true
             childAssistant = ""
             childChanged = []
-            if var active = workspaceState.active {
-                active.goal = next
-                active.status = .running
-                workspaceState.active = active
-                persistWorkspaceState()
-                upsertWorkspaceCard(active)
-            }
+            workspaceState.active = next
+            persistWorkspaceState()
+            upsertWorkspaceCard(next)
             let sessionId = childSessionId
             Task { @MainActor in
                 guard let sessionId else { return }
-                await self.awaitChildPrompt(sessionId: sessionId, prompt: next, mount: mount)
+                await self.awaitChildPrompt(sessionId: sessionId, prompt: next.goal, mount: mount)
             }
             return
         }
@@ -2772,6 +3264,16 @@ final class ChatStore {
         workspaceState.active = brief
         persistWorkspaceState()
         upsertWorkspaceCard(brief)
+        if workspacePaneIsCurrent(path: mount.path),
+           let item = items.last(where: { $0.kind == .workspaceRun && $0.workspacePath == mount.path }) {
+            workspacePaneStreamingAssistantId = nil
+            workspacePaneStreamingThoughtId = nil
+            workspacePaneLoadGeneration += 1
+            let generation = workspacePaneLoadGeneration
+            Task { @MainActor in
+                await self.loadWorkspacePane(from: item, generation: generation)
+            }
+        }
         OverlayLog.write("workspace run \(brief.status.rawValue) \(brief.name)")
         if isBusy && !injecting {
             OverlayLog.write("ending parent turn after workspace result")
@@ -2878,22 +3380,34 @@ final class ChatStore {
         return false
     }
 
-    private func applyChildUpdateData(_ data: Data) {
+    private func applyChildUpdateData(_ data: Data, sessionId routedSessionId: String) {
         guard let params = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
         let update = params.dictionary("update") ?? params
         let kind = update.string("sessionUpdate") ?? ""
+        let path = workspaceState.active?.path
+        let runId = workspaceState.active?.runId
+        let sessionId = routedSessionId.isEmpty ? childSessionId : routedSessionId
         switch kind {
         case "agent_message_chunk":
             if let text = extractText(update["content"]), !text.isEmpty {
                 childAssistant += text
                 patchActiveSummary(childAssistant)
+                appendWorkspacePaneAssistant(text, path: path, sessionId: sessionId, runId: runId)
             }
         case "agent_thought_chunk":
             if let text = extractText(update["content"]), !text.isEmpty {
                 appendWorkspaceThought(text)
+                appendWorkspacePaneThought(text, path: path, sessionId: sessionId, runId: runId)
             }
         case "tool_call", "tool_call_update":
             upsertWorkspaceChildTool(update, isUpdate: kind == "tool_call_update")
+            upsertWorkspacePaneTool(
+                update,
+                isUpdate: kind == "tool_call_update",
+                path: path,
+                sessionId: sessionId,
+                runId: runId
+            )
         default:
             break
         }
@@ -2910,11 +3424,15 @@ final class ChatStore {
         let status = brief.status.rawValue
         if let index = items.lastIndex(where: { $0.kind == .workspaceRun && $0.workspacePath == brief.path }) {
             let userSpokeAfter = items.suffix(from: index + 1).contains { $0.kind == .user }
+            let sameRun = brief.runId?.isEmpty == false
+                && items[index].workspaceRunId == brief.runId
             if TranscriptStream.shouldReuseWorkspaceCard(
                 existingStatus: items[index].workspaceStatus,
-                userSpokeAfter: userSpokeAfter
+                userSpokeAfter: userSpokeAfter,
+                sameRun: sameRun
             ) {
                 items[index].text = brief.name
+                items[index].workspaceRunId = brief.runId
                 items[index].workspaceName = brief.name
                 items[index].workspaceStatus = status
                 items[index].workspaceGoal = brief.goal
@@ -2941,6 +3459,7 @@ final class ChatStore {
                 kind: .workspaceRun,
                 text: brief.name,
                 workspacePath: brief.path,
+                workspaceRunId: brief.runId,
                 workspaceName: brief.name,
                 workspaceStatus: status,
                 workspaceGoal: brief.goal,
@@ -2948,7 +3467,8 @@ final class ChatStore {
                 workspaceQuestion: brief.question,
                 workspaceChangedPaths: brief.changedPaths,
                 workspaceChildren: [],
-                workspaceStartedAt: Date().timeIntervalSince1970
+                workspaceStartedAt: Date().timeIntervalSince1970,
+                workspaceSessionId: childSessionId
             )
         )
         persist()

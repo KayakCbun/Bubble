@@ -7,12 +7,15 @@ final class OverlayRootView: NSView {
     private var onPinToggle: (() -> Void)?
     private var onPreviewFinder: (() -> Void)?
     private var onPreviewClose: (() -> Void)?
+    private var onPreviewBack: (() -> Void)?
     private var maskTranscriptHeight: CGFloat = 0
     private var maskPickerHeight: CGFloat = 0
     private var maskCommandPaletteHeight: CGFloat = 0
     private var maskTranscriptWidth = OverlayMetrics.transcriptWidthDefault
     private var maskComposerHeight = OverlayMetrics.minHeight
     private var maskPreviewWidth: CGFloat = 0
+    private var maskPreviewIsMarkdown = false
+    private var maskPreviewHasBack = false
 
     override var isFlipped: Bool { true }
     override var isOpaque: Bool { false }
@@ -25,9 +28,14 @@ final class OverlayRootView: NSView {
         onPinToggle = onToggle
     }
 
-    func installPreviewControls(onFinder: @escaping () -> Void, onClose: @escaping () -> Void) {
+    func installPreviewControls(
+        onFinder: @escaping () -> Void,
+        onClose: @escaping () -> Void,
+        onBack: @escaping () -> Void
+    ) {
         onPreviewFinder = onFinder
         onPreviewClose = onClose
+        onPreviewBack = onBack
     }
 
     override func viewDidMoveToWindow() {
@@ -81,6 +89,9 @@ final class OverlayRootView: NSView {
         case .previewClose:
             onPreviewClose?()
             return
+        case .previewBack:
+            onPreviewBack?()
+            return
         case nil:
             break
         }
@@ -92,6 +103,7 @@ final class OverlayRootView: NSView {
         case width
         case previewFinder
         case previewClose
+        case previewBack
     }
 
     private func control(at point: NSPoint) -> TranscriptControl? {
@@ -107,10 +119,10 @@ final class OverlayRootView: NSView {
         guard atEitherVerticalEdge else { return nil }
 
         if maskPreviewWidth > 1 {
-            let previewTrailing = OverlayMetrics.shadowInset
+            let previewLeading = OverlayMetrics.shadowInset
                 + maskTranscriptWidth
                 + OverlayMetrics.stackSpacing
-                + maskPreviewWidth
+            let previewTrailing = previewLeading + maskPreviewWidth
             let closeRect = NSRect(
                 x: previewTrailing - hitWidth,
                 y: 0,
@@ -120,14 +132,27 @@ final class OverlayRootView: NSView {
             if closeRect.contains(point) {
                 return .previewClose
             }
-            let finderRect = NSRect(
-                x: previewTrailing - hitWidth * 2,
-                y: 0,
-                width: hitWidth,
-                height: bounds.height
-            )
-            if finderRect.contains(point) {
-                return .previewFinder
+            if maskPreviewIsMarkdown {
+                let finderRect = NSRect(
+                    x: previewTrailing - hitWidth * 2,
+                    y: 0,
+                    width: hitWidth,
+                    height: bounds.height
+                )
+                if finderRect.contains(point) {
+                    return .previewFinder
+                }
+                if maskPreviewHasBack {
+                    let backRect = NSRect(
+                        x: previewLeading,
+                        y: 0,
+                        width: hitWidth,
+                        height: bounds.height
+                    )
+                    if backRect.contains(point) {
+                        return .previewBack
+                    }
+                }
             }
         }
 
@@ -157,7 +182,9 @@ final class OverlayRootView: NSView {
         commandPaletteHeight: CGFloat = 0,
         transcriptWidth: CGFloat = OverlayMetrics.transcriptWidthDefault,
         composerHeight: CGFloat = OverlayMetrics.minHeight,
-        previewWidth: CGFloat = 0
+        previewWidth: CGFloat = 0,
+        previewIsMarkdown: Bool = false,
+        previewHasBack: Bool = false
     ) {
         maskTranscriptHeight = transcriptHeight
         maskPickerHeight = pickerHeight
@@ -165,6 +192,8 @@ final class OverlayRootView: NSView {
         maskTranscriptWidth = transcriptWidth
         maskComposerHeight = composerHeight > 1 ? composerHeight : OverlayMetrics.minHeight
         maskPreviewWidth = previewWidth
+        maskPreviewIsMarkdown = previewIsMarkdown
+        maskPreviewHasBack = previewHasBack
         rebuildCardMask()
     }
 

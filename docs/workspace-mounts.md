@@ -13,7 +13,7 @@ Bubble stays Bubble. A mount is an address-book entry for another local folder. 
 ## Isolation
 
 - Main cwd stays `~/.bubble/workspace`. Child cwd is the mount path, so that folder’s `AGENTS.md` loads only there. The main prompt lists each mount’s project skill names so Bubble knows when to dispatch. It does not load those skills itself.
-- Child thought/tool/diff stay inside the run card (UI only).
+- Child thought/tool/diff never enter the main session. The main transcript shows a run card (the brief). The full workspace session is a read-only side stage.
 - Each main prompt is prefixed with a compact mount-status block the UI does not show in the user bubble.
 - When the child finishes, Bubble starts a short text-only turn to tell the user the result. That turn must not call tools. If it tries, the tools are cancelled and the child's summary is posted as fallback.
 - No filesystem jail: Bubble can still touch arbitrary paths, as today. Policy is: use `workspace_run` for substantive work in a mount; do not adopt that folder’s `AGENTS.md` as persona.
@@ -30,8 +30,12 @@ The extension calls overlay over loopback JSON. Overlay owns `session/new`, stre
 
 ## Conversation
 
-- User → Bubble → a run card at that turn (updates in place while live) → Bubble speaks on terminal events. A later user turn that calls `workspace_run` opens a new card, even if the previous card is still marked running. The stale card is closed.
+- User → Bubble → a run card at that turn (brief only; updates in place while live) → Bubble speaks on terminal events. A later user turn that calls `workspace_run` opens a new card, even if the previous card is still marked running. The stale card is closed.
+- Click a run card or the live composer chip to open the side stage on that mount's workspace session. Do not auto-open. The side stage is read-only; the user still addresses Bubble.
+- The side stage shows the whole workspace session, not just this run. Clicking a finished card scrolls to that run's user turn. Clicking a live or waiting card follows the tail.
+- Markdown preview and the workspace session share one side stage. Opening a markdown link from the workspace session slides to preview with a back control; Escape on that preview returns to the session. A markdown link from the main transcript has no back stack; Escape closes the stage.
 - Composer chip while a run is active (name, status, stop). Not a second input.
+- Hide overlay remembers the side stage (and its one-level markdown stack). Hide ≠ close the stage. Escape closes the stage, then hides the overlay. Clicking the open run card closes the stage. Quit clears it.
 - Escape / click-outside hides the overlay; the run continues. Stop is explicit (chip, card, or `workspace_cancel`).
 - Hide ≠ quit. Quit kills `pi-acp` and marks the run interrupted; relaunch loads the child session id and injects the interrupted brief.
 

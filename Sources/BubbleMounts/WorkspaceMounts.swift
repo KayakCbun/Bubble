@@ -9,6 +9,7 @@ public enum WorkspaceStatus: String, Codable, Equatable, Sendable {
 }
 
 public struct WorkspaceBrief: Codable, Equatable, Sendable {
+    public var runId: String?
     public var path: String
     public var name: String
     public var status: WorkspaceStatus
@@ -18,6 +19,7 @@ public struct WorkspaceBrief: Codable, Equatable, Sendable {
     public var changedPaths: [String]
 
     public init(
+        runId: String? = nil,
         path: String,
         name: String,
         status: WorkspaceStatus,
@@ -26,6 +28,7 @@ public struct WorkspaceBrief: Codable, Equatable, Sendable {
         question: String? = nil,
         changedPaths: [String] = []
     ) {
+        self.runId = runId
         self.path = path
         self.name = name
         self.status = status

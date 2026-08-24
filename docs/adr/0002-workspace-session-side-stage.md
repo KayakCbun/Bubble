@@ -1,0 +1,3 @@
+# Workspace session lives in the side stage, not inside the run card
+
+The main transcript shows a run card (the brief). Clicking it opens the overlay's existing extra pane on that mount's workspace session: read-only, default transcript width, exclusive with markdown preview. We rejected expanding thought/tool/diff in the card (it made the main conversation a nested agent) and a run-only pane (it broke continuity across reused workspace sessions). Each card stores an anchor to the child session's user turn so a finished run opens at that turn instead of the tail; a live or waiting card follows the tail. Markdown opened from the session is a one-level stack with a back control, not a second column.

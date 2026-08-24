@@ -99,6 +99,12 @@ struct PiSetupCheck {
         expectContains(source, "path.join(os.homedir(), \".bubble\", \"steering\")", "extension publishes a session-local endpoint")
         expectContains(source, "request.token !== steeringToken || request.generation !== steeringGeneration", "steering endpoint is bound to one turn")
         expectContains(source, "steeringGeneration += 1", "each active turn gets a new steering generation")
+        expectContains(source, "boundSteeringSessionId", "steering stays bound to the main session")
+        expectContains(
+            source,
+            "if (boundSteeringSessionId && sessionId !== boundSteeringSessionId) return",
+            "workspace child sessions must not replace the main steering endpoint"
+        )
     }
 
     static func testBranchExtension() {

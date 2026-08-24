@@ -276,6 +276,7 @@ let steeringControlFile: string | undefined;
 let steeringToken = "";
 let steeringBusy = false;
 let steeringGeneration = 0;
+let boundSteeringSessionId = "";
 
 function removeSteeringControl() {
   if (!steeringControlFile) return;
@@ -298,9 +299,21 @@ function publishSteeringControl() {
   );
 }
 
+function eventSessionId(ctx: any): string | undefined {
+  return sessionIdFromFile(ctx?.sessionManager?.getSessionFile?.());
+}
+
+function isBoundSteeringSession(ctx: any): boolean {
+  const sessionId = eventSessionId(ctx);
+  if (sessionId && boundSteeringSessionId && sessionId !== boundSteeringSessionId) return false;
+  return true;
+}
+
 function startSteeringControl(pi: ExtensionAPI, sessionFile: string | undefined) {
   const sessionId = sessionIdFromFile(sessionFile);
   if (!sessionId) return;
+  if (boundSteeringSessionId && sessionId !== boundSteeringSessionId) return;
+  boundSteeringSessionId = sessionId;
   removeSteeringControl();
   const directory = path.join(os.homedir(), ".bubble", "steering");
   fs.mkdirSync(directory, { recursive: true });
@@ -413,21 +426,25 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", (_event, ctx) => {
     startSteeringControl(pi, ctx.sessionManager.getSessionFile());
   });
-  pi.on("agent_start", () => {
+  pi.on("agent_start", (_event, ctx) => {
+    if (!isBoundSteeringSession(ctx)) return;
     steeringBusy = true;
     steeringGeneration += 1;
     steeringToken = crypto.randomUUID();
     publishSteeringControl();
   });
-  pi.on("agent_settled", () => {
+  pi.on("agent_settled", (_event, ctx) => {
+    if (!isBoundSteeringSession(ctx)) return;
     steeringBusy = false;
     steeringToken = crypto.randomUUID();
     removeSteeringControl();
   });
-  pi.on("session_shutdown", () => {
+  pi.on("session_shutdown", (_event, ctx) => {
+    if (!isBoundSteeringSession(ctx)) return;
     steeringBusy = false;
     removeSteeringControl();
     steeringControlFile = undefined;
+    boundSteeringSessionId = "";
     steeringServer?.close();
     steeringServer = undefined;
   });

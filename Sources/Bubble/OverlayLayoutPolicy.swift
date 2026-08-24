@@ -1,6 +1,16 @@
 import CoreGraphics
 import Foundation
 
+struct OverlayLayout: Equatable {
+    var totalHeight: CGFloat
+    var transcriptHeight: CGFloat
+    var pickerHeight: CGFloat
+    var commandPaletteHeight: CGFloat
+    var transcriptWidth: CGFloat
+    var composerHeight: CGFloat
+    var previewWidth: CGFloat = 0
+}
+
 enum OverlayLayoutPolicy {
     static func isTranscriptPresented(itemCount: Int, isStartingSession: Bool) -> Bool {
         itemCount > 0 || isStartingSession

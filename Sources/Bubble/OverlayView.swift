@@ -57,7 +57,6 @@ struct OverlayView: View {
     @State private var expandedThoughts: Set<UUID> = []
     @State private var expandedToolGroups: Set<String> = []
     @State private var expandedTools: Set<UUID> = []
-    @State private var expandedWorkspaceRuns: Set<UUID> = []
     @State private var followLatest = true
     @State private var followQueued = false
     @StateObject private var ime = IMEComposingMonitor()
@@ -78,14 +77,19 @@ struct OverlayView: View {
     }
 
     private var previewWidth: CGFloat {
-        store.markdownPreview == nil ? 0 : OverlayMetrics.previewWidth
+        SideStagePolicy.width(
+            showingMarkdown: store.markdownPreview != nil,
+            showingWorkspace: store.workspaceStage != nil,
+            markdownWidth: OverlayMetrics.previewWidth,
+            workspaceWidth: OverlayMetrics.transcriptWidthDefault
+        )
     }
 
     private var isTranscriptPresented: Bool {
         OverlayLayoutPolicy.isTranscriptPresented(
             itemCount: store.visibleItems.count,
             isStartingSession: store.isStartingSession
-        ) || store.markdownPreview != nil
+        ) || store.sideStagePresented
     }
 
     private var pickerHeight: CGFloat {
@@ -165,12 +169,12 @@ struct OverlayView: View {
                             .padding(.trailing, 6)
                             .padding(.top, 6)
                         }
-                    if let preview = store.markdownPreview {
-                        markdownPreviewPane(preview)
+                    if store.sideStagePresented {
+                        sideStagePane
                             .transition(.move(edge: .trailing).combined(with: .opacity))
                     }
                 }
-                .animation(OverlayMotion.panel, value: store.markdownPreview?.path)
+                .animation(OverlayMotion.panel, value: store.sideStageIdentity)
             }
             VStack(spacing: 8) {
                 if let brief = store.activeWorkspaceBrief, brief.isActive {
@@ -205,7 +209,7 @@ struct OverlayView: View {
                 .animation(OverlayMotion.quick, value: store.slashMenuVisible)
             }
         }
-        .animation(OverlayMotion.panel, value: store.markdownPreview?.path)
+        .animation(OverlayMotion.panel, value: store.sideStageIdentity)
         .frame(maxWidth: .infinity, alignment: .bottom)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
         .padding(OverlayMetrics.shadowInset)
@@ -232,7 +236,10 @@ struct OverlayView: View {
             restoreFocus()
         }
         .onChange(of: store.draft) { _, _ in
-            ime.refresh()
+            guard PromptTriggerPolicy.hasActiveTrigger(in: store.draft) else {
+                if store.slashHighlight != 0 { store.slashHighlight = 0 }
+                return
+            }
             let count = store.visiblePaletteItems.count
             if count == 0 {
                 store.slashHighlight = 0
@@ -241,8 +248,7 @@ struct OverlayView: View {
             }
         }
         .onKeyPress(.escape) {
-            if store.markdownPreview != nil {
-                store.closeMarkdownPreview()
+            if store.handleSideStageEscape() {
                 return .handled
             }
             if ImageZoomController.shared.isVisible {
@@ -266,9 +272,166 @@ struct OverlayView: View {
         }
     }
 
+    @ViewBuilder
+    private var sideStagePane: some View {
+        ZStack {
+            if let stage = store.workspaceStage {
+                workspaceSessionPane(stage)
+                    .opacity(store.markdownPreview == nil ? 1 : 0)
+                    .allowsHitTesting(store.markdownPreview == nil)
+            }
+            if let preview = store.markdownPreview {
+                markdownPreviewPane(preview)
+                    .transition(.asymmetric(
+                        insertion: .move(edge: .trailing).combined(with: .opacity),
+                        removal: .move(edge: .trailing).combined(with: .opacity)
+                    ))
+            }
+        }
+        .frame(width: previewWidth, height: transcriptHeight)
+        .clipped()
+        .animation(OverlayMotion.panel, value: store.sideStageIdentity)
+        .environment(\.openMarkdownPreview) { path in
+            store.openMarkdownPreview(path, fromWorkspacePane: store.workspaceStage != nil)
+        }
+    }
+
+    private func workspaceSessionPane(_ stage: WorkspaceStage) -> some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: "folder")
+                    .font(.system(size: 12, weight: .semibold))
+                Text(stage.name)
+                    .font(.system(size: 13, weight: .semibold))
+                    .lineLimit(1)
+                if let item = store.items.first(where: { $0.id == stage.cardId }),
+                   let status = item.workspaceStatus {
+                    if status == "running" {
+                        RunningSweepLabel()
+                    } else {
+                        Text(status)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                Spacer(minLength: 36)
+            }
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            Divider().opacity(0.28)
+            workspaceTranscriptList
+        }
+        .frame(width: OverlayMetrics.transcriptWidthDefault, height: transcriptHeight)
+        .frostedGlass(in: transcriptShape)
+        .overlay(alignment: .topTrailing) {
+            PreviewChromeButton(symbol: "xmark", help: "Close workspace session") {
+                store.closeSideStage()
+            }
+            .padding(.trailing, 6)
+            .padding(.top, 6)
+        }
+    }
+
+    private var workspaceTranscriptList: some View {
+        let rows = groupedRows(from: store.visibleWorkspacePaneItems, collapsePrefix: "ws-pane")
+        let live = store.childBusy && store.workspaceStage?.path == store.activeWorkspaceBrief?.path
+        return ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 18) {
+                    ForEach(rows) { row in
+                        transcriptRow(row, interactive: false)
+                            .id(workspaceRowScrollId(row))
+                    }
+                    if live, let started = store.items.first(where: { $0.id == store.workspaceStage?.cardId })?.workspaceStartedAt {
+                        WorkingRow(startedAt: Date(timeIntervalSince1970: started))
+                            .id("workspace-working")
+                    }
+                    Color.clear
+                        .frame(height: OverlayMetrics.transcriptCornerRadius)
+                        .id("workspace-end")
+                }
+                .padding(.horizontal, OverlayMetrics.transcriptInset)
+                .padding(.top, OverlayMetrics.transcriptInset)
+                .padding(.bottom, 0)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .foregroundStyle(OverlayMetrics.ink)
+            }
+            .scrollIndicators(.never)
+            .scrollBounceBehavior(.basedOnSize)
+            .onAppear { scrollWorkspacePane(proxy) }
+            .onChange(of: store.workspacePaneScrollToken) { _, _ in
+                scrollWorkspacePane(proxy)
+            }
+            .onChange(of: store.workspacePaneItems.count) { _, _ in
+                followWorkspacePane(proxy)
+            }
+            .onChange(of: store.workspacePaneItems.last?.text) { _, _ in
+                followWorkspacePane(proxy)
+            }
+            .onChange(of: store.workspacePaneItems.last?.toolStatus) { _, _ in
+                followWorkspacePane(proxy)
+            }
+            .onChange(of: store.childBusy) { _, _ in
+                followWorkspacePane(proxy)
+            }
+        }
+    }
+
+    private func workspaceRowScrollId(_ row: TranscriptRow) -> String {
+        switch row {
+        case .message(let item):
+            if item.kind == .user, let entry = item.sourceEntryId, !entry.isEmpty {
+                return "entry-\(entry)"
+            }
+            return item.id.uuidString
+        case .tool(let item):
+            return item.id.uuidString
+        case .collapsedTools(let id, _):
+            return id
+        }
+    }
+
+    private func scrollWorkspacePane(_ proxy: ScrollViewProxy) {
+        let follow = store.workspaceStage?.followLatest ?? true
+        let target = SideStagePolicy.scrollTarget(
+            followLatest: follow,
+            anchorEntryId: store.workspaceStage?.anchorEntryId
+        )
+        OverlayPulse.shared.onNextFrame {
+            var transaction = Transaction()
+            transaction.disablesAnimations = follow
+            withTransaction(transaction) {
+                if follow {
+                    proxy.scrollTo(target, anchor: .bottom)
+                } else {
+                    withAnimation(OverlayMotion.scroll) {
+                        proxy.scrollTo(target, anchor: .top)
+                    }
+                }
+            }
+        }
+    }
+
+    private func followWorkspacePane(_ proxy: ScrollViewProxy) {
+        guard store.workspaceStage?.followLatest == true else { return }
+        OverlayPulse.shared.onNextFrame {
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                proxy.scrollTo("workspace-end", anchor: .bottom)
+            }
+        }
+    }
+
     private func markdownPreviewPane(_ document: MarkdownDocument) -> some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
+                if store.canReturnToWorkspace {
+                    PreviewChromeButton(symbol: "chevron.left", help: "Back to workspace session") {
+                        store.returnToWorkspaceStage()
+                    }
+                }
                 Image(systemName: "doc.richtext.fill")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(Color(red: 0.25, green: 0.55, blue: 0.95))
@@ -278,7 +441,7 @@ struct OverlayView: View {
                 Spacer(minLength: 56)
             }
             .foregroundStyle(.secondary)
-            .padding(.horizontal, 12)
+            .padding(.horizontal, store.canReturnToWorkspace ? 6 : 12)
             .padding(.vertical, 8)
             Divider().opacity(0.28)
             if let error = document.error {
@@ -309,7 +472,7 @@ struct OverlayView: View {
                     NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: document.path)])
                 }
                 PreviewChromeButton(symbol: "xmark", help: "Close preview") {
-                    store.closeMarkdownPreview()
+                    store.closeSideStage()
                 }
             }
             .padding(.trailing, 6)
@@ -338,9 +501,12 @@ struct OverlayView: View {
                         if isFirstRowAfterBranch(row) {
                             branchCutoverDivider
                         }
-                        transcriptRow(row)
-                            .id(row.id)
-                            .opacity(isAfterBranchPoint(row) ? 0.34 : 1)
+                        EquatableSection(value: rowRenderKey(row)) {
+                            transcriptRow(row)
+                        }
+                        .equatable()
+                        .id(row.id)
+                        .opacity(isAfterBranchPoint(row) ? 0.34 : 1)
                     }
                     if store.isBusy {
                         WorkingRow(startedAt: store.turnStartedAt ?? Date())
@@ -411,10 +577,7 @@ struct OverlayView: View {
                 }
                 requestFollowLatest(proxy)
             }
-            .onChange(of: store.items.last?.text) { _, _ in
-                requestFollowLatest(proxy)
-            }
-            .onChange(of: store.items.last?.toolStatus) { _, _ in
+            .onChange(of: store.transcriptRevision) { _, _ in
                 requestFollowLatest(proxy)
             }
             .onChange(of: store.branchDraft?.sourceItemID) { _, sourceID in
@@ -592,64 +755,38 @@ struct OverlayView: View {
     }
 
     private func workspaceChip(_ brief: WorkspaceBrief) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: "folder")
-                .font(.system(size: 11, weight: .semibold))
-            Text(brief.name)
-                .font(.system(size: 12, weight: .medium))
-                .lineLimit(1)
-            if brief.status == .running {
-                RunningSweepLabel()
-            } else {
-                Text(brief.status.rawValue)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.tertiary)
+        Button {
+            store.openActiveWorkspaceStage()
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "folder")
+                    .font(.system(size: 11, weight: .semibold))
+                Text(brief.name)
+                    .font(.system(size: 12, weight: .medium))
+                    .lineLimit(1)
+                if brief.status == .running {
+                    RunningSweepLabel()
+                } else {
+                    Text(brief.status.rawValue)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.tertiary)
+                }
+                Spacer(minLength: 0)
             }
-            Spacer(minLength: 0)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
         }
-        .foregroundStyle(.secondary)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .buttonStyle(.plain)
+        .help("Show workspace session")
+        .accessibilityLabel("Show workspace session")
     }
 
     private struct RunningSweepLabel: View {
-        private let label = "running"
-        private let font = Font.system(size: 11, weight: .medium)
-
         var body: some View {
-            TimelineView(.animation(minimumInterval: 1.0 / 120.0, paused: false)) { context in
-                let cycle = 2.05
-                let t = context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: cycle)
-                let raw = min(1, t / 1.45)
-                let eased = raw * raw * (3 - 2 * raw)
-                Text(label)
-                    .font(font)
-                    .foregroundStyle(.tertiary)
-                    .overlay {
-                        Text(label)
-                            .font(font)
-                            .foregroundStyle(Color.primary.opacity(0.78))
-                            .mask {
-                                GeometryReader { geo in
-                                    let width = geo.size.width
-                                    let band = max(18, width * 0.62)
-                                    let travel = width + band
-                                    LinearGradient(
-                                        colors: [
-                                            .clear,
-                                            Color.white.opacity(0.35),
-                                            .white,
-                                            Color.white.opacity(0.35),
-                                            .clear,
-                                        ],
-                                        startPoint: .leading,
-                                        endPoint: .trailing
-                                    )
-                                    .frame(width: band, height: geo.size.height)
-                                    .offset(x: -band + CGFloat(eased) * travel)
-                                }
-                            }
-                    }
-            }
+            Text("running")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.tertiary)
         }
     }
 
@@ -1013,6 +1150,36 @@ struct OverlayView: View {
         return rows
     }
 
+    private func rowRenderKey(_ row: TranscriptRow) -> RowRenderKey {
+        switch row {
+        case .message(let item), .tool(let item):
+            return RowRenderKey(
+                id: item.id.uuidString,
+                kind: item.kind,
+                text: item.text,
+                toolStatus: item.toolStatus,
+                workspaceStatus: item.workspaceStatus,
+                workspaceSummary: item.workspaceSummary,
+                live: store.streamingAssistantId == item.id
+                    || store.streamingThoughtId == item.id
+                    || store.workspacePaneStreamingAssistantId == item.id
+                    || store.workspacePaneStreamingThoughtId == item.id,
+                selected: store.workspaceStage?.cardId == item.id
+            )
+        case .collapsedTools(let id, let items):
+            return RowRenderKey(
+                id: id,
+                kind: .tool,
+                text: "\(items.count)",
+                toolStatus: items.last?.toolStatus,
+                workspaceStatus: nil,
+                workspaceSummary: nil,
+                live: false,
+                selected: false
+            )
+        }
+    }
+
     private var showInputPlaceholder: Bool {
         store.draft.isEmpty && !ime.composing
     }
@@ -1093,14 +1260,14 @@ struct OverlayView: View {
     }
 
     @ViewBuilder
-    private func transcriptRow(_ row: TranscriptRow) -> some View {
+    private func transcriptRow(_ row: TranscriptRow, interactive: Bool = true) -> some View {
         switch row {
         case .message(let item):
             switch item.kind {
             case .user:
-                userBubble(item)
+                userBubble(item, interactive: interactive)
             case .assistant:
-                assistantBubble(item)
+                assistantBubble(item, interactive: interactive)
             case .thought:
                 thoughtBlock(item)
             case .system:
@@ -1130,12 +1297,12 @@ struct OverlayView: View {
         }
     }
 
-    private func userBubble(_ item: ChatItem) -> some View {
+    private func userBubble(_ item: ChatItem, interactive: Bool = true) -> some View {
         let text = item.text.trimmingCharacters(in: .whitespacesAndNewlines)
         let names = item.imageNames ?? []
-        let variants = store.variants(for: item)
+        let variants = interactive ? store.variants(for: item) : []
         let currentVariant = variants.firstIndex(where: \.isCurrent)
-        let showVariantSwitcher = ConversationBranchControlsPolicy.showsUserVariantSwitcher(
+        let showVariantSwitcher = interactive && ConversationBranchControlsPolicy.showsUserVariantSwitcher(
             variantCount: variants.count
         )
         return HStack {
@@ -1286,10 +1453,12 @@ struct OverlayView: View {
         }
     }
 
-    private func assistantBubble(_ item: ChatItem) -> some View {
-        let live = store.isBusy && store.streamingAssistantId == item.id
+    private func assistantBubble(_ item: ChatItem, interactive: Bool = true) -> some View {
+        let live = interactive
+            ? store.isBusy && store.streamingAssistantId == item.id
+            : store.childBusy && store.workspacePaneStreamingAssistantId == item.id
         let text = item.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let showBranchControl = ConversationBranchControlsPolicy.showsAssistantBranchAction(
+        let showBranchControl = interactive && ConversationBranchControlsPolicy.showsAssistantBranchAction(
             hasSourceEntry: item.sourceEntryId != nil,
             isStreaming: live
         )
@@ -1319,13 +1488,15 @@ struct OverlayView: View {
             }
         }
         .contextMenu {
-            if item.sourceEntryId != nil, item.sourceBranchable != false {
+            if interactive, item.sourceEntryId != nil, item.sourceBranchable != false {
                 Button("Branch from here") { store.beginBranch(from: item) }
                     .disabled(store.isBusy || store.childBusy || store.isSwitchingBranch)
             }
         }
         .accessibilityAction(named: "Branch from here") {
-            store.beginBranch(from: item)
+            if interactive {
+                store.beginBranch(from: item)
+            }
         }
     }
 
@@ -1371,7 +1542,8 @@ struct OverlayView: View {
     }
 
     private func thoughtBlock(_ item: ChatItem) -> some View {
-        let live = store.isBusy && store.streamingThoughtId == item.id
+        let live = (store.isBusy && store.streamingThoughtId == item.id)
+            || (store.childBusy && store.workspacePaneStreamingThoughtId == item.id)
         let open = live || expandedThoughts.contains(item.id)
         return VStack(alignment: .leading, spacing: 6) {
             Button {
@@ -1420,75 +1592,84 @@ struct OverlayView: View {
 
     private func workspaceRunCard(_ item: ChatItem) -> some View {
         let status = item.workspaceStatus ?? "running"
-        let live = status == "running"
-        let open = live || expandedWorkspaceRuns.contains(item.id)
+        let live = status == "running" || status == "waiting"
+        let selected = store.workspaceStage?.cardId == item.id
+        let goal = item.workspaceGoal?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let summary = item.workspaceSummary?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                Button {
-                    if live { return }
-                    withAnimation(OverlayMotion.snappy) {
-                        if open {
-                            expandedWorkspaceRuns.remove(item.id)
-                        } else {
-                            expandedWorkspaceRuns.insert(item.id)
-                        }
-                    }
-                } label: {
+        let question = item.workspaceQuestion?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let body: String = {
+            if status == "waiting", !question.isEmpty { return question }
+            if !summary.isEmpty { return workspacePreview(summary) }
+            return ""
+        }()
+        return HStack(alignment: .top, spacing: 8) {
+            Button {
+                store.toggleWorkspaceStage(from: item)
+            } label: {
+                VStack(alignment: .leading, spacing: 6) {
                     HStack(spacing: 6) {
-                        Image(systemName: open ? "chevron.down" : "chevron.right")
-                            .font(.system(size: 9, weight: .bold))
-                            .frame(width: 8)
                         Image(systemName: "folder")
-                            .font(.system(size: 10, weight: .semibold))
+                            .font(.system(size: 11, weight: .semibold))
                         Text(item.workspaceName ?? item.text)
+                            .font(.system(size: 13, weight: .semibold))
                             .lineLimit(1)
-                        Text(status)
-                            .foregroundStyle(.tertiary)
+                        if status == "running" {
+                            RunningSweepLabel()
+                        } else {
+                            Text(status)
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(.tertiary)
+                        }
                         Spacer(minLength: 0)
                     }
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.tertiary)
-                    .contentShape(Rectangle())
+                    if !goal.isEmpty {
+                        Text(goal)
+                            .font(.system(size: 12.5))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    if !body.isEmpty {
+                        Text(body)
+                            .font(.system(size: 12.5))
+                            .foregroundStyle(status == "waiting" ? OverlayMetrics.ink.opacity(0.82) : .secondary)
+                            .lineLimit(status == "running" ? 1 : 2)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Show workspace session")
+            .accessibilityLabel("Workspace run \(item.workspaceName ?? item.text), \(status)")
+            .accessibilityHint("Shows the workspace session")
+            if live {
+                Button {
+                    store.cancelWorkspaceRun()
+                } label: {
+                    Image(systemName: "stop.circle.fill")
+                        .font(.system(size: 16, weight: .semibold))
+                        .frame(width: 28, height: 28)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                if status == "running" || status == "waiting" {
-                    Button {
-                        store.cancelWorkspaceRun()
-                    } label: {
-                        Image(systemName: "stop.circle.fill")
-                            .font(.system(size: 14, weight: .semibold))
-                            .frame(width: 28, height: 28)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.tertiary)
-                    .help("Stop workspace run")
-                }
-            }
-            if !summary.isEmpty {
-                if open {
-                    MessageBody(text: summary)
-                        .padding(.leading, 18)
-                } else {
-                    Text(workspacePreview(summary))
-                        .font(.system(size: 12.5))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                        .padding(.leading, 18)
-                }
-            }
-            if open, let children = item.workspaceChildren, !children.isEmpty {
-                VStack(alignment: .leading, spacing: 4) {
-                    ForEach(groupedRows(from: children, collapsePrefix: "ws-\(item.id.uuidString)")) { row in
-                        workspaceChildRow(row)
-                    }
-                }
-                .padding(.leading, 18)
+                .foregroundStyle(.tertiary)
+                .help("Stop workspace run")
+                .accessibilityLabel("Stop workspace run")
             }
         }
-        .padding(.vertical, 2)
-        .opacity(0.92)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color.primary.opacity(selected ? 0.08 : 0.05))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(
+                    selected ? Color.accentColor.opacity(0.7) : Color.primary.opacity(0.08),
+                    lineWidth: selected ? 1.5 : 1
+                )
+        )
     }
 
     private func workspacePreview(_ text: String) -> String {
@@ -1500,18 +1681,6 @@ struct OverlayView: View {
             }
         let picked = lines.prefix(2).joined(separator: " ")
         return picked.isEmpty ? String(text.prefix(160)) : picked
-    }
-
-    @ViewBuilder
-    private func workspaceChildRow(_ row: TranscriptRow) -> some View {
-        switch row {
-        case .tool(let item):
-            toolRow(item)
-        case .collapsedTools(let id, let items):
-            collapsedTools(id: id, items: items)
-        case .message(let item):
-            thoughtBlock(item)
-        }
     }
 
     private func toolRow(_ item: ChatItem) -> some View {
@@ -1772,6 +1941,35 @@ private struct TranscriptWidthButton: View {
     }
 }
 
+private struct RowRenderKey: Equatable {
+    var id: String
+    var kind: ChatItem.Kind
+    var text: String
+    var toolStatus: String?
+    var workspaceStatus: String?
+    var workspaceSummary: String?
+    var live: Bool
+    var selected: Bool
+}
+
+private struct EquatableSection<Value: Equatable, Content: View>: View, Equatable {
+    let value: Value
+    let content: Content
+
+    init(value: Value, @ViewBuilder content: () -> Content) {
+        self.value = value
+        self.content = content()
+    }
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.value == rhs.value
+    }
+
+    var body: some View {
+        content
+    }
+}
+
 private enum TranscriptRow: Identifiable {
     case message(ChatItem)
     case tool(ChatItem)
@@ -1825,15 +2023,11 @@ private struct WorkingRow: View {
 
 private struct WorkingDots: View {
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 120.0, paused: false)) { context in
-            let t = context.date.timeIntervalSinceReferenceDate
-            HStack(spacing: 4) {
-                ForEach(0..<3, id: \.self) { index in
-                    let wave = 0.5 + 0.5 * sin((t * 2.2) - Double(index) * 0.7)
-                    Circle()
-                        .fill(Color.secondary.opacity(0.22 + 0.63 * wave))
-                        .frame(width: 5, height: 5)
-                }
+        HStack(spacing: 4) {
+            ForEach(0..<3, id: \.self) { index in
+                Circle()
+                    .fill(Color.secondary.opacity(0.35 + Double(index) * 0.18))
+                    .frame(width: 5, height: 5)
             }
         }
     }
@@ -1923,8 +2117,8 @@ final class IMEComposingMonitor: ObservableObject {
 
     private func isComposing(in window: NSWindow?) -> Bool {
         guard let window else { return false }
-        if let textView = window.firstResponder as? NSTextView, occupied(textView) {
-            return true
+        if let textView = window.firstResponder as? NSTextView, textView.isEditable {
+            return textView.hasMarkedText()
         }
         return hasOccupiedTextView(in: window.contentView)
     }
@@ -1944,37 +2138,61 @@ final class IMEComposingMonitor: ObservableObject {
 
 private struct InputCaret: View {
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 120.0, paused: false)) { context in
-            let t = context.date.timeIntervalSinceReferenceDate
-            let pulse = 0.5 + 0.5 * sin(t * .pi / 0.53)
-            Capsule()
-                .fill(Color.primary.opacity(0.12 + 0.78 * pulse))
-                .frame(width: 1.5, height: 16)
-        }
+        LayerPulsingCaret(width: 1.5, height: 16, duration: 0.53)
     }
 }
 
 private struct StreamingCaret: View {
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 120.0, paused: false)) { context in
-            let t = context.date.timeIntervalSinceReferenceDate
-            let pulse = 0.5 + 0.5 * sin(t * .pi / 0.48)
-            Capsule()
-                .fill(Color.primary.opacity(0.16 + 0.7 * pulse))
-                .frame(width: 1.6, height: 14)
-                .offset(y: 1)
-        }
+        LayerPulsingCaret(width: 1.6, height: 14, duration: 0.48)
+            .offset(y: 1)
     }
 }
 
-struct OverlayLayout: Equatable {
-    var totalHeight: CGFloat
-    var transcriptHeight: CGFloat
-    var pickerHeight: CGFloat
-    var commandPaletteHeight: CGFloat
-    var transcriptWidth: CGFloat
-    var composerHeight: CGFloat
-    var previewWidth: CGFloat = 0
+private struct LayerPulsingCaret: NSViewRepresentable {
+    var width: CGFloat
+    var height: CGFloat
+    var duration: CFTimeInterval
+
+    func makeNSView(context: Context) -> PulsingCaretNSView {
+        PulsingCaretNSView(width: width, height: height, duration: duration)
+    }
+
+    func updateNSView(_ view: PulsingCaretNSView, context: Context) {
+        view.configure(width: width, height: height, duration: duration)
+    }
+}
+
+private final class PulsingCaretNSView: NSView {
+    private var duration: CFTimeInterval
+
+    init(width: CGFloat, height: CGFloat, duration: CFTimeInterval) {
+        self.duration = duration
+        super.init(frame: NSRect(x: 0, y: 0, width: width, height: height))
+        wantsLayer = true
+        configure(width: width, height: height, duration: duration)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    func configure(width: CGFloat, height: CGFloat, duration: CFTimeInterval) {
+        frame.size = NSSize(width: width, height: height)
+        layer?.backgroundColor = NSColor.labelColor.cgColor
+        layer?.cornerRadius = width / 2
+        layer?.opacity = 0.9
+        if self.duration != duration || layer?.animation(forKey: "bubble-pulse") == nil {
+            self.duration = duration
+            let pulse = CABasicAnimation(keyPath: "opacity")
+            pulse.fromValue = 0.12
+            pulse.toValue = 0.9
+            pulse.duration = duration
+            pulse.autoreverses = true
+            pulse.repeatCount = .infinity
+            layer?.add(pulse, forKey: "bubble-pulse")
+        }
+    }
+
+    override var intrinsicContentSize: NSSize { frame.size }
 }
 
 struct OverlayLayoutKey: PreferenceKey {

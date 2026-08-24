@@ -13,14 +13,20 @@ swiftc -parse-as-library Sources/Bubble/ProseFormat.swift scripts/check_prose.sw
 swiftc -parse-as-library Sources/Bubble/TranscriptStream.swift Sources/Bubble/ProseFormat.swift scripts/check_transcript_stream.swift -o /tmp/bubble-check-stream
 /tmp/bubble-check-stream
 
-swiftc -parse-as-library Sources/Bubble/OverlayLayoutPolicy.swift scripts/check_overlay_layout.swift -o /tmp/bubble-check-layout
+swiftc -parse-as-library Sources/Bubble/OverlayLayoutPolicy.swift Sources/Bubble/OverlayRenderPolicy.swift scripts/check_overlay_layout.swift -o /tmp/bubble-check-layout
 /tmp/bubble-check-layout
+
+swiftc -parse-as-library Sources/Bubble/SideStage.swift scripts/check_side_stage.swift -o /tmp/bubble-check-side-stage
+/tmp/bubble-check-side-stage
 
 swiftc -parse-as-library Sources/Bubble/TranscriptInteractionPolicy.swift scripts/check_transcript_interactions.swift -o /tmp/bubble-check-transcript-interactions
 /tmp/bubble-check-transcript-interactions
 
 swiftc -parse-as-library Sources/Bubble/OverlayComposer.swift scripts/check_composer.swift -o /tmp/bubble-check-composer
 /tmp/bubble-check-composer
+
+swiftc -parse-as-library Sources/Bubble/PromptTriggerPolicy.swift scripts/check_prompt_palette.swift -o /tmp/bubble-check-prompt-palette
+/tmp/bubble-check-prompt-palette
 
 swift run DiagramChecks
 

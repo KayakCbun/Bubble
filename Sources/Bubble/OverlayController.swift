@@ -21,6 +21,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
     private var pendingTranscriptWide: Bool?
     private var pendingLayout: OverlayLayout?
     private var layoutQueued = false
+    private var lastAppliedLayout: OverlayLayout?
     private let frameAnimator = OverlayFrameAnimator()
 
     private let positionCenterXKey = "bubble.position.centerX"
@@ -149,6 +150,8 @@ final class OverlayController: NSObject, NSWindowDelegate {
                 self?.finishFrameAnimation()
             }
             frameAnimator.retarget(frame: dest, alpha: 1)
+        } else {
+            store.setStreamUISuspended(false)
         }
         store.requestFocus()
         store.refreshCatalog()
@@ -158,6 +161,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
     }
 
     func hide(animated: Bool = true) {
+        store.setStreamUISuspended(true)
         ImageZoomController.shared.close()
         MermaidZoomController.shared.close()
         guard panel.isVisible else {
@@ -242,7 +246,10 @@ final class OverlayController: NSObject, NSWindowDelegate {
                 NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
             },
             onClose: { [weak self] in
-                self?.store.closeMarkdownPreview()
+                self?.store.closeSideStage()
+            },
+            onBack: { [weak self] in
+                self?.store.returnToWorkspaceStage()
             }
         )
         panel.contentView = rootView
@@ -256,6 +263,9 @@ final class OverlayController: NSObject, NSWindowDelegate {
     }
 
     private func scheduleApply(_ layout: OverlayLayout) {
+        guard OverlayRenderPolicy.layoutNeedsApply(previous: lastAppliedLayout, next: layout) else {
+            return
+        }
         pendingLayout = layout
         guard !layoutQueued else { return }
         layoutQueued = true
@@ -275,7 +285,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         let hasTranscript = layout.transcriptHeight > 1
             || !store.visibleItems.isEmpty
             || store.isStartingSession
-            || store.markdownPreview != nil
+            || store.sideStagePresented
         let chatWidth = hasTranscript
             ? OverlayMetrics.transcriptWidth(wide: store.transcriptWide)
             : OverlayMetrics.inputWidth
@@ -310,10 +320,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
                 || abs(panel.frame.width - frame.width) > 0.5
                 || abs(panel.frame.origin.x - frame.origin.x) > 0.5
         )
-        if destChanged {
-            updatePanelFrame(frame, animated: panel.isVisible)
-        }
-        applyMask(layout: OverlayLayout(
+        let applied = OverlayLayout(
             totalHeight: height,
             transcriptHeight: layout.transcriptHeight,
             pickerHeight: layout.pickerHeight,
@@ -321,7 +328,14 @@ final class OverlayController: NSObject, NSWindowDelegate {
             transcriptWidth: chatWidth,
             composerHeight: layout.composerHeight,
             previewWidth: layout.previewWidth
-        ), width: chatWidth)
+        )
+        if destChanged {
+            updatePanelFrame(frame, animated: panel.isVisible)
+        }
+        if OverlayRenderPolicy.maskNeedsApply(previous: lastAppliedLayout, next: applied) {
+            applyMask(layout: applied, width: chatWidth)
+        }
+        lastAppliedLayout = applied
     }
 
     private func position() {
@@ -331,7 +345,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         )
         apply(OverlayLayout(
             totalHeight: contentHeight,
-            transcriptHeight: (store.visibleItems.isEmpty && !store.isStartingSession && store.markdownPreview == nil)
+            transcriptHeight: (store.visibleItems.isEmpty && !store.isStartingSession && !store.sideStagePresented)
                 ? 0
                 : max(0, contentHeight - OverlayMetrics.minHeight - OverlayMetrics.stackSpacing),
             pickerHeight: store.showAvatarPicker ? OverlayMetrics.pickerHeight : 0,
@@ -356,7 +370,9 @@ final class OverlayController: NSObject, NSWindowDelegate {
             commandPaletteHeight: layout.commandPaletteHeight,
             transcriptWidth: layout.transcriptWidth,
             composerHeight: layout.composerHeight,
-            previewWidth: layout.previewWidth
+            previewWidth: layout.previewWidth,
+            previewIsMarkdown: store.markdownPreview != nil,
+            previewHasBack: store.canReturnToWorkspace
         )
     }
 
@@ -435,10 +451,21 @@ final class OverlayController: NSObject, NSWindowDelegate {
         }
         targetPanelFrame = nil
         isUpdatingFrame = false
+        if OverlayRenderPolicy.shouldResumeStream(
+            panelVisible: panel.isVisible,
+            isMoving: isHiding || frameAnimator.isAnimating
+        ) {
+            store.setStreamUISuspended(false)
+        }
     }
 
     private var currentPreviewWidth: CGFloat {
-        store.markdownPreview == nil ? 0 : OverlayMetrics.previewWidth
+        SideStagePolicy.width(
+            showingMarkdown: store.markdownPreview != nil,
+            showingWorkspace: store.workspaceStage != nil,
+            markdownWidth: OverlayMetrics.previewWidth,
+            workspaceWidth: OverlayMetrics.transcriptWidthDefault
+        )
     }
 
     private func rememberRestPosition(_ frame: NSRect) {
@@ -582,8 +609,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
             ImageZoomController.shared.close()
             return
         }
-        if store.markdownPreview != nil {
-            store.closeMarkdownPreview()
+        if store.handleSideStageEscape() {
             return
         }
         if MermaidZoomController.shared.isVisible {

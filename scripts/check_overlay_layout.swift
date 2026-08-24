@@ -26,6 +26,44 @@ struct OverlayLayoutCheck {
                "an open preview grows the panel by width plus gap")
         expect(OverlayLayoutPolicy.contentWidth(chatWidth: 760, previewWidth: 440, gap: 8) == 1208,
                "content width is conversation plus preview extra")
+        expect(OverlayLayoutPolicy.previewExtraWidth(760, gap: 8) == 768,
+               "a workspace session pane grows the panel by default transcript width plus gap")
+        expect(OverlayLayoutPolicy.contentWidth(chatWidth: 760, previewWidth: 760, gap: 8) == 1528,
+               "workspace session stage sits beside the main transcript at default width")
+
+        let chrome = OverlayLayout(
+            totalHeight: 614,
+            transcriptHeight: 560,
+            pickerHeight: 0,
+            commandPaletteHeight: 0,
+            transcriptWidth: 760,
+            composerHeight: 46,
+            previewWidth: 0
+        )
+        expect(!OverlayRenderPolicy.layoutNeedsApply(previous: chrome, next: chrome),
+               "identical chrome must not retarget the panel")
+        expect(OverlayRenderPolicy.layoutNeedsApply(previous: nil, next: chrome),
+               "the first layout must apply")
+        var grown = chrome
+        grown.composerHeight = 66
+        expect(OverlayRenderPolicy.layoutNeedsApply(previous: chrome, next: grown),
+               "composer growth still resizes the panel")
+        expect(!OverlayRenderPolicy.shouldPersistStreamChunk(isBusy: true, childBusy: false),
+               "a live main turn must not write transcript.json on every token")
+        expect(!OverlayRenderPolicy.shouldPersistStreamChunk(isBusy: false, childBusy: true),
+               "a live workspace run must not write transcript.json on every tool")
+        expect(OverlayRenderPolicy.shouldPersistStreamChunk(isBusy: false, childBusy: false),
+               "idle turns still persist")
+        expect(!OverlayRenderPolicy.shouldFlushStreamToUI(overlayVisible: false, isHiding: false),
+               "hidden overlay must not rebuild SwiftUI on tokens")
+        expect(!OverlayRenderPolicy.shouldFlushStreamToUI(overlayVisible: true, isHiding: true),
+               "hide animation must not rebuild SwiftUI on tokens")
+        expect(OverlayRenderPolicy.shouldFlushStreamToUI(overlayVisible: true, isHiding: false),
+               "a visible overlay still streams")
+        expect(!OverlayRenderPolicy.shouldResumeStream(panelVisible: true, isMoving: true),
+               "show animation keeps accumulated stream work suspended")
+        expect(OverlayRenderPolicy.shouldResumeStream(panelVisible: true, isMoving: false),
+               "settled visible panel resumes accumulated stream work")
         let closedOrigin = OverlayLayoutPolicy.panelOriginX(centerX: 500, contentWidth: 760, bleed: 16)
         let openOrigin = OverlayLayoutPolicy.panelOriginX(centerX: 500, contentWidth: 760 + 448, bleed: 16)
         expect(closedOrigin == 500 - (760 + 32) / 2, "closed panel is centered on the composer")

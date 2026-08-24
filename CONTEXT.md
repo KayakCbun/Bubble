@@ -38,4 +38,8 @@ _Avoid_: summary (too vague), transcript
 The one in-flight child turn. Many mounts may exist; at most one run is active.
 _Avoid_: job, task queue
 
+**Run card**:
+The main-transcript object for one workspace run. It displays the brief. Opening it reveals that mount's workspace session.
+_Avoid_: subagent card, nested tool group
+
 Main sessions persist in `~/.bubble/session-id`. Conversation branch selections persist separately per session so a read-only branch switch survives relaunch.

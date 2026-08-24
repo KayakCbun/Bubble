@@ -6,6 +6,16 @@ import Foundation
 enum TranscriptStream {
     static let childCap = 40
 
+    struct WorkspaceRunRecord: Equatable {
+        var path: String
+        var runId: String?
+        var sessionId: String?
+        var goal: String
+        var status: String?
+        var summary: String
+        var anchorEntryId: String?
+    }
+
     /// Whether a workspace-child thought chunk should append to the last child.
     static func shouldMergeThought(previousKind: String?) -> Bool {
         previousKind == "thought"
@@ -47,9 +57,53 @@ enum TranscriptStream {
 
     /// Update the live card only if this run is still in flight and the user
     /// has not spoken since. A later user turn always opens a new card.
-    static func shouldReuseWorkspaceCard(existingStatus: String?, userSpokeAfter: Bool) -> Bool {
+    static func shouldReuseWorkspaceCard(
+        existingStatus: String?,
+        userSpokeAfter: Bool,
+        sameRun: Bool = false
+    ) -> Bool {
+        if sameRun { return true }
         if userSpokeAfter { return false }
         return existingStatus == "running" || existingStatus == "waiting"
+    }
+
+    static func deduplicateWorkspaceRuns(_ records: [WorkspaceRunRecord]) -> [WorkspaceRunRecord] {
+        var result: [WorkspaceRunRecord] = []
+        for record in records {
+            if let index = result.firstIndex(where: { areDuplicateWorkspaceRuns($0, record) }) {
+                if result[index].anchorEntryId == nil, record.anchorEntryId != nil {
+                    result[index] = record
+                }
+            } else {
+                result.append(record)
+            }
+        }
+        return result
+    }
+
+    static func areDuplicateWorkspaceRuns(_ lhs: WorkspaceRunRecord, _ rhs: WorkspaceRunRecord) -> Bool {
+        guard lhs.path == rhs.path, lhs.goal == rhs.goal else { return false }
+        if let left = lhs.runId, !left.isEmpty,
+           let right = rhs.runId, !right.isEmpty {
+            return left == right
+        }
+        if let left = lhs.anchorEntryId, let right = rhs.anchorEntryId {
+            return left == right
+        }
+        guard lhs.runId == rhs.runId,
+              lhs.sessionId == rhs.sessionId,
+              lhs.status == rhs.status else { return false }
+        return legacySummariesMatch(lhs.summary, rhs.summary)
+    }
+
+    private static func legacySummariesMatch(_ lhs: String, _ rhs: String) -> Bool {
+        let left = lhs.trimmingCharacters(in: .whitespacesAndNewlines)
+        let right = rhs.trimmingCharacters(in: .whitespacesAndNewlines)
+        if left == right { return true }
+        let leftPrefix = left.trimmingCharacters(in: CharacterSet(charactersIn: "…"))
+        let rightPrefix = right.trimmingCharacters(in: CharacterSet(charactersIn: "…"))
+        guard min(leftPrefix.count, rightPrefix.count) >= 12 else { return false }
+        return leftPrefix.hasPrefix(rightPrefix) || rightPrefix.hasPrefix(leftPrefix)
     }
 
     static func canMergeAdjacent(previous: String?, next: String) -> Bool {
