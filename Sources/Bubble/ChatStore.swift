@@ -2996,19 +2996,20 @@ final class ChatStore {
             return Self.chatItem(record)
         }
         let brief = relay.brief
+        let availableCards = existingItems.filter {
+            $0.kind == .workspaceRun && !matchedLocalRows.contains($0.id)
+        }
+        let exactRunCard = brief.runId.flatMap { runId in
+            runId.isEmpty ? nil : availableCards.first(where: { $0.workspaceRunId == runId })
+        }
+        let legacyCard = brief.runId?.isEmpty != false ? availableCards.first(where: { item in
+            item.workspacePath.map(WorkspaceRegistry.normalize) == WorkspaceRegistry.normalize(brief.path)
+                && item.workspaceGoal?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    == brief.goal.trimmingCharacters(in: .whitespacesAndNewlines)
+        }) : nil
         let prior = richTranscriptRows[Self.richKey(entryID: record.entryID, kind: .workspaceRun)]
-            ?? existingItems.first(where: { item in
-                item.kind == .workspaceRun
-                    && !matchedLocalRows.contains(item.id)
-                    && (
-                        (brief.runId?.isEmpty == false && item.workspaceRunId == brief.runId)
-                            || (
-                                item.workspacePath.map(WorkspaceRegistry.normalize) == WorkspaceRegistry.normalize(brief.path)
-                                    && item.workspaceGoal?.trimmingCharacters(in: .whitespacesAndNewlines)
-                                        == brief.goal.trimmingCharacters(in: .whitespacesAndNewlines)
-                            )
-                    )
-            })
+            ?? exactRunCard
+            ?? legacyCard
         var card = prior ?? ChatItem(
             kind: .workspaceRun,
             text: brief.name,
