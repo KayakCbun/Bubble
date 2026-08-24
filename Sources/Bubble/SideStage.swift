@@ -17,7 +17,60 @@ enum SideStageEscape: Equatable {
     case ignore
 }
 
+enum WorkspacePaneSeed: Equatable {
+    case current
+    case live
+    case cached
+    case card
+    case loading
+}
+
+struct WorkspacePaneSeedContext {
+    var currentSessionId: String?
+    var nextSessionId: String?
+    var currentCardId: UUID?
+    var nextCardId: UUID
+    var hasCurrentRows: Bool
+    var hasLiveRows: Bool
+    var cacheIsFresh: Bool
+    var selectedAnchorIsCached: Bool
+    var isLive: Bool
+}
+
+enum WorkspacePaneLoadState: Equatable {
+    case idle
+    case loading
+    case ready
+    case fallback
+    case failed
+}
+
 enum SideStagePolicy {
+    static func paneSeed(_ context: WorkspacePaneSeedContext) -> WorkspacePaneSeed {
+        guard let nextSessionId = context.nextSessionId, !nextSessionId.isEmpty else {
+            return .card
+        }
+        let sameSession = context.currentSessionId == nextSessionId
+        if context.isLive {
+            if sameSession,
+               context.currentCardId == context.nextCardId,
+               context.hasCurrentRows {
+                return .current
+            }
+            if context.hasLiveRows {
+                return .live
+            }
+            return .card
+        }
+        if context.cacheIsFresh, context.selectedAnchorIsCached {
+            if sameSession, context.hasCurrentRows {
+                return .current
+            }
+            return .cached
+        }
+        return .loading
+    }
+
     static func width(
         showingMarkdown: Bool,
         showingWorkspace: Bool,
@@ -133,5 +186,10 @@ enum SideStagePolicy {
 
     static func shouldReloadOnShow(hasCachedRows: Bool) -> Bool {
         !hasCachedRows
+    }
+
+    static func acceptsWorkspaceUpdate(stageRunId: String?, incomingRunId: String?) -> Bool {
+        guard let incomingRunId, !incomingRunId.isEmpty else { return true }
+        return stageRunId == incomingRunId
     }
 }

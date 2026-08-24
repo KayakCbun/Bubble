@@ -163,6 +163,130 @@ struct SideStageCheck {
             SideStagePolicy.shouldReloadOnShow(hasCachedRows: false),
             "an empty workspace stage still loads on show"
         )
+        expect(
+            SideStagePolicy.acceptsWorkspaceUpdate(stageRunId: "run-a", incomingRunId: "run-a"),
+            "the selected run accepts its own stream"
+        )
+        expect(
+            !SideStagePolicy.acceptsWorkspaceUpdate(stageRunId: nil, incomingRunId: "run-b"),
+            "a legacy card cannot absorb a newer run's stream"
+        )
+        expect(
+            !SideStagePolicy.acceptsWorkspaceUpdate(stageRunId: "run-a", incomingRunId: "run-b"),
+            "a historical run cannot absorb another run's stream"
+        )
+        expect(
+            SideStagePolicy.paneSeed(.init(
+                currentSessionId: "shared",
+                nextSessionId: "shared",
+                currentCardId: card,
+                nextCardId: card,
+                hasCurrentRows: true,
+                hasLiveRows: false,
+                cacheIsFresh: false,
+                selectedAnchorIsCached: false,
+                isLive: true
+            )) == .current,
+            "an already-open live card keeps its streamed rows"
+        )
+        expect(
+            SideStagePolicy.paneSeed(.init(
+                currentSessionId: "shared",
+                nextSessionId: "shared",
+                currentCardId: UUID(),
+                nextCardId: card,
+                hasCurrentRows: true,
+                hasLiveRows: false,
+                cacheIsFresh: true,
+                selectedAnchorIsCached: false,
+                isLive: true
+            )) == .card,
+            "switching to a new live run starts from that card's own user boundary"
+        )
+        expect(
+            SideStagePolicy.paneSeed(.init(
+                currentSessionId: "shared",
+                nextSessionId: "shared",
+                currentCardId: UUID(),
+                nextCardId: card,
+                hasCurrentRows: true,
+                hasLiveRows: true,
+                cacheIsFresh: false,
+                selectedAnchorIsCached: false,
+                isLive: true
+            )) == .live,
+            "returning to a live run restores its streamed pane buffer"
+        )
+        expect(
+            SideStagePolicy.paneSeed(.init(
+                currentSessionId: "shared",
+                nextSessionId: "shared",
+                currentCardId: UUID(),
+                nextCardId: card,
+                hasCurrentRows: true,
+                hasLiveRows: false,
+                cacheIsFresh: true,
+                selectedAnchorIsCached: true,
+                isLive: false
+            )) == .current,
+            "switching cards in one session keeps the authoritative rows"
+        )
+        expect(
+            SideStagePolicy.paneSeed(.init(
+                currentSessionId: "other",
+                nextSessionId: "shared",
+                currentCardId: UUID(),
+                nextCardId: card,
+                hasCurrentRows: true,
+                hasLiveRows: false,
+                cacheIsFresh: true,
+                selectedAnchorIsCached: true,
+                isLive: false
+            )) == .cached,
+            "reopening a session uses its cached transcript"
+        )
+        expect(
+            SideStagePolicy.paneSeed(.init(
+                currentSessionId: nil,
+                nextSessionId: "shared",
+                currentCardId: nil,
+                nextCardId: card,
+                hasCurrentRows: false,
+                hasLiveRows: false,
+                cacheIsFresh: false,
+                selectedAnchorIsCached: false,
+                isLive: false
+            )) == .loading,
+            "a first open shows stable loading instead of card-derived rows"
+        )
+        expect(
+            SideStagePolicy.paneSeed(.init(
+                currentSessionId: "shared",
+                nextSessionId: "shared",
+                currentCardId: UUID(),
+                nextCardId: card,
+                hasCurrentRows: true,
+                hasLiveRows: false,
+                cacheIsFresh: false,
+                selectedAnchorIsCached: true,
+                isLive: false
+            )) == .loading,
+            "a session-invalidated cache never masquerades as authoritative"
+        )
+        expect(
+            SideStagePolicy.paneSeed(.init(
+                currentSessionId: "shared",
+                nextSessionId: "shared",
+                currentCardId: UUID(),
+                nextCardId: card,
+                hasCurrentRows: true,
+                hasLiveRows: false,
+                cacheIsFresh: true,
+                selectedAnchorIsCached: false,
+                isLive: false
+            )) == .loading,
+            "a fresh cache missing the selected anchor loads atomically"
+        )
 
         print("PASS: side stage policy")
     }
