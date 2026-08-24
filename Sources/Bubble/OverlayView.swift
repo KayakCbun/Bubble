@@ -1302,24 +1302,20 @@ struct OverlayView: View {
                 }
             }
             if !live, !text.isEmpty {
-                HStack(spacing: 8) {
+                HStack(alignment: .center, spacing: 0) {
                     AssistantCopyButton(text: text)
                     if showBranchControl {
-                        Button {
+                        AssistantActionButton(
+                            symbol: "arrow.triangle.branch",
+                            help: "Branch from here",
+                            accessibilityLabel: "Branch from here"
+                        ) {
                             store.beginBranch(from: item)
-                        } label: {
-                            Image(systemName: "arrow.triangle.branch")
-                                .font(.system(size: 11, weight: .medium))
-                                .frame(width: 28, height: 28)
-                                .contentShape(Rectangle())
                         }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(.secondary)
                         .disabled(store.isBusy || store.childBusy || store.isSwitchingBranch || item.sourceBranchable == false)
-                        .help("Branch from here")
-                        .accessibilityLabel("Branch from here")
                     }
                 }
+                .fixedSize(horizontal: true, vertical: true)
             }
         }
         .contextMenu {
@@ -1655,27 +1651,15 @@ struct OverlayView: View {
 private struct AssistantCopyButton: View {
     var text: String
     @State private var copied = false
-    @State private var hovered = false
 
     var body: some View {
-        Button(action: copy) {
-            Image(systemName: copied ? "checkmark" : "square.on.square")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(copied || hovered ? OverlayMetrics.ink.opacity(0.72) : Color.secondary.opacity(0.78))
-                .frame(width: 28, height: 28)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .help("Copy this reply")
-        .accessibilityLabel("Copy reply")
-        .onHover { hovering in
-            hovered = hovering
-            if hovering {
-                NSCursor.pointingHand.set()
-            } else {
-                NSCursor.arrow.set()
-            }
-        }
+        AssistantActionButton(
+            symbol: copied ? "checkmark" : "square.on.square",
+            help: "Copy this reply",
+            accessibilityLabel: "Copy reply",
+            active: copied,
+            action: copy
+        )
     }
 
     private func copy() {
@@ -1685,6 +1669,37 @@ private struct AssistantCopyButton: View {
         copied = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
             copied = false
+        }
+    }
+}
+
+private struct AssistantActionButton: View {
+    var symbol: String
+    var help: String
+    var accessibilityLabel: String
+    var active = false
+    var action: () -> Void
+    @State private var hovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(active || hovered ? OverlayMetrics.ink.opacity(0.72) : Color.secondary.opacity(0.78))
+                .frame(width: 14, height: 14, alignment: .center)
+                .frame(width: 28, height: 28, alignment: .center)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
+        .accessibilityLabel(accessibilityLabel)
+        .onHover { hovering in
+            hovered = hovering
+            if hovering {
+                NSCursor.pointingHand.set()
+            } else {
+                NSCursor.arrow.set()
+            }
         }
     }
 }
