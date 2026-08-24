@@ -163,6 +163,26 @@ require(localSnapshot.transcript == snapshot.transcript, "local JSONL reconstruc
 let locallySelectedBranch = ConversationTreeSnapshot(jsonl: jsonl, selectedLeafID: "a2a")
 require(locallySelectedBranch?.leafID == "a2a", "persisted local leaf selection overrides the physical tail")
 require(locallySelectedBranch?.activePath.map(\.id) == oldBranch.activePath.map(\.id), "local selected leaf reconstructs its branch")
+
+let relayText = """
+The workspace run already finished. Summarize the result for the user in your own voice, then stop.
+Do not call workspace_run, mount_workspace, bash, or any other tool.
+Do not greet. Do not repeat the goal. Do not paste this block verbatim.
+name: work
+path: ~/Documents/work
+status: done
+goal: inspect the failed calls
+summary: found the root cause
+"""
+let relaySnapshot = ConversationTreeSnapshot(entries: [
+    ConversationEntry(id: "dispatch", parentID: nil, type: "message", role: "assistant", text: "I sent it.", thinking: "", toolName: nil, toolCallID: nil, isError: false, hasStructuredContent: false, order: 0),
+    ConversationEntry(id: "relay", parentID: "dispatch", type: "message", role: "user", text: relayText, thinking: "", toolName: nil, toolCallID: nil, isError: false, hasStructuredContent: false, order: 1),
+    ConversationEntry(id: "answer", parentID: "relay", type: "message", role: "assistant", text: "Here is the result.", thinking: "", toolName: nil, toolCallID: nil, isError: false, hasStructuredContent: false, order: 2),
+], leafID: "answer")
+require(
+    relaySnapshot.transcript.map(\.kind) == [.assistant, .workspaceRelay, .assistant],
+    "internal workspace relay prompts project as run-card anchors instead of user messages"
+)
 require(ConversationBranchInteraction.canSend(isSwitchingBranch: false), "composer sends when the active path is stable")
 require(!ConversationBranchInteraction.canSend(isSwitchingBranch: true), "composer cannot race an in-flight branch switch")
 

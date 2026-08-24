@@ -165,6 +165,7 @@ final class ChatStore {
     var workspacePaneScrollToken = 0
     var workspacePaneLoadState: WorkspacePaneLoadState = .idle
     var workspacePanePresentationPhase: WorkspacePanePresentationPhase = .ready
+    var sideStageChromeVisible = false
     var visibleScreenWidth: CGFloat = 1512
     var slashCommands: [SlashCommand] = SlashCommand.builtIn
     var skills: [PiSkill] = []
@@ -180,6 +181,9 @@ final class ChatStore {
     var slashHighlight = 0
     var onHideOverlay: (() -> Void)?
     var onWorkspacePanePresentationRequested: (() -> Void)?
+    var onSideStageChromePresentationRequested: (() -> Void)?
+    var onSideStageChromeDismissalRequested: (() -> Void)?
+    var onSideStageChromeInvalidated: (() -> Void)?
     var workspaceState = WorkspaceStoreFile()
     var draftClips: [DraftClip] = []
     var draftImages: [DraftImage] = []
@@ -246,13 +250,19 @@ final class ChatStore {
             extraRoots: markdownSearchRoots()
         )
         if markdownPreview?.path == path {
-            markdownPreview = nil
+            if workspaceStage == nil {
+                closeSideStage()
+            } else {
+                markdownPreview = nil
+            }
             return
         }
+        let wasPresented = sideStagePresented
         if !SideStagePolicy.keepWorkspaceWhenOpeningMarkdown(fromWorkspacePane: fromWorkspacePane) {
             clearWorkspaceStage(keepingItems: false)
         }
         markdownPreview = MarkdownFiles.load(path: path)
+        applySideStageChromeOnOpen(wasPresented: wasPresented)
     }
 
     private func markdownSearchRoots() -> [String] {
@@ -281,15 +291,35 @@ final class ChatStore {
     }
 
     func closeMarkdownPreview() {
-        markdownPreview = nil
         if workspaceStage == nil {
-            clearWorkspaceStage(keepingItems: false)
+            closeSideStage()
+            return
         }
+        markdownPreview = nil
     }
 
-    func closeSideStage() {
+    func closeSideStage(animated: Bool = true) {
+        if animated, SideStageChromePolicy.shouldFadeOutBeforeCollapse(
+            chromeVisible: sideStageChromeVisible,
+            presented: sideStagePresented
+        ) {
+            sideStageChromeVisible = false
+            onSideStageChromeDismissalRequested?()
+            return
+        }
+        collapseSideStage()
+    }
+
+    func collapseSideStage() {
+        onSideStageChromeInvalidated?()
         markdownPreview = nil
         clearWorkspaceStage(keepingItems: false)
+        sideStageChromeVisible = false
+    }
+
+    func revealSideStageChrome() {
+        guard sideStagePresented else { return }
+        sideStageChromeVisible = true
     }
 
     func returnToWorkspaceStage() {
@@ -361,6 +391,7 @@ final class ChatStore {
     }
 
     func openWorkspaceStage(from item: ChatItem) {
+        let wasPresented = sideStagePresented
         let opensSideStage = workspaceStage == nil && markdownPreview == nil
         let changesWorkspace = workspaceStage?.cardId != item.id
         markdownPreview = nil
@@ -447,9 +478,20 @@ final class ChatStore {
                 generation: generation
             )
         }
+        applySideStageChromeOnOpen(wasPresented: wasPresented)
         if workspacePanePresentationPhase == .placeholder {
             onWorkspacePanePresentationRequested?()
         }
+    }
+
+    private func applySideStageChromeOnOpen(wasPresented: Bool) {
+        if SideStageChromePolicy.opensHidden(wasPresented: wasPresented) {
+            sideStageChromeVisible = false
+            onSideStageChromePresentationRequested?()
+            return
+        }
+        onSideStageChromeInvalidated?()
+        sideStageChromeVisible = true
     }
 
     private func clearWorkspaceStage(keepingItems: Bool) {
@@ -979,7 +1021,7 @@ final class ChatStore {
     }
 
     func prepareToQuit() {
-        closeSideStage()
+        closeSideStage(animated: false)
         WorkspaceRegistry.interruptActive(in: &workspaceState)
         persistWorkspaceState()
         control.stop()
@@ -2349,7 +2391,7 @@ final class ChatStore {
         isStartingSession = true
         items = []
         richTranscriptRows = [:]
-        closeSideStage()
+        closeSideStage(animated: false)
         status = "resuming"
         Task { @MainActor in
             do {
@@ -2451,7 +2493,7 @@ final class ChatStore {
         streamingAssistantId = nil
         streamingThoughtId = nil
         lastTurnDuration = 0
-        closeSideStage()
+        closeSideStage(animated: false)
         clearActiveWorkspaceRun()
         status = "new session"
         Task { @MainActor in
@@ -2868,7 +2910,15 @@ final class ChatStore {
         if replacingTranscript {
             let existingItems = items
             cacheRichRows(items)
+            var matchedLocalRows = Set<UUID>()
             let projected = snapshot.transcript.map { record in
+                if record.kind == .workspaceRelay {
+                    return workspaceCard(
+                        for: record,
+                        existingItems: existingItems,
+                        matchedLocalRows: &matchedLocalRows
+                    )
+                }
                 var projected = Self.chatItem(record)
                 if let prior = richTranscriptRows[Self.richKey(entryID: record.entryID, kind: projected.kind)] {
                     var rich = prior
@@ -2883,7 +2933,11 @@ final class ChatStore {
                 }
                 return projected
             }
-            items = mergeBubbleOnlyRows(projected: projected, existing: existingItems)
+            items = mergeBubbleOnlyRows(
+                projected: projected,
+                existing: existingItems,
+                excluding: matchedLocalRows
+            )
         } else {
             // Source bindings above are enough; live rows keep their richer local state.
         }
@@ -2896,7 +2950,11 @@ final class ChatStore {
         persist(immediate: true)
     }
 
-    private func mergeBubbleOnlyRows(projected: [ChatItem], existing: [ChatItem]) -> [ChatItem] {
+    private func mergeBubbleOnlyRows(
+        projected: [ChatItem],
+        existing: [ChatItem],
+        excluding excludedIDs: Set<UUID> = []
+    ) -> [ChatItem] {
         let lastProjectedIndex = Dictionary(
             projected.enumerated().compactMap { index, item in
                 item.sourceEntryId.map { ($0, index) }
@@ -2906,7 +2964,9 @@ final class ChatStore {
         var prefix: [ChatItem] = []
         var after: [Int: [ChatItem]] = [:]
         for (index, item) in existing.enumerated()
-        where item.sourceEntryId == nil && (item.kind == .system || item.kind == .workspaceRun) {
+        where !excludedIDs.contains(item.id)
+            && item.sourceEntryId == nil
+            && (item.kind == .system || item.kind == .workspaceRun) {
             let anchor = existing[..<index].reversed().compactMap { prior -> Int? in
                 guard let entryID = prior.sourceEntryId else { return nil }
                 return lastProjectedIndex[entryID]
@@ -2923,6 +2983,48 @@ final class ChatStore {
             merged.append(contentsOf: after[index] ?? [])
         }
         return merged
+    }
+
+    private func workspaceCard(
+        for record: ConversationTranscriptRecord,
+        existingItems: [ChatItem],
+        matchedLocalRows: inout Set<UUID>
+    ) -> ChatItem {
+        guard let brief = WorkspaceRegistry.parseInjectionPrompt(record.text, home: OverlayPaths.home.path) else {
+            return Self.chatItem(record)
+        }
+        let prior = richTranscriptRows[Self.richKey(entryID: record.entryID, kind: .workspaceRun)]
+            ?? existingItems.last(where: { item in
+                item.kind == .workspaceRun
+                    && !matchedLocalRows.contains(item.id)
+                    && item.workspacePath.map(WorkspaceRegistry.normalize) == WorkspaceRegistry.normalize(brief.path)
+                    && item.workspaceGoal?.trimmingCharacters(in: .whitespacesAndNewlines)
+                        == brief.goal.trimmingCharacters(in: .whitespacesAndNewlines)
+            })
+        var card = prior ?? ChatItem(
+            kind: .workspaceRun,
+            text: brief.name,
+            workspacePath: brief.path,
+            workspaceName: brief.name,
+            workspaceStatus: brief.status.rawValue,
+            workspaceGoal: brief.goal,
+            workspaceSummary: brief.summary,
+            workspaceQuestion: brief.question,
+            workspaceChangedPaths: brief.changedPaths,
+            workspaceChildren: []
+        )
+        if let prior { matchedLocalRows.insert(prior.id) }
+        card.text = brief.name
+        card.workspacePath = brief.path
+        card.workspaceName = brief.name
+        card.workspaceStatus = brief.status.rawValue
+        card.workspaceGoal = brief.goal
+        card.workspaceSummary = brief.summary
+        card.workspaceQuestion = brief.question
+        card.workspaceChangedPaths = brief.changedPaths
+        card.sourceEntryId = record.entryID
+        card.sourceBranchable = false
+        return card
     }
 
     private func bindTranscriptSources(to snapshot: ConversationTreeSnapshot) {
@@ -2963,6 +3065,13 @@ final class ChatStore {
                 sourceEntryId: record.entryID,
                 sourceBranchable: false
             )
+        case .workspaceRelay:
+            return ChatItem(
+                kind: .workspaceRun,
+                text: "Workspace",
+                sourceEntryId: record.entryID,
+                sourceBranchable: false
+            )
         }
     }
 
@@ -2972,6 +3081,7 @@ final class ChatStore {
         case .assistant: .assistant
         case .thought: .thought
         case .tool: .tool
+        case .workspaceRelay: .workspaceRun
         }
     }
 

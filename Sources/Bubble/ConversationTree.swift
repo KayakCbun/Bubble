@@ -30,6 +30,7 @@ struct ConversationTranscriptRecord: Equatable, Sendable {
         case assistant
         case thought
         case tool
+        case workspaceRelay
     }
 
     var kind: Kind
@@ -96,6 +97,9 @@ struct ConversationTreeSnapshot: Equatable, Sendable {
         activePath.flatMap { entry -> [ConversationTranscriptRecord] in
             switch entry.role {
             case "user":
+                if Self.isWorkspaceRelayText(entry.text) {
+                    return [Self.record(.workspaceRelay, entry: entry, text: entry.text, branchable: false)]
+                }
                 let display = Self.displayUserText(entry.text)
                 guard !display.isEmpty || entry.hasStructuredContent else { return [] }
                 return [Self.record(
@@ -250,6 +254,17 @@ struct ConversationTreeSnapshot: Equatable, Sendable {
             return text.trimmingCharacters(in: .whitespacesAndNewlines)
         }
         return text[range.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func isWorkspaceRelayText(_ text: String) -> Bool {
+        text.hasPrefix(
+            "The workspace run already finished. Summarize the result for the user in your own voice, then stop.\n"
+        )
+            && text.contains("\nDo not call workspace_run, mount_workspace, bash, or any other tool.\n")
+            && text.contains("\nname: ")
+            && text.contains("\npath: ")
+            && text.contains("\nstatus: ")
+            && text.contains("\ngoal: ")
     }
 
     private static func record(

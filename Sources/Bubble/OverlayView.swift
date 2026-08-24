@@ -165,12 +165,13 @@ struct OverlayView: View {
             commandPaletteHeight: slashPaletteHeight,
             transcriptWidth: chatWidth,
             composerHeight: composerHeight,
-            previewWidth: previewWidth
+            previewWidth: previewWidth,
+            chromeVisible: store.sideStageChromeVisible
         )
     }
 
     var body: some View {
-        VStack(alignment: .center, spacing: OverlayMetrics.stackSpacing) {
+        VStack(alignment: .leading, spacing: OverlayMetrics.stackSpacing) {
             if isTranscriptPresented {
                 HStack(alignment: .top, spacing: OverlayMetrics.stackSpacing) {
                     transcriptList
@@ -190,8 +191,19 @@ struct OverlayView: View {
                         }
                     if store.sideStagePresented {
                         sideStagePane
+                            .compositingGroup()
+                            .opacity(SideStageChromePolicy.opacity(visible: store.sideStageChromeVisible))
+                            .animation(
+                                store.sideStageChromeVisible
+                                    ? OverlayMotion.sideStageReveal
+                                    : OverlayMotion.sideStageHide,
+                                value: store.sideStageChromeVisible
+                            )
+                            .allowsHitTesting(store.sideStageChromeVisible)
                     }
                 }
+                .fixedSize(horizontal: true, vertical: false)
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .animation(
                     OverlayRenderPolicy.shouldAnimateSideStageContentLayout
                         ? OverlayMotion.panel
@@ -232,8 +244,8 @@ struct OverlayView: View {
                 .animation(OverlayMotion.snappy, value: store.showAvatarPicker)
                 .animation(OverlayMotion.quick, value: store.slashMenuVisible)
             }
+            .frame(maxWidth: .infinity)
         }
-        .frame(maxWidth: .infinity, alignment: .bottom)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
         .padding(OverlayMetrics.shadowInset)
         .environment(\.openMarkdownPreview) { path in
@@ -2365,7 +2377,8 @@ struct OverlayLayoutKey: PreferenceKey {
         commandPaletteHeight: 0,
         transcriptWidth: OverlayMetrics.transcriptWidthDefault,
         composerHeight: OverlayMetrics.minHeight,
-        previewWidth: 0
+        previewWidth: 0,
+        chromeVisible: false
     )
     static func reduce(value: inout OverlayLayout, nextValue: () -> OverlayLayout) {
         value = nextValue()

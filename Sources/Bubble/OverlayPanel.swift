@@ -221,8 +221,16 @@ final class OverlayRootView: NSView {
 
         let inset = OverlayMetrics.shadowInset
         let previewExtra = OverlayLayoutPolicy.previewExtraWidth(maskPreviewWidth, gap: gap)
-        let topWidth = transcriptHeight > 1 ? chatW + previewExtra : inputW
-        let inputX = OverlayPixel.align(inset + (topWidth - inputW) / 2, scale: backingScale)
+        let fallbackWidth = (transcriptHeight > 1 ? chatW + previewExtra : inputW) + inset * 2
+        let panelWidth = bounds.width > 1 ? bounds.width : fallbackWidth
+        let inputX = OverlayPixel.align(
+            OverlayLayoutPolicy.composerOriginX(
+                panelWidth: panelWidth,
+                composerWidth: inputW,
+                bleed: inset
+            ),
+            scale: backingScale
+        )
         let inputY = max(inset, bounds.height - inset - inputH)
         if transcriptHeight > 1 {
             let chatY = max(inset, inputY - gap - transcriptHeight)

@@ -38,6 +38,7 @@ struct OverlayLayout: Equatable {
     var transcriptWidth: CGFloat
     var composerHeight: CGFloat
     var previewWidth: CGFloat = 0
+    var chromeVisible: Bool = false
 }
 
 enum OverlayLayoutPolicy {
@@ -74,6 +75,16 @@ enum OverlayLayoutPolicy {
     /// Left edge of the panel so the visual center (composer) stays put while preview opens.
     static func panelOriginX(centerX: CGFloat, contentWidth: CGFloat, bleed: CGFloat) -> CGFloat {
         centerX - (contentWidth + bleed * 2) / 2
+    }
+
+    /// Composer X in the current panel, so the input stays centered while the
+    /// conversation slides left into reserved side-stage width.
+    static func composerOriginX(
+        panelWidth: CGFloat,
+        composerWidth: CGFloat,
+        bleed: CGFloat
+    ) -> CGFloat {
+        bleed + (panelWidth - bleed * 2 - composerWidth) / 2
     }
 
     static func constrainedFrame(

@@ -67,6 +67,32 @@ enum SideStagePresentationPolicy {
     }
 }
 
+enum SideStageChromePolicy {
+    static let revealDuration: TimeInterval = 0.22
+    static let hideDuration: TimeInterval = 0.16
+
+    /// A collapsed overlay first slides the conversation left; the extra card
+    /// fades in only after that width is in place.
+    static func opensHidden(wasPresented: Bool) -> Bool {
+        !wasPresented
+    }
+
+    /// Closing keeps the extra width until the card has faded out, then slides
+    /// the conversation back.
+    static func shouldFadeOutBeforeCollapse(chromeVisible: Bool, presented: Bool) -> Bool {
+        chromeVisible && presented
+    }
+
+    static func opacity(visible: Bool) -> Double {
+        visible ? 1 : 0
+    }
+
+    /// Reserved space beside the conversation is not a card until chrome is visible.
+    static func hitPreviewWidth(chromeVisible: Bool, previewWidth: CGFloat) -> CGFloat {
+        chromeVisible ? previewWidth : 0
+    }
+}
+
 enum WorkspaceRunLifecyclePolicy {
     static func shouldPrepareSession(childBusy: Bool) -> Bool {
         !childBusy

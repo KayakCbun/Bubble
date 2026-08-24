@@ -28,6 +28,9 @@ final class OverlayController: NSObject, NSWindowDelegate {
     private var commandReturnApplication: NSRunningApplication?
     private var workspaceRevealGeneration = 0
     private var workspaceRevealPending = false
+    private var chromeRevealGeneration = 0
+    private var chromeRevealPending = false
+    private var chromeHideGeneration = 0
 
     private let positionCenterXKey = "bubble.position.centerX"
     private let positionBottomYKey = "bubble.position.bottomY"
@@ -268,6 +271,15 @@ final class OverlayController: NSObject, NSWindowDelegate {
         store.onWorkspacePanePresentationRequested = { [weak self] in
             self?.requestWorkspacePaneReveal()
         }
+        store.onSideStageChromePresentationRequested = { [weak self] in
+            self?.requestSideStageChromeReveal()
+        }
+        store.onSideStageChromeDismissalRequested = { [weak self] in
+            self?.requestSideStageChromeHide()
+        }
+        store.onSideStageChromeInvalidated = { [weak self] in
+            self?.invalidateSideStageChrome()
+        }
         let root = OverlayView(
             store: store,
             onEscape: { [weak self] in self?.hide() },
@@ -393,7 +405,8 @@ final class OverlayController: NSObject, NSWindowDelegate {
             commandPaletteHeight: layout.commandPaletteHeight,
             transcriptWidth: chatWidth,
             composerHeight: layout.composerHeight,
-            previewWidth: layout.previewWidth
+            previewWidth: layout.previewWidth,
+            chromeVisible: layout.chromeVisible
         )
         let animateFrame = panel.isVisible && OverlayRenderPolicy.shouldAnimateSideStageResize(
             previousPreviewWidth: lastAppliedLayout?.previewWidth ?? 0,
@@ -410,7 +423,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
             applyMask(layout: applied, width: chatWidth)
         }
         lastAppliedLayout = applied
-        if workspaceRevealPending, layout.previewWidth > 0, !destChanged {
+        if (workspaceRevealPending || chromeRevealPending), layout.previewWidth > 0, !destChanged {
             scheduleWorkspacePaneRevealOnNextFrame()
         }
     }
@@ -442,7 +455,8 @@ final class OverlayController: NSObject, NSWindowDelegate {
                 chipHeight: OverlayMetrics.chipHeight,
                 attachmentCount: store.draftClips.count + store.draftImages.count
             ),
-            previewWidth: previewWidth
+            previewWidth: previewWidth,
+            chromeVisible: store.sideStageChromeVisible
         ))
     }
 
@@ -453,7 +467,10 @@ final class OverlayController: NSObject, NSWindowDelegate {
             commandPaletteHeight: layout.commandPaletteHeight,
             transcriptWidth: layout.transcriptWidth,
             composerHeight: layout.composerHeight,
-            previewWidth: layout.previewWidth,
+            previewWidth: SideStageChromePolicy.hitPreviewWidth(
+                chromeVisible: store.sideStageChromeVisible,
+                previewWidth: layout.previewWidth
+            ),
             previewIsMarkdown: store.markdownPreview != nil,
             previewHasBack: store.canReturnToWorkspace
         )
@@ -536,12 +553,13 @@ final class OverlayController: NSObject, NSWindowDelegate {
         }
         targetPanelFrame = nil
         isUpdatingFrame = false
-        if workspaceRevealPending,
+        if (workspaceRevealPending || chromeRevealPending),
            OverlayRenderPolicy.shouldRefreshHostingSurfaceAfterFrameSettle {
             hostingView?.needsDisplay = true
         }
         scheduleWorkspacePaneRevealOnNextFrame()
         if !workspaceRevealPending,
+           !chromeRevealPending,
            OverlayRenderPolicy.shouldResumeStream(
             panelVisible: panel.isVisible,
             isMoving: isHiding || frameAnimator.isAnimating
@@ -561,21 +579,53 @@ final class OverlayController: NSObject, NSWindowDelegate {
         }
     }
 
+    private func requestSideStageChromeReveal() {
+        chromeHideGeneration += 1
+        chromeRevealPending = true
+        chromeRevealGeneration += 1
+        store.setStreamUISuspended(true)
+        if (lastAppliedLayout?.previewWidth ?? 0) > 0,
+           !isUpdatingFrame,
+           !frameAnimator.isAnimating {
+            scheduleWorkspacePaneRevealOnNextFrame()
+        }
+    }
+
+    private func requestSideStageChromeHide() {
+        chromeRevealPending = false
+        chromeRevealGeneration += 1
+        chromeHideGeneration += 1
+        let generation = chromeHideGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + SideStageChromePolicy.hideDuration) { [weak self] in
+            guard let self, generation == self.chromeHideGeneration else { return }
+            self.store.collapseSideStage()
+        }
+    }
+
+    private func invalidateSideStageChrome() {
+        chromeRevealPending = false
+        chromeRevealGeneration += 1
+        chromeHideGeneration += 1
+    }
+
     private func scheduleWorkspacePaneRevealOnNextFrame() {
-        guard workspaceRevealPending else { return }
-        let generation = workspaceRevealGeneration
+        guard workspaceRevealPending || chromeRevealPending else { return }
+        let workspaceGeneration = workspaceRevealGeneration
+        let chromeGeneration = chromeRevealGeneration
         OverlayPulse.shared.onNextFrame { [weak self] in
             guard let self,
-                  generation == self.workspaceRevealGeneration,
-                  self.workspaceRevealPending,
                   !self.isUpdatingFrame,
                   !self.frameAnimator.isAnimating else { return }
-            self.workspaceRevealPending = false
-            self.store.revealWorkspacePaneContent()
+            if self.workspaceRevealPending, workspaceGeneration == self.workspaceRevealGeneration {
+                self.workspaceRevealPending = false
+                self.store.revealWorkspacePaneContent()
+            }
             OverlayPulse.shared.onNextFrame { [weak self] in
-                guard let self,
-                      generation == self.workspaceRevealGeneration,
-                      !self.workspaceRevealPending else { return }
+                guard let self else { return }
+                if self.chromeRevealPending, chromeGeneration == self.chromeRevealGeneration {
+                    self.chromeRevealPending = false
+                    self.store.revealSideStageChrome()
+                }
                 if OverlayRenderPolicy.shouldResumeStream(
                     panelVisible: self.panel.isVisible,
                     isMoving: self.isHiding || self.frameAnimator.isAnimating

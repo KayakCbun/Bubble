@@ -72,6 +72,12 @@ struct OverlayLayoutCheck {
         grown.composerHeight = 66
         expect(OverlayRenderPolicy.layoutNeedsApply(previous: chrome, next: grown),
                "composer growth still resizes the panel")
+        var revealed = chrome
+        revealed.chromeVisible = true
+        expect(OverlayRenderPolicy.layoutNeedsApply(previous: chrome, next: revealed),
+               "chrome visibility must refresh the card mask")
+        expect(OverlayRenderPolicy.maskNeedsApply(previous: chrome, next: revealed),
+               "fading the extra card updates hit testing without resizing")
         expect(!OverlayRenderPolicy.shouldPersistStreamChunk(isBusy: true, childBusy: false),
                "a live main turn must not write transcript.json on every token")
         expect(!OverlayRenderPolicy.shouldPersistStreamChunk(isBusy: false, childBusy: true),
@@ -115,6 +121,28 @@ struct OverlayLayoutCheck {
         expect(
             openOrigin + (760 + 448 + 32) / 2 == closedOrigin + (760 + 32) / 2,
             "opening a preview must keep the visual center"
+        )
+        let closedComposerX = OverlayLayoutPolicy.composerOriginX(
+            panelWidth: 760 + 32,
+            composerWidth: 520,
+            bleed: 16
+        )
+        let openComposerX = OverlayLayoutPolicy.composerOriginX(
+            panelWidth: 760 + 448 + 32,
+            composerWidth: 520,
+            bleed: 16
+        )
+        let midComposerX = OverlayLayoutPolicy.composerOriginX(
+            panelWidth: 1000,
+            composerWidth: 520,
+            bleed: 16
+        )
+        expect(closedComposerX == 16 + (760 - 520) / 2, "closed composer is centered under the conversation")
+        expect(openComposerX == 16 + (760 + 448 - 520) / 2, "open composer stays at the combined visual center")
+        expect(midComposerX == 16 + (1000 - 32 - 520) / 2, "composer tracks the current panel while it slides")
+        expect(
+            closedOrigin + closedComposerX + 260 == openOrigin + openComposerX + 260,
+            "composer screen position is unchanged when the side stage opens"
         )
 
         let mainVisibleFrame = CGRect(x: 0, y: 62, width: 2048, height: 1060)

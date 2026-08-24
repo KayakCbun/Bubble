@@ -474,6 +474,46 @@ public enum WorkspaceRegistry {
         return lines.joined(separator: "\n")
     }
 
+    public static func parseInjectionPrompt(_ prompt: String, home: String) -> WorkspaceBrief? {
+        let signature = """
+        The workspace run already finished. Summarize the result for the user in your own voice, then stop.
+        Do not call workspace_run, mount_workspace, bash, or any other tool.
+        Do not greet. Do not repeat the goal. Do not paste this block verbatim.
+        """
+        guard prompt.hasPrefix(signature + "\n") else { return nil }
+
+        let labels = ["name", "path", "status", "goal", "summary", "question", "changed_paths"]
+        func value(_ label: String) -> String? {
+            let marker = "\n\(label): "
+            guard let start = prompt.range(of: marker) else { return nil }
+            let valueStart = start.upperBound
+            let end = labels
+                .filter { $0 != label }
+                .compactMap { next in
+                    prompt.range(of: "\n\(next): ", range: valueStart..<prompt.endIndex)?.lowerBound
+                }
+                .min() ?? prompt.endIndex
+            return String(prompt[valueStart..<end]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        guard let name = value("name"), !name.isEmpty,
+              let shownPath = value("path"), !shownPath.isEmpty,
+              let statusText = value("status"), let status = WorkspaceStatus(rawValue: statusText),
+              let goal = value("goal") else { return nil }
+        let changedPaths = value("changed_paths")?.split(separator: ",").map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        } ?? []
+        return WorkspaceBrief(
+            path: expandPath(shownPath, home: URL(fileURLWithPath: home)),
+            name: name,
+            status: status,
+            goal: goal,
+            summary: value("summary") ?? "",
+            question: value("question"),
+            changedPaths: changedPaths
+        )
+    }
+
     public static func inferWaiting(from summary: String) -> String? {
         let trimmed = summary.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }

@@ -20,6 +20,7 @@ struct WorkspaceMountsCheck {
         try resolveByNameAndPath()
         try statusBlock()
         interruptActive()
+        injectionRoundTrip()
         inferWaiting()
         paletteBrowseLast()
         try paletteDrillDown()
@@ -150,6 +151,25 @@ struct WorkspaceMountsCheck {
         )
         WorkspaceRegistry.interruptActive(in: &store)
         expect(store.active?.status == .interrupted, "quit marks the run interrupted")
+    }
+
+    static func injectionRoundTrip() {
+        let brief = WorkspaceBrief(
+            path: "/Users/ada/Documents/work",
+            name: "work",
+            status: .done,
+            goal: "first line\nsecond line",
+            summary: "summary line one\nsummary line two",
+            question: "continue?",
+            changedPaths: ["/tmp/report.json"]
+        )
+        let prompt = WorkspaceRegistry.injectionPrompt(brief, home: home.path)
+        let restored = WorkspaceRegistry.parseInjectionPrompt(prompt, home: home.path)
+        expect(restored?.path == brief.path, "relay prompt restores the workspace path")
+        expect(restored?.goal == brief.goal, "relay prompt restores a multiline goal")
+        expect(restored?.summary == brief.summary, "relay prompt restores a multiline summary")
+        expect(restored?.question == brief.question, "relay prompt restores the question")
+        expect(restored?.changedPaths == brief.changedPaths, "relay prompt restores changed paths")
     }
 
     static func inferWaiting() {

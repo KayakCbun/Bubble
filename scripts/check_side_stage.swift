@@ -89,6 +89,36 @@ struct SideStageCheck {
             "a closed workspace stage mounts neither placeholder nor transcript"
         )
         expect(
+            SideStageChromePolicy.opensHidden(wasPresented: false),
+            "opening from collapsed hides chrome until the conversation has slid left"
+        )
+        expect(
+            !SideStageChromePolicy.opensHidden(wasPresented: true),
+            "replacing an already-open stage keeps chrome visible"
+        )
+        expect(
+            SideStageChromePolicy.shouldFadeOutBeforeCollapse(chromeVisible: true, presented: true),
+            "a visible extra card fades out before the conversation slides back"
+        )
+        expect(
+            !SideStageChromePolicy.shouldFadeOutBeforeCollapse(chromeVisible: false, presented: true),
+            "closing during the slide skips a fade that never started"
+        )
+        expect(
+            !SideStageChromePolicy.shouldFadeOutBeforeCollapse(chromeVisible: true, presented: false),
+            "a collapsed stage has no chrome to fade"
+        )
+        expect(SideStageChromePolicy.opacity(visible: false) == 0, "hidden chrome is fully transparent")
+        expect(SideStageChromePolicy.opacity(visible: true) == 1, "settled chrome is fully opaque")
+        expect(
+            SideStageChromePolicy.hitPreviewWidth(chromeVisible: false, previewWidth: 560) == 0,
+            "empty reserved space is not a card for hit testing"
+        )
+        expect(
+            SideStageChromePolicy.hitPreviewWidth(chromeVisible: true, previewWidth: 560) == 560,
+            "visible chrome receives clicks on the extra card"
+        )
+        expect(
             SideStagePolicy.escapeAction(
                 showingMarkdown: true,
                 workspaceStacked: true,
