@@ -24,8 +24,8 @@ struct ConversationVariant: Equatable {
     var isCurrent: Bool
 }
 
-struct ConversationTranscriptRecord: Equatable {
-    enum Kind: Equatable {
+struct ConversationTranscriptRecord: Equatable, Sendable {
+    enum Kind: Equatable, Sendable {
         case user
         case assistant
         case thought

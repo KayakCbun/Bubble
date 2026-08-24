@@ -184,7 +184,6 @@ final class ChatStore {
     var childBusy = false
     var streamUISuspended = true
     var transcriptRevision: UInt64 = 0
-    var workspacePaneRevision: UInt64 = 0
     var conversationTree: ConversationTreeSnapshot?
     var branchDraft: ConversationBranchDraft?
     var isSwitchingBranch = false
@@ -334,16 +333,6 @@ final class ChatStore {
         )
     }
 
-    var sideStageIdentity: String {
-        if let preview = markdownPreview {
-            return "md:\(preview.path)"
-        }
-        if let stage = workspaceStage {
-            return "ws:\(stage.cardId.uuidString)"
-        }
-        return ""
-    }
-
     func toggleWorkspaceStage(from item: ChatItem) {
         if SideStagePolicy.shouldToggleClosed(
             openCardId: workspaceStage?.cardId,
@@ -437,7 +426,6 @@ final class ChatStore {
             ]
             workspacePaneLoadState = .loading
         }
-        workspacePaneRevision &+= 1
         workspacePaneLoadGeneration += 1
         let generation = workspacePaneLoadGeneration
         workspacePaneScrollToken += 1
@@ -459,7 +447,6 @@ final class ChatStore {
             workspacePaneLoadState = .idle
             workspacePaneStreamingAssistantId = nil
             workspacePaneStreamingThoughtId = nil
-            workspacePaneRevision &+= 1
         }
     }
 
@@ -498,17 +485,21 @@ final class ChatStore {
         }
         guard workspacePaneRequestIsCurrent(cardId: item.id, generation: generation) else { return }
         let cwd = URL(fileURLWithPath: path)
-        let localSnapshot = await Task.detached(priority: .userInitiated) {
-            PiSessions.conversationTree(sessionId: sessionId, cwd: cwd)
+        let local = await Task.detached(priority: .userInitiated) {
+            guard let snapshot = PiSessions.conversationTree(sessionId: sessionId, cwd: cwd) else {
+                return nil as (ConversationTreeSnapshot, [ConversationTranscriptRecord])?
+            }
+            return (snapshot, snapshot.transcript)
         }.value
         guard workspacePaneRequestIsCurrent(cardId: item.id, generation: generation) else { return }
-        if let localSnapshot {
+        if let (localSnapshot, localTranscript) = local {
             applyWorkspaceTree(
                 localSnapshot,
                 path: path,
                 sessionId: sessionId,
                 cardId: item.id,
-                goal: item.workspaceGoal ?? ""
+                goal: item.workspaceGoal ?? "",
+                transcript: localTranscript
             )
             OverlayLog.write("workspace pane loaded local session \(sessionId)")
             return
@@ -584,7 +575,6 @@ final class ChatStore {
               workspacePaneLoadState == .loading else { return }
         workspacePaneItems = fallbackWorkspacePaneItems(card: item)
         workspacePaneLoadState = .fallback
-        workspacePaneRevision &+= 1
         workspacePaneScrollToken += 1
         OverlayLog.write("workspace pane used local fallback after \(SideStagePolicy.workspaceLoadFallbackDelay)s")
     }
@@ -597,7 +587,6 @@ final class ChatStore {
         guard workspacePaneRequestIsCurrent(cardId: item.id, generation: generation) else { return }
         workspacePaneItems = fallbackWorkspacePaneItems(card: item)
         workspacePaneLoadState = .failed
-        workspacePaneRevision &+= 1
         workspacePaneScrollToken += 1
     }
 
@@ -606,7 +595,8 @@ final class ChatStore {
         path: String,
         sessionId: String,
         cardId: UUID,
-        goal: String
+        goal: String,
+        transcript: [ConversationTranscriptRecord]? = nil
     ) {
         cacheWorkspacePaneRows(workspacePaneItems)
         let turns = snapshot.activePath.filter(\.isUserMessage).map {
@@ -636,7 +626,7 @@ final class ChatStore {
         ) {
             return
         }
-        let projected = snapshot.transcript.map { record in
+        let projected = (transcript ?? snapshot.transcript).map { record in
             var projected = Self.chatItem(record)
             if let prior = workspacePaneRichRows[Self.richKey(entryID: record.entryID, kind: projected.kind)] {
                 var rich = prior
@@ -664,7 +654,6 @@ final class ChatStore {
     }
 
     private func cacheWorkspacePaneRows(_ rows: [ChatItem]) {
-        workspacePaneRevision &+= 1
         for item in rows {
             guard let key = Self.richKey(item) else { continue }
             workspacePaneRichRows[key] = item
@@ -756,7 +745,6 @@ final class ChatStore {
         guard workspacePaneIsCurrent(path: path, sessionId: sessionId, runId: runId) else { return }
         workspacePaneItems = rows
         workspacePaneStreamingAssistantId = rows.last(where: { $0.kind == .assistant })?.id
-        workspacePaneRevision &+= 1
     }
 
     private func workspaceRunBuffer(runId: String) -> [ChatItem] {
@@ -787,7 +775,6 @@ final class ChatStore {
         guard workspacePaneIsCurrent(path: path, sessionId: sessionId, runId: runId) else { return }
         workspacePaneItems = rows
         workspacePaneStreamingThoughtId = rows.last(where: { $0.kind == .thought })?.id
-        workspacePaneRevision &+= 1
     }
 
     private func upsertWorkspacePaneTool(
@@ -825,7 +812,6 @@ final class ChatStore {
         workspacePaneStreamingAssistantId = nil
         workspacePaneStreamingThoughtId = nil
         workspacePaneItems = rows
-        workspacePaneRevision &+= 1
     }
 
     let client = AcpClient()
@@ -2539,7 +2525,6 @@ final class ChatStore {
                let item = items.first(where: { $0.id == stage.cardId }) {
                 workspacePaneItems = [ChatItem(kind: .system, text: Self.workspacePaneLoadingText)]
                 workspacePaneLoadState = .loading
-                workspacePaneRevision &+= 1
                 workspacePaneLoadGeneration += 1
                 let generation = workspacePaneLoadGeneration
                 startWorkspacePaneLoad(
@@ -3482,7 +3467,6 @@ final class ChatStore {
             workspacePaneStreamingThoughtId = nil
             workspacePaneItems = [ChatItem(kind: .system, text: Self.workspacePaneLoadingText)]
             workspacePaneLoadState = .loading
-            workspacePaneRevision &+= 1
             workspacePaneLoadGeneration += 1
             let generation = workspacePaneLoadGeneration
             startWorkspacePaneLoad(

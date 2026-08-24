@@ -267,6 +267,15 @@ final class OverlayController: NSObject, NSWindowDelegate {
         guard OverlayRenderPolicy.layoutNeedsApply(previous: lastAppliedLayout, next: layout) else {
             return
         }
+        let previousPreviewWidth = lastAppliedLayout?.previewWidth ?? 0
+        if !OverlayRenderPolicy.shouldAnimateSideStageResize(
+            previousPreviewWidth: previousPreviewWidth,
+            nextPreviewWidth: layout.previewWidth
+        ) {
+            pendingLayout = nil
+            apply(layout)
+            return
+        }
         pendingLayout = layout
         guard !layoutQueued else { return }
         layoutQueued = true
@@ -330,10 +339,18 @@ final class OverlayController: NSObject, NSWindowDelegate {
             composerHeight: layout.composerHeight,
             previewWidth: layout.previewWidth
         )
-        if destChanged {
-            updatePanelFrame(frame, animated: panel.isVisible)
+        let animateFrame = panel.isVisible && OverlayRenderPolicy.shouldAnimateSideStageResize(
+            previousPreviewWidth: lastAppliedLayout?.previewWidth ?? 0,
+            nextPreviewWidth: layout.previewWidth
+        )
+        let needsMask = OverlayRenderPolicy.maskNeedsApply(previous: lastAppliedLayout, next: applied)
+        if destChanged, !animateFrame, needsMask {
+            applyMask(layout: applied, width: chatWidth)
         }
-        if OverlayRenderPolicy.maskNeedsApply(previous: lastAppliedLayout, next: applied) {
+        if destChanged {
+            updatePanelFrame(frame, animated: animateFrame)
+        }
+        if needsMask, !destChanged || animateFrame {
             applyMask(layout: applied, width: chatWidth)
         }
         lastAppliedLayout = applied

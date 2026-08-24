@@ -45,6 +45,20 @@ enum WorkspacePaneLoadState: Equatable {
     case failed
 }
 
+enum WorkspaceTurnRowKind: Equatable {
+    case user
+    case assistant
+    case thought
+    case tool
+    case other
+}
+
+struct WorkspaceTurnRow: Equatable {
+    var id: String
+    var sourceEntryId: String?
+    var kind: WorkspaceTurnRowKind
+}
+
 enum SideStagePolicy {
     static let workspaceLoadFallbackDelay: TimeInterval = 2.5
 
@@ -166,14 +180,28 @@ enum SideStagePolicy {
         return matchUserTurn(goal: goal, turns: turns)
     }
 
-    static func scrollTarget(followLatest: Bool, anchorEntryId: String?) -> String {
+    static func scrollTarget(
+        followLatest: Bool,
+        anchorEntryId: String?,
+        rows: [WorkspaceTurnRow] = []
+    ) -> String {
         if followLatest {
             return "workspace-end"
         }
-        if let anchorEntryId, !anchorEntryId.isEmpty {
-            return "entry-\(anchorEntryId)"
+        guard let anchorEntryId, !anchorEntryId.isEmpty else { return "workspace-end" }
+        guard let userIndex = rows.firstIndex(where: {
+            $0.kind == .user && $0.sourceEntryId == anchorEntryId
+        }) else { return "entry-\(anchorEntryId)" }
+        let nextUserIndex = rows[(userIndex + 1)...].firstIndex(where: { $0.kind == .user })
+            ?? rows.endIndex
+        let turn = rows[(userIndex + 1)..<nextUserIndex]
+        if let assistant = turn.last(where: { $0.kind == .assistant }) {
+            return assistant.id
         }
-        return "workspace-end"
+        if let output = turn.last(where: { $0.kind != .user && $0.kind != .other }) {
+            return output.id
+        }
+        return rows[userIndex].id
     }
 
     /// `session/load` and `session/resume` replay history and set a process-wide

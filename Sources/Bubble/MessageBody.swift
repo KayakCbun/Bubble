@@ -46,6 +46,12 @@ enum MessagePart {
     case mermaid(String)
 
     static func displayParts(_ text: String) -> [MessagePart] {
+        MessagePartCache.shared.parts(for: text) {
+            parseDisplayParts(text)
+        }
+    }
+
+    private static func parseDisplayParts(_ text: String) -> [MessagePart] {
         var parts: [MessagePart] = []
         for part in split(text) {
             switch part {
@@ -621,6 +627,35 @@ enum MessagePart {
             }
         }
         return out.joined(separator: "\n")
+    }
+}
+
+private final class MessagePartBox {
+    let parts: [MessagePart]
+
+    init(_ parts: [MessagePart]) {
+        self.parts = parts
+    }
+}
+
+private final class MessagePartCache {
+    static let shared = MessagePartCache()
+
+    private let cache: NSCache<NSString, MessagePartBox> = {
+        let cache = NSCache<NSString, MessagePartBox>()
+        cache.countLimit = 256
+        cache.totalCostLimit = 8 * 1_024 * 1_024
+        return cache
+    }()
+
+    func parts(for text: String, build: () -> [MessagePart]) -> [MessagePart] {
+        let key = text as NSString
+        if let cached = cache.object(forKey: key) {
+            return cached.parts
+        }
+        let parts = build()
+        cache.setObject(MessagePartBox(parts), forKey: key, cost: text.utf8.count)
+        return parts
     }
 }
 

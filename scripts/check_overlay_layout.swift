@@ -88,6 +88,14 @@ struct OverlayLayoutCheck {
                "show animation keeps accumulated stream work suspended")
         expect(OverlayRenderPolicy.shouldResumeStream(panelVisible: true, isMoving: false),
                "settled visible panel resumes accumulated stream work")
+        expect(
+            !OverlayRenderPolicy.shouldAnimateSideStageResize(previousPreviewWidth: 0, nextPreviewWidth: 560),
+            "opening a side stage applies its panel width atomically"
+        )
+        expect(
+            OverlayRenderPolicy.shouldAnimateSideStageResize(previousPreviewWidth: 560, nextPreviewWidth: 560),
+            "same-width settled layouts retain ordinary panel animation policy"
+        )
         let closedOrigin = OverlayLayoutPolicy.panelOriginX(centerX: 500, contentWidth: 760, bleed: 16)
         let openOrigin = OverlayLayoutPolicy.panelOriginX(centerX: 500, contentWidth: 760 + 448, bleed: 16)
         expect(closedOrigin == 500 - (760 + 32) / 2, "closed panel is centered on the composer")

@@ -117,9 +117,19 @@ struct SideStageCheck {
             SideStagePolicy.scrollTarget(followLatest: true, anchorEntryId: "b") == "workspace-end",
             "live follow targets the tail"
         )
+        let turnRows = [
+            WorkspaceTurnRow(id: "user-b", sourceEntryId: "b", kind: .user),
+            WorkspaceTurnRow(id: "thought-b", sourceEntryId: "assistant-b", kind: .thought),
+            WorkspaceTurnRow(id: "assistant-b", sourceEntryId: "assistant-b", kind: .assistant),
+            WorkspaceTurnRow(id: "user-c", sourceEntryId: "c", kind: .user),
+        ]
         expect(
-            SideStagePolicy.scrollTarget(followLatest: false, anchorEntryId: "b") == "entry-b",
-            "finished cards scroll to the anchored user turn"
+            SideStagePolicy.scrollTarget(
+                followLatest: false,
+                anchorEntryId: "b",
+                rows: turnRows
+            ) == "assistant-b",
+            "finished cards scroll to the end of the anchored turn's assistant output"
         )
 
         let live = "child-session"

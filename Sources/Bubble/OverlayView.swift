@@ -190,10 +190,8 @@ struct OverlayView: View {
                         }
                     if store.sideStagePresented {
                         sideStagePane
-                            .transition(.move(edge: .trailing).combined(with: .opacity))
                     }
                 }
-                .animation(OverlayMotion.panel, value: store.sideStageIdentity)
             }
             VStack(spacing: 8) {
                 if let brief = store.activeWorkspaceBrief, brief.isActive {
@@ -228,7 +226,6 @@ struct OverlayView: View {
                 .animation(OverlayMotion.quick, value: store.slashMenuVisible)
             }
         }
-        .animation(OverlayMotion.panel, value: store.sideStageIdentity)
         .frame(maxWidth: .infinity, alignment: .bottom)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
         .padding(OverlayMetrics.shadowInset)
@@ -301,15 +298,10 @@ struct OverlayView: View {
             }
             if let preview = store.markdownPreview {
                 markdownPreviewPane(preview)
-                    .transition(.asymmetric(
-                        insertion: .move(edge: .trailing).combined(with: .opacity),
-                        removal: .move(edge: .trailing).combined(with: .opacity)
-                    ))
             }
         }
         .frame(width: previewWidth, height: transcriptHeight)
         .clipped()
-        .animation(OverlayMotion.panel, value: store.sideStageIdentity)
         .environment(\.openMarkdownPreview) { path in
             store.openMarkdownPreview(path, fromWorkspacePane: store.workspaceStage != nil)
         }
@@ -359,8 +351,18 @@ struct OverlayView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 18) {
                     ForEach(rows) { row in
-                        transcriptRow(row, interactive: false)
-                            .id(workspaceRowScrollId(row))
+                        Group {
+                            switch row {
+                            case .collapsedTools:
+                                transcriptRow(row, interactive: false)
+                            case .message, .tool:
+                                EquatableSection(value: rowRenderKey(row)) {
+                                    transcriptRow(row, interactive: false)
+                                }
+                                .equatable()
+                            }
+                        }
+                        .id(workspaceRowScrollId(row))
                     }
                     if live, let started = store.items.first(where: { $0.id == store.workspaceStage?.cardId })?.workspaceStartedAt {
                         WorkingRow(startedAt: Date(timeIntervalSince1970: started))
@@ -415,19 +417,14 @@ struct OverlayView: View {
         let follow = store.workspaceStage?.followLatest ?? true
         let target = SideStagePolicy.scrollTarget(
             followLatest: follow,
-            anchorEntryId: store.workspaceStage?.anchorEntryId
+            anchorEntryId: store.workspaceStage?.anchorEntryId,
+            rows: store.visibleWorkspacePaneItems.map(WorkspaceTurnRow.init)
         )
         OverlayPulse.shared.onNextFrame {
             var transaction = Transaction()
-            transaction.disablesAnimations = follow
+            transaction.disablesAnimations = true
             withTransaction(transaction) {
-                if follow {
-                    proxy.scrollTo(target, anchor: .bottom)
-                } else {
-                    withAnimation(OverlayMotion.scroll) {
-                        proxy.scrollTo(target, anchor: .top)
-                    }
-                }
+                proxy.scrollTo(target, anchor: .bottom)
             }
         }
     }
@@ -1177,6 +1174,10 @@ struct OverlayView: View {
                 kind: item.kind,
                 text: item.text,
                 toolStatus: item.toolStatus,
+                toolKind: item.toolKind,
+                toolInput: item.toolInput,
+                toolOutput: item.toolOutput,
+                imageNames: item.imageNames,
                 workspaceStatus: item.workspaceStatus,
                 workspaceSummary: item.workspaceSummary,
                 live: store.streamingAssistantId == item.id
@@ -1191,6 +1192,10 @@ struct OverlayView: View {
                 kind: .tool,
                 text: "\(items.count)",
                 toolStatus: items.last?.toolStatus,
+                toolKind: nil,
+                toolInput: nil,
+                toolOutput: nil,
+                imageNames: nil,
                 workspaceStatus: nil,
                 workspaceSummary: nil,
                 live: false,
@@ -1965,6 +1970,10 @@ private struct RowRenderKey: Equatable {
     var kind: ChatItem.Kind
     var text: String
     var toolStatus: String?
+    var toolKind: String?
+    var toolInput: String?
+    var toolOutput: String?
+    var imageNames: [String]?
     var workspaceStatus: String?
     var workspaceSummary: String?
     var live: Bool
@@ -2012,6 +2021,29 @@ private enum TranscriptRow: Identifiable {
         case .collapsedTools(_, let items):
             items.contains { $0.id == itemID }
         }
+    }
+}
+
+private extension WorkspaceTurnRow {
+    init(_ item: ChatItem) {
+        let kind: WorkspaceTurnRowKind
+        switch item.kind {
+        case .user:
+            kind = .user
+        case .assistant:
+            kind = .assistant
+        case .thought:
+            kind = .thought
+        case .tool:
+            kind = .tool
+        case .system, .workspaceRun:
+            kind = .other
+        }
+        self.init(
+            id: item.id.uuidString,
+            sourceEntryId: item.sourceEntryId,
+            kind: kind
+        )
     }
 }
 
