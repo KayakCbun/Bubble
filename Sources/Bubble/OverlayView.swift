@@ -58,6 +58,7 @@ struct OverlayView: View {
     @State private var expandedToolGroups: Set<String> = []
     @State private var expandedTools: Set<UUID> = []
     @State private var expandedWorkspaceRuns: Set<UUID> = []
+    @State private var hoveredUserMessage: UUID?
     @State private var followLatest = true
     @State private var followQueued = false
     @StateObject private var ime = IMEComposingMonitor()
@@ -103,7 +104,7 @@ struct OverlayView: View {
             avatarSize: OverlayMetrics.avatarSize,
             workspaceChip: store.activeWorkspaceBrief?.isActive == true,
             chipHeight: OverlayMetrics.chipHeight,
-            attachmentCount: store.draftClips.count + store.draftImages.count,
+            attachmentCount: store.draftClips.count + store.draftImages.count + (store.branchDraft == nil ? 0 : 1),
             fieldWidth: OverlayComposer.fieldWidth(
                 inputWidth: OverlayMetrics.inputWidth,
                 avatarSize: OverlayMetrics.avatarSize
@@ -318,7 +319,13 @@ struct OverlayView: View {
     }
 
     private var historyTicks: [HistoryTick] {
-        HistoryPreview.ticks(from: store.visibleItems)
+        HistoryPreview.ticks(from: store.visibleItems).map { tick in
+            var tick = tick
+            if let item = store.items.first(where: { $0.id == tick.id }) {
+                tick.branchCount = max(1, store.variants(for: item).count)
+            }
+            return tick
+        }
     }
 
     private var transcriptList: some View {
@@ -329,8 +336,12 @@ struct OverlayView: View {
                         workedHeader(store.lastTurnDuration)
                     }
                     ForEach(displayRows) { row in
+                        if isFirstRowAfterBranch(row) {
+                            branchCutoverDivider
+                        }
                         transcriptRow(row)
                             .id(row.id)
+                            .opacity(isAfterBranchPoint(row) ? 0.34 : 1)
                     }
                     if store.isBusy {
                         WorkingRow(startedAt: store.turnStartedAt ?? Date())
@@ -408,6 +419,15 @@ struct OverlayView: View {
             .onChange(of: store.items.last?.toolStatus) { _, _ in
                 requestFollowLatest(proxy)
             }
+            .onChange(of: store.branchDraft?.sourceItemID) { _, sourceID in
+                guard let sourceID else { return }
+                followLatest = false
+                OverlayPulse.shared.onNextFrame {
+                    withAnimation(OverlayMotion.scroll) {
+                        proxy.scrollTo(sourceID.uuidString, anchor: .center)
+                    }
+                }
+            }
             .onChange(of: store.isBusy) { _, _ in
                 requestFollowLatest(proxy)
             }
@@ -415,6 +435,30 @@ struct OverlayView: View {
                 requestFollowLatest(proxy)
             }
         }
+    }
+
+    private func isAfterBranchPoint(_ row: TranscriptRow) -> Bool {
+        guard let sourceID = store.branchDraft?.sourceItemID,
+              let sourceIndex = displayRows.firstIndex(where: { $0.contains(sourceID) }),
+              let rowIndex = displayRows.firstIndex(where: { $0.id == row.id }) else { return false }
+        return rowIndex > sourceIndex
+    }
+
+    private func isFirstRowAfterBranch(_ row: TranscriptRow) -> Bool {
+        guard isAfterBranchPoint(row),
+              let rowIndex = displayRows.firstIndex(where: { $0.id == row.id }) else { return false }
+        return rowIndex == 0 || !isAfterBranchPoint(displayRows[rowIndex - 1])
+    }
+
+    private var branchCutoverDivider: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "arrow.triangle.branch")
+            Text("Later messages stay on the original path")
+            Spacer(minLength: 0)
+        }
+        .font(.system(size: 10.5, weight: .medium))
+        .foregroundStyle(.tertiary)
+        .padding(.vertical, 2)
     }
 
     private var slashPalette: some View {
@@ -735,9 +779,12 @@ struct OverlayView: View {
 
     @ViewBuilder
     private var composerAttachments: some View {
-        if !store.draftClips.isEmpty || !store.draftImages.isEmpty {
+        if store.branchDraft != nil || !store.draftClips.isEmpty || !store.draftImages.isEmpty {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
+                    if let branch = store.branchDraft {
+                        branchDraftChip(branch)
+                    }
                     ForEach(store.draftImages) { image in
                         draftImageChip(image)
                     }
@@ -748,6 +795,29 @@ struct OverlayView: View {
             }
             .frame(height: OverlayComposer.attachmentRow)
         }
+    }
+
+    private func branchDraftChip(_ branch: ConversationBranchDraft) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "arrow.triangle.branch")
+                .font(.system(size: 11, weight: .semibold))
+            Text("Branching from \(branch.title)")
+                .font(.system(size: 12, weight: .medium))
+                .lineLimit(1)
+            Button {
+                store.cancelBranchDraft()
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .buttonStyle(.plain)
+            .help("Cancel branch edit")
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(Capsule().fill(Color.primary.opacity(0.06)))
     }
 
     private func draftImageChip(_ image: DraftImage) -> some View {
@@ -1063,6 +1133,9 @@ struct OverlayView: View {
     private func userBubble(_ item: ChatItem) -> some View {
         let text = item.text.trimmingCharacters(in: .whitespacesAndNewlines)
         let names = item.imageNames ?? []
+        let variants = store.variants(for: item)
+        let currentVariant = variants.firstIndex(where: \.isCurrent)
+        let showBranchControls = hoveredUserMessage == item.id || !variants.isEmpty
         return HStack {
             Spacer(minLength: 72)
             VStack(alignment: .trailing, spacing: 8) {
@@ -1085,6 +1158,46 @@ struct OverlayView: View {
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.secondary)
                 }
+                if showBranchControls, item.sourceEntryId != nil, item.deliveryState == nil {
+                    HStack(spacing: 7) {
+                        Button {
+                            store.beginBranch(from: item)
+                        } label: {
+                            Image(systemName: "arrow.triangle.branch")
+                                .font(.system(size: 11, weight: .semibold))
+                                .frame(width: 22, height: 20)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .disabled(store.isBusy || store.childBusy || store.isSwitchingBranch || !names.isEmpty || item.sourceBranchable == false)
+                        .help(names.isEmpty && item.sourceBranchable != false ? "Edit this message and branch" : "Messages with attachments cannot be branched yet")
+
+                        if variants.count > 1, let currentVariant {
+                            Button {
+                                store.switchConversationBranch(to: variants[currentVariant - 1])
+                            } label: {
+                                Image(systemName: "chevron.left")
+                                    .font(.system(size: 10, weight: .semibold))
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(currentVariant == 0 || store.isBusy || store.childBusy || store.isSwitchingBranch)
+
+                            Text("\(currentVariant + 1) / \(variants.count)")
+                                .font(.system(size: 10, weight: .medium).monospacedDigit())
+                                .foregroundStyle(.tertiary)
+
+                            Button {
+                                store.switchConversationBranch(to: variants[currentVariant + 1])
+                            } label: {
+                                Image(systemName: "chevron.right")
+                                    .font(.system(size: 10, weight: .semibold))
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(currentVariant + 1 >= variants.count || store.isBusy || store.childBusy || store.isSwitchingBranch)
+                        }
+                    }
+                    .transition(.opacity)
+                }
             }
             .padding(.horizontal, names.isEmpty ? 16 : 10)
             .padding(.vertical, names.isEmpty ? 12 : 10)
@@ -1092,6 +1205,23 @@ struct OverlayView: View {
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
                     .fill(Color.primary.opacity(0.08))
             )
+        }
+        .onHover { hovering in
+            if hovering {
+                hoveredUserMessage = item.id
+            } else if hoveredUserMessage == item.id {
+                hoveredUserMessage = nil
+            }
+        }
+        .animation(OverlayMotion.quick, value: showBranchControls)
+        .contextMenu {
+            if item.sourceEntryId != nil, item.deliveryState == nil, names.isEmpty, item.sourceBranchable != false {
+                Button("Edit and branch") { store.beginBranch(from: item) }
+                    .disabled(store.isBusy || store.childBusy || store.isSwitchingBranch)
+            }
+        }
+        .accessibilityAction(named: "Edit and branch") {
+            store.beginBranch(from: item)
         }
     }
 
@@ -1188,6 +1318,7 @@ struct OverlayView: View {
     private func assistantBubble(_ item: ChatItem) -> some View {
         let live = store.isBusy && store.streamingAssistantId == item.id
         let text = item.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let showBranchControl = hoveredUserMessage == item.id && item.sourceEntryId != nil
         return VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 MessageBody(text: item.text, streaming: live)
@@ -1197,8 +1328,42 @@ struct OverlayView: View {
                 }
             }
             if !live, !text.isEmpty {
-                AssistantCopyButton(text: text)
+                HStack(spacing: 8) {
+                    AssistantCopyButton(text: text)
+                    if showBranchControl {
+                        Button {
+                            store.beginBranch(from: item)
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "arrow.triangle.branch")
+                                Text("Branch from here")
+                            }
+                            .font(.system(size: 10.5, weight: .medium))
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .disabled(store.isBusy || store.childBusy || store.isSwitchingBranch || item.sourceBranchable == false)
+                        .help("Start an alternative after this response")
+                    }
+                }
             }
+        }
+        .onHover { hovering in
+            if hovering {
+                hoveredUserMessage = item.id
+            } else if hoveredUserMessage == item.id {
+                hoveredUserMessage = nil
+            }
+        }
+        .animation(OverlayMotion.quick, value: showBranchControl)
+        .contextMenu {
+            if item.sourceEntryId != nil, item.sourceBranchable != false {
+                Button("Branch from here") { store.beginBranch(from: item) }
+                    .disabled(store.isBusy || store.childBusy || store.isSwitchingBranch)
+            }
+        }
+        .accessibilityAction(named: "Branch from here") {
+            store.beginBranch(from: item)
         }
     }
 
@@ -1639,6 +1804,15 @@ private enum TranscriptRow: Identifiable {
             "tool-\(item.id.uuidString)"
         case .collapsedTools(let id, _):
             id
+        }
+    }
+
+    func contains(_ itemID: UUID) -> Bool {
+        switch self {
+        case .message(let item), .tool(let item):
+            item.id == itemID
+        case .collapsedTools(_, let items):
+            items.contains { $0.id == itemID }
         }
     }
 }

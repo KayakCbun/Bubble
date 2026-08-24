@@ -117,7 +117,7 @@ enum BubbleConfig {
 
     You run on Pi coding-agent through `pi-acp`. cwd is `~/.bubble/workspace`. Credentials and the model catalog live in `~/.pi/agent/`. Bubble's model and thinking live in `~/.bubble/config.json`. Do not rewrite Pi TUI settings to change your model. Use `/model` and `/thinking`.
 
-    If Pi is missing: `curl -fsSL https://pi.dev/install.sh | sh`. If `pi-acp` is missing: `npm install -g pi-acp` (Node 22+). If the model list is empty, nobody is signed in. Use `/login` or run `pi` in Terminal.
+    If Pi or Bubble's ACP adapter is missing, tell the user to type `/setup` (Node 22+). If the model list is empty, nobody is signed in. Use `/login` or run `pi` in Terminal.
 
     Skills or the workspace extension not loading usually means this workspace is untrusted. `~/.pi/agent/trust.json` must include `~/.bubble/workspace`. Logs are `~/.bubble/overlay.log`.
 
@@ -400,6 +400,15 @@ async function textResult(method: string, params: Record<string, unknown>) {
 }
 
 export default function (pi: ExtensionAPI) {
+  pi.registerCommand("bubble-navigate", {
+    description: "Move Bubble to a conversation-tree entry",
+    async handler(args, ctx) {
+      const targetId = args.trim();
+      if (!targetId) throw new Error("target entry is required");
+      const result = await ctx.navigateTree(targetId, { summarize: false });
+      if (result.cancelled) throw new Error("branch navigation was cancelled");
+    },
+  });
 
   pi.on("session_start", (_event, ctx) => {
     startSteeringControl(pi, ctx.sessionManager.getSessionFile());

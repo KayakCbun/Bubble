@@ -12,6 +12,7 @@ struct HistoryTick: Identifiable, Equatable {
     var id: UUID
     var title: String
     var body: String
+    var branchCount: Int = 1
 }
 
 enum HistoryPreview {
@@ -119,9 +120,17 @@ struct HistoryTickRail: View {
         return Button {
             onSelect(tick.id)
         } label: {
-            Capsule(style: .continuous)
-                .fill(Color.primary.opacity(active ? 0.82 : (isLast ? 0.45 : 0.22)))
-                .frame(width: active ? 16 : (isLast ? 12 : 10), height: active ? 3 : 1.5)
+            HStack(spacing: 1.5) {
+                Capsule(style: .continuous)
+                    .fill(Color.primary.opacity(active ? 0.82 : (isLast ? 0.45 : 0.22)))
+                    .frame(width: active ? 12 : (isLast ? 9 : 7), height: active ? 3 : 1.5)
+                if tick.branchCount > 1 {
+                    Capsule(style: .continuous)
+                        .fill(Color.primary.opacity(active ? 0.72 : 0.30))
+                        .frame(width: active ? 7 : 5, height: active ? 3 : 1.5)
+                        .rotationEffect(.degrees(-24), anchor: .leading)
+                }
+            }
                 .frame(width: 18, height: 8, alignment: .leading)
                 .contentShape(Rectangle())
         }
@@ -143,6 +152,11 @@ struct HistoryTickRail: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+            if tick.branchCount > 1 {
+                Text("\(tick.branchCount) conversation paths")
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(.tertiary)
             }
         }
         .padding(.horizontal, 14)

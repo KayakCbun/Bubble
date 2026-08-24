@@ -2,8 +2,8 @@ import AppKit
 import Foundation
 
 enum PiBootstrap {
-    static let piPackage = "@earendil-works/pi-coding-agent"
-    static let acpPackage = "pi-acp"
+    static let piPackage = BubblePiRuntimePatch.packageSpec
+    static let acpPackage = BubblePiAcpPatch.packageSpec
 
     enum Outcome {
         case alreadyReady
@@ -29,8 +29,10 @@ enum PiBootstrap {
             return .needNode(detail)
         }
 
-        if report.piInstalled, report.acpInstalled {
-            onLog("Pi and pi-acp are already on this Mac.")
+        if report.piInstalled,
+           BubblePiRuntimePatch.isApplied(runtime: OverlayPaths.runtime),
+           BubblePiAcpPatch.isApplied(runtime: OverlayPaths.runtime) {
+            onLog("Pi and Bubble's branch-capable pi-acp are already installed.")
             return .alreadyReady
         }
 
@@ -38,12 +40,7 @@ enum PiBootstrap {
             throw RPCError(code: -1, message: "npm not found. Reinstall Node from https://nodejs.org/en/download")
         }
 
-        var packages: [String] = []
-        if !report.piInstalled { packages.append(piPackage) }
-        if !report.acpInstalled { packages.append(acpPackage) }
-        guard !packages.isEmpty else {
-            return .alreadyReady
-        }
+        let packages = [piPackage, acpPackage]
 
         onLog("Installing \(packages.joined(separator: " and ")) into ~/.bubble/runtime…")
         try run(
@@ -51,9 +48,15 @@ enum PiBootstrap {
             arguments: ["install", "--prefix", OverlayPaths.runtime.path, "--omit=dev", "--ignore-scripts"] + packages,
             onLog: onLog
         )
+        try BubblePiRuntimePatch.apply(runtime: OverlayPaths.runtime)
+        try BubblePiAcpPatch.apply(runtime: OverlayPaths.runtime)
 
-        let pi = OverlayPaths.resolveCommand("pi")
-        let acp = OverlayPaths.resolveCommand("pi-acp") ?? OverlayPaths.resolveAgentLaunch()?.executable
+        let pi = BubblePiRuntimePatch.isApplied(runtime: OverlayPaths.runtime)
+            ? OverlayPaths.runtimeBin.appendingPathComponent("pi")
+            : nil
+        let acp = BubblePiAcpPatch.isApplied(runtime: OverlayPaths.runtime)
+            ? OverlayPaths.runtimeBin.appendingPathComponent("pi-acp")
+            : nil
         if pi == nil {
             throw RPCError(code: -1, message: "npm finished, but `pi` is still missing.")
         }

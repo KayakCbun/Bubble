@@ -14,9 +14,14 @@ func expectContains(_ haystack: String, _ needle: String, _ message: String) {
 @main
 struct PiSetupCheck {
     static func main() {
+        if ProcessInfo.processInfo.environment["BUBBLE_WRITE_EXTENSION"] == "1" {
+            BubbleConfig.ensureWorkspaceExtension()
+        }
         testParseNodeVersion()
         testNodeVersionAtLeast()
         testSetupCard()
+        testSteeringExtension()
+        testBranchExtension()
         print("PASS: pi setup diagnose")
     }
 
@@ -85,5 +90,20 @@ struct PiSetupCheck {
         expectContains(installCard, "~/.bubble/runtime", "install target is ~/.bubble/runtime")
         expectContains(installCard, "Type /setup to install Pi", "ready-to-install card is one command")
         expect(!installCard.contains("Install Node first"), "supported node does not ask to install Node")
+    }
+
+    static func testSteeringExtension() {
+        let source = BubbleConfig.workspaceExtensionSource
+        expectContains(source, "pi.sendUserMessage(content, { deliverAs: \"steer\" })", "extension uses native steering")
+        expectContains(source, "if (!steeringBusy) throw new Error(\"steer-unavailable\")", "extension rejects closed steering windows")
+        expectContains(source, "path.join(os.homedir(), \".bubble\", \"steering\")", "extension publishes a session-local endpoint")
+        expectContains(source, "request.token !== steeringToken || request.generation !== steeringGeneration", "steering endpoint is bound to one turn")
+        expectContains(source, "steeringGeneration += 1", "each active turn gets a new steering generation")
+    }
+
+    static func testBranchExtension() {
+        let source = BubbleConfig.workspaceExtensionSource
+        expectContains(source, "pi.registerCommand(\"bubble-navigate\"", "extension owns hidden branch navigation")
+        expectContains(source, "ctx.navigateTree(targetId, { summarize: false })", "branch navigation keeps the current Pi session")
     }
 }

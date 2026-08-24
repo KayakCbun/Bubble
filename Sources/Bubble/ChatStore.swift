@@ -32,6 +32,8 @@ struct ChatItem: Identifiable, Codable, Equatable {
     var workspaceStartedAt: TimeInterval?
     var imageNames: [String]?
     var deliveryState: MessageDeliveryState?
+    var sourceEntryId: String?
+    var sourceBranchable: Bool?
 
     init(
         id: UUID = UUID(),
@@ -52,7 +54,9 @@ struct ChatItem: Identifiable, Codable, Equatable {
         workspaceChildren: [ChatItem]? = nil,
         workspaceStartedAt: TimeInterval? = nil,
         imageNames: [String]? = nil,
-        deliveryState: MessageDeliveryState? = nil
+        deliveryState: MessageDeliveryState? = nil,
+        sourceEntryId: String? = nil,
+        sourceBranchable: Bool? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -73,6 +77,8 @@ struct ChatItem: Identifiable, Codable, Equatable {
         self.workspaceStartedAt = workspaceStartedAt
         self.imageNames = imageNames
         self.deliveryState = deliveryState
+        self.sourceEntryId = sourceEntryId
+        self.sourceBranchable = sourceBranchable
     }
 }
 
@@ -83,6 +89,28 @@ private struct PendingPrompt {
     var text: String
     var attachments: [PromptAttachment]
     var images: [PromptImage]
+    var branch: ConversationBranchDraft? = nil
+    var draftText: String = ""
+    var draftClips: [DraftClip] = []
+    var draftImages: [DraftImage] = []
+}
+
+struct ConversationBranchDraft: Equatable {
+    var targetEntryID: String
+    var originalLeafID: String
+    var sourceItemID: UUID
+    var title: String
+    var suspendedDraft: String
+    var suspendedClips: [DraftClip]
+    var suspendedImages: [DraftImage]
+}
+
+private struct TranscriptEnvelope: Codable {
+    var version: Int = 1
+    var sessionId: String
+    var selectedLeafId: String?
+    var items: [ChatItem]
+    var richItems: [ChatItem]? = nil
 }
 
 struct QueuedUserMessage: Identifiable, Equatable {
@@ -138,6 +166,9 @@ final class ChatStore {
     var draftClips: [DraftClip] = []
     var draftImages: [DraftImage] = []
     var childBusy = false
+    var conversationTree: ConversationTreeSnapshot?
+    var branchDraft: ConversationBranchDraft?
+    var isSwitchingBranch = false
     private var paletteSuppressed = false
     private var lastPaletteSignature = ""
     private let control = WorkspaceControlServer()
@@ -155,6 +186,8 @@ final class ChatStore {
     private var steeringMessageIds: Set<UUID> = []
     private var runNonce = 0
     private var isInstalling = false
+    private var activeBranchPrompt: PendingPrompt?
+    private var activeBranchNavigationSucceeded = false
 
     var queuedMessages: [QueuedUserMessage] {
         pendingPrompts.map {
@@ -229,10 +262,15 @@ final class ChatStore {
 
     let client = AcpClient()
     private var persistWork: DispatchWorkItem?
+    private var richTranscriptRows: [String: ChatItem] = [:]
 
     init() {
         OverlayPaths.bootstrap()
-        items = Self.loadTranscript()
+        let restored = Self.loadTranscript()
+        items = restored.items
+        for item in restored.richItems + restored.items {
+            if let key = Self.richKey(item) { richTranscriptRows[key] = item }
+        }
         workspaceState = WorkspaceRegistry.load(from: OverlayPaths.mountsFile)
         if workspaceState.active?.isActive == true {
             workspaceState.active = nil
@@ -613,12 +651,17 @@ final class ChatStore {
     }
 
     private func treePaletteItems(query: String) -> [PaletteItem] {
-        let items = PiSessions.userTurns(sessionId: client.sessionId).map { turn in
-            PaletteItem(
+        guard let tree = conversationTree else { return [] }
+        let activeIDs = Set(tree.activePath.map(\.id))
+        let turns = tree.entries.filter(\.isUserMessage)
+        let items = turns.map { turn in
+            let active = activeIDs.contains(turn.id)
+            let indent = String(repeating: "  ", count: min(tree.depth(of: turn.id), 4))
+            return PaletteItem(
                 kind: .command,
-                title: "\(turn.index). \(turn.text)",
-                subtitle: "Copy into composer",
-                insert: "/tree \(turn.index)",
+                title: "\(indent)\(active ? "●" : "○") \(branchTitle(turn.displayText))",
+                subtitle: active ? "Current path · edit and branch" : "Other path · switch here",
+                insert: active ? "/tree branch:\(turn.id)" : "/tree switch:\(tree.tipID(for: turn.id))",
                 autoSend: true
             )
         }
@@ -745,6 +788,7 @@ final class ChatStore {
             status = "ready"
             syncSessionConfig()
             refreshCatalog()
+            await restoreConversationTree(replacingTranscript: !isBusy && !isStartingSession)
             announceInterruptedWorkspaceIfNeeded()
             if client.availableModels.isEmpty && !PiSetup.diagnose().hasCredentials {
                 presentSetup(PiSetup.diagnose(), error: "Pi is running, but no provider is signed in.")
@@ -812,6 +856,93 @@ final class ChatStore {
         draftImages = []
     }
 
+    func beginBranch(from item: ChatItem) {
+        guard !isBusy, !childBusy, !isStartingSession, !isSwitchingBranch,
+              item.kind == .user || item.kind == .assistant,
+              (item.imageNames ?? []).isEmpty,
+              item.sourceBranchable != false,
+              let targetEntryID = item.sourceEntryId,
+              let originalLeafID = conversationTree?.leafID,
+              let sourceEntry = conversationTree?.entries.first(where: { $0.id == targetEntryID }) else { return }
+        let suspended = branchDraft.map {
+            ($0.suspendedDraft, $0.suspendedClips, $0.suspendedImages)
+        } ?? (draft, draftClips, draftImages)
+        branchDraft = ConversationBranchDraft(
+            targetEntryID: targetEntryID,
+            originalLeafID: originalLeafID,
+            sourceItemID: item.id,
+            title: branchTitle(sourceEntry.displayText),
+            suspendedDraft: suspended.0,
+            suspendedClips: suspended.1,
+            suspendedImages: suspended.2
+        )
+        draft = item.kind == .user ? sourceEntry.displayText : ""
+        draftClips = []
+        draftImages = []
+        paletteSuppressed = true
+        requestFocus()
+    }
+
+    private func beginBranch(entryID: String) {
+        if let item = items.first(where: { $0.sourceEntryId == entryID && $0.kind == .user }) {
+            beginBranch(from: item)
+            return
+        }
+        guard let entry = conversationTree?.entries.first(where: { $0.id == entryID && $0.isUserMessage }) else { return }
+        beginBranch(from: ChatItem(
+            kind: .user,
+            text: entry.displayText,
+            sourceEntryId: entry.id,
+            sourceBranchable: !entry.hasStructuredContent
+        ))
+    }
+
+    func cancelBranchDraft() {
+        guard let branchDraft else { return }
+        draft = branchDraft.suspendedDraft
+        draftClips = branchDraft.suspendedClips
+        draftImages = branchDraft.suspendedImages
+        self.branchDraft = nil
+        requestFocus()
+    }
+
+    func variants(for item: ChatItem) -> [ConversationVariant] {
+        guard let entryID = item.sourceEntryId else { return [] }
+        return conversationTree?.variants(around: entryID) ?? []
+    }
+
+    func switchConversationBranch(to variant: ConversationVariant) {
+        switchConversationBranch(to: variant.tipID)
+    }
+
+    private func switchConversationBranch(to targetID: String) {
+        guard !isBusy, !childBusy, !isStartingSession, !isSwitchingBranch,
+              targetID != conversationTree?.leafID else { return }
+        cancelBranchDraft()
+        let originalLeafID = conversationTree?.leafID
+        isSwitchingBranch = true
+        status = "switching branch"
+        Task { @MainActor in
+            do {
+                let snapshot = try await client.selectConversationLeaf(targetID)
+                applyConversationTree(snapshot, replacingTranscript: true)
+                status = "ready"
+            } catch {
+                if let snapshot = try? await client.conversationTree() {
+                    applyConversationTree(snapshot, replacingTranscript: true)
+                } else if let originalLeafID,
+                          let restored = try? await client.selectConversationLeaf(originalLeafID) {
+                    applyConversationTree(restored, replacingTranscript: true)
+                }
+                status = friendly(error)
+                items.append(ChatItem(kind: .system, text: friendly(error)))
+                persist(immediate: true)
+            }
+            isSwitchingBranch = false
+            requestFocus()
+        }
+    }
+
     func attachClipboard() {
         if !draft.localizedCaseInsensitiveContains("@clipboard") {
             if draft.isEmpty || draft.hasSuffix(" ") {
@@ -825,15 +956,26 @@ final class ChatStore {
     }
 
     private func send(text raw: String, forceClipboard: Bool) {
+        guard ConversationBranchInteraction.canSend(isSwitchingBranch: isSwitchingBranch) else {
+            status = "wait for the branch switch to finish"
+            return
+        }
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        let clips = draftClips.map(\.text)
-        let imageData = draftImages.map(\.png)
+        let composerClips = draftClips
+        let composerImages = draftImages
+        let clips = composerClips.map(\.text)
+        let imageData = composerImages.map(\.png)
+        let branch = branchDraft
         guard !text.isEmpty || !clips.isEmpty || !imageData.isEmpty else { return }
-        if !isBusy, handleLocalSlash(text) {
+        guard branch == nil || !isBusy else {
+            status = "finish the current turn before branching"
+            return
+        }
+        if branch == nil, !isBusy, handleLocalSlash(text) {
             consumeComposer()
             return
         }
-        if !isBusy, let app = MacApps.launchIntent(from: text) {
+        if branch == nil, !isBusy, let app = MacApps.launchIntent(from: text) {
             consumeComposer()
             openApp(app)
             return
@@ -850,6 +992,7 @@ final class ChatStore {
             images.append(image)
         }
         consumeComposer()
+        branchDraft = nil
         var stored: [String] = []
         var seen = Set<Data>()
         for png in imageData + images.map(\.data) {
@@ -861,26 +1004,37 @@ final class ChatStore {
         let display = payload.display.isEmpty && stored.isEmpty && !images.isEmpty
             ? "Image"
             : payload.display
+        let itemId = UUID()
+        let queued = MessageDeliveryPolicy.shouldQueue(
+            isBusy: isBusy,
+            isBranching: branch != nil
+        )
         let prompt = PendingPrompt(
-            itemId: UUID(),
+            itemId: itemId,
             display: display,
             imageNames: stored,
             text: mac.text,
             attachments: attachments,
-            images: images
+            images: images,
+            branch: branch,
+            draftText: text,
+            draftClips: composerClips,
+            draftImages: composerImages
         )
-        if MessageDeliveryPolicy.shouldQueue(isBusy: isBusy, isBranching: false) {
+        if queued {
             pendingPrompts.append(prompt)
             status = "waiting"
             requestFocus()
             return
         }
-        appendUserItem(for: prompt)
+        if branch == nil {
+            appendUserItem(for: prompt)
+        }
         startPrompt(prompt)
     }
 
     private func startPrompt(_ prompt: PendingPrompt) {
-        if !items.contains(where: { $0.id == prompt.itemId }) {
+        if prompt.branch == nil, !items.contains(where: { $0.id == prompt.itemId }) {
             appendUserItem(for: prompt)
         }
         setDeliveryState(nil, for: prompt.itemId)
@@ -891,6 +1045,8 @@ final class ChatStore {
         status = "thinking"
         runNonce += 1
         let nonce = runNonce
+        activeBranchPrompt = prompt.branch == nil ? nil : prompt
+        activeBranchNavigationSucceeded = false
 
         Task { @MainActor in
             do {
@@ -905,6 +1061,16 @@ final class ChatStore {
                         return
                     }
                 }
+                if let branch = prompt.branch {
+                    let snapshot = try await client.navigateConversation(to: branch.targetEntryID)
+                    guard nonce == self.runNonce else {
+                        _ = try? await client.selectConversationLeaf(branch.originalLeafID)
+                        return
+                    }
+                    activeBranchNavigationSucceeded = true
+                    applyConversationTree(snapshot, replacingTranscript: true, persistSelection: false)
+                    appendUserItem(for: prompt)
+                }
                 let wrapped = wrappedText(for: prompt)
                 let stop = try await client.prompt(
                     wrapped,
@@ -913,13 +1079,40 @@ final class ChatStore {
                 )
                 guard nonce == self.runNonce else { return }
                 status = stop == "end_turn" || stop == "cancelled" ? "ready" : stop
+                await refreshConversationTree()
             } catch {
                 guard nonce == self.runNonce else { return }
+                if let branch = prompt.branch {
+                    let snapshot = activeBranchNavigationSucceeded ? try? await client.conversationTree() : nil
+                    let persisted = snapshot.map {
+                        ConversationBranchRecovery.promptWasPersisted(
+                            in: $0,
+                            after: branch.targetEntryID,
+                            navigationSucceeded: activeBranchNavigationSucceeded
+                        )
+                    } ?? false
+                    if persisted, let snapshot {
+                        applyConversationTree(snapshot, replacingTranscript: true)
+                    }
+                    if !persisted {
+                        let restored = try? await client.selectConversationLeaf(branch.originalLeafID)
+                        let fallback = conversationTree?.selecting(leafID: branch.originalLeafID)
+                        if let restored = restored ?? fallback {
+                            applyConversationTree(restored, replacingTranscript: true)
+                        }
+                        branchDraft = branch
+                        draft = prompt.draftText
+                        draftClips = prompt.draftClips
+                        draftImages = prompt.draftImages
+                    }
+                }
                 items.append(ChatItem(kind: .system, text: friendly(error)))
                 persist(immediate: true)
                 status = friendly(error)
             }
             guard nonce == self.runNonce else { return }
+            activeBranchPrompt = nil
+            activeBranchNavigationSucceeded = false
             if let start = turnStartedAt {
                 lastTurnDuration = Date().timeIntervalSince(start)
             }
@@ -971,7 +1164,8 @@ final class ChatStore {
 
     private func startNextWaitingPrompt() {
         guard !isBusy, !pendingPrompts.isEmpty else { return }
-        startPrompt(pendingPrompts.removeFirst())
+        let next = pendingPrompts.removeFirst()
+        startPrompt(next)
     }
 
     private func appendUserItem(
@@ -1012,6 +1206,8 @@ final class ChatStore {
     }
 
     func cancel() {
+        let branchPrompt = activeBranchPrompt
+        let branchNavigationSucceeded = activeBranchNavigationSucceeded
         runNonce += 1
         client.cancel()
         for index in items.indices {
@@ -1030,10 +1226,43 @@ final class ChatStore {
         streamingThoughtId = nil
         status = "cancelled"
         clearSteeringMessages()
-        persist(immediate: true)
         OverlayLog.write("cancelled in-flight turn")
         requestFocus()
-        startNextWaitingPrompt()
+        guard let branchPrompt, let branch = branchPrompt.branch else {
+            activeBranchPrompt = nil
+            activeBranchNavigationSucceeded = false
+            persist(immediate: true)
+            startNextWaitingPrompt()
+            return
+        }
+        Task { @MainActor in
+            let snapshot = branchNavigationSucceeded ? try? await client.conversationTree() : nil
+            let persisted = snapshot.map {
+                ConversationBranchRecovery.promptWasPersisted(
+                    in: $0,
+                    after: branch.targetEntryID,
+                    navigationSucceeded: branchNavigationSucceeded
+                )
+            } ?? false
+            if persisted, let snapshot {
+                applyConversationTree(snapshot, replacingTranscript: true)
+            } else {
+                let restored = try? await client.selectConversationLeaf(branch.originalLeafID)
+                let fallback = conversationTree?.selecting(leafID: branch.originalLeafID)
+                if let restored = restored ?? fallback {
+                    applyConversationTree(restored, replacingTranscript: true)
+                }
+                branchDraft = branch
+                draft = branchPrompt.draftText
+                draftClips = branchPrompt.draftClips
+                draftImages = branchPrompt.draftImages
+            }
+            activeBranchPrompt = nil
+            activeBranchNavigationSucceeded = false
+            persist(immediate: true)
+            requestFocus()
+            startNextWaitingPrompt()
+        }
     }
 
     private func applyUpdateData(_ data: Data) {
@@ -1403,10 +1632,14 @@ final class ChatStore {
             requestFocus()
             return
         }
+        writeTranscript()
+        let previousItems = items
+        let previousRichRows = richTranscriptRows
+        let previousTree = conversationTree
         isStartingSession = true
         items = []
+        richTranscriptRows = [:]
         markdownPreview = nil
-        persist(immediate: true)
         status = "resuming"
         Task { @MainActor in
             do {
@@ -1414,15 +1647,25 @@ final class ChatStore {
                     await connect()
                 }
                 _ = try await client.switchToSession(id)
+                let restored = Self.loadTranscript(sessionID: id)
+                items = restored.items
+                richTranscriptRows = [:]
+                for item in restored.richItems + restored.items {
+                    if let key = Self.richKey(item) { richTranscriptRows[key] = item }
+                }
                 isConnected = true
                 status = "ready"
                 syncSessionConfig()
                 refreshCatalog()
+                await restoreConversationTree(replacingTranscript: true)
                 if items.isEmpty {
                     items.append(ChatItem(kind: .system, text: "Resumed session \(id)."))
                     persist(immediate: true)
                 }
             } catch {
+                items = previousItems
+                richTranscriptRows = previousRichRows
+                conversationTree = previousTree
                 status = friendly(error)
                 items.append(ChatItem(kind: .system, text: friendly(error)))
                 persist(immediate: true)
@@ -1433,22 +1676,29 @@ final class ChatStore {
     }
 
     private func handleTree(_ args: String) {
-        let turns = PiSessions.userTurns(sessionId: client.sessionId)
         let trimmed = args.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
-            draft = ""
-            items.append(ChatItem(kind: .system, text: PiSessions.treeHelp(sessionId: client.sessionId)))
-            persist(immediate: true)
+            draft = "/tree "
+            Task { @MainActor in
+                await refreshConversationTree()
+                requestFocus()
+            }
             requestFocus()
             return
         }
-        if let index = Int(trimmed), let turn = turns.first(where: { $0.index == index }) {
-            draft = turn.text
+        if trimmed.hasPrefix("branch:") {
+            beginBranch(entryID: String(trimmed.dropFirst(7)))
+            requestFocus()
+            return
+        }
+        if trimmed.hasPrefix("switch:") {
+            switchConversationBranch(to: String(trimmed.dropFirst(7)))
+            draft = ""
             requestFocus()
             return
         }
         draft = ""
-        items.append(ChatItem(kind: .system, text: "No tree turn matching “\(trimmed)”. Type /tree to list them."))
+        items.append(ChatItem(kind: .system, text: "That branch point is no longer in this session. Type /tree to refresh it."))
         persist(immediate: true)
         requestFocus()
     }
@@ -1483,14 +1733,15 @@ final class ChatStore {
     }
 
     private func startFreshConversation() {
+        writeTranscript()
         isStartingSession = true
         items = []
+        richTranscriptRows = [:]
         streamingAssistantId = nil
         streamingThoughtId = nil
         lastTurnDuration = 0
         markdownPreview = nil
         clearActiveWorkspaceRun()
-        persist(immediate: true)
         status = "new session"
         Task { @MainActor in
             do {
@@ -1501,6 +1752,8 @@ final class ChatStore {
                 isConnected = true
                 status = "ready"
                 syncSessionConfig()
+                conversationTree = nil
+                branchDraft = nil
                 items.append(ChatItem(kind: .system, text: "Bubble is ready."))
                 persist(immediate: true)
             } catch {
@@ -1833,6 +2086,182 @@ final class ChatStore {
         return nil
     }
 
+    private func refreshConversationTree() async {
+        do {
+            let snapshot = try await client.conversationTree()
+            applyConversationTree(snapshot, replacingTranscript: false)
+        } catch {
+            OverlayLog.write("conversation tree refresh failed: \(friendly(error))")
+        }
+    }
+
+    private func restoreConversationTree(replacingTranscript: Bool) async {
+        do {
+            var snapshot = try await client.conversationTree()
+            if let sessionID = client.sessionId,
+               let savedLeaf = Self.savedConversationLeaf(sessionID: sessionID),
+               savedLeaf != snapshot.leafID,
+               snapshot.entries.contains(where: { $0.id == savedLeaf }) {
+                snapshot = try await client.selectConversationLeaf(savedLeaf)
+            }
+            applyConversationTree(snapshot, replacingTranscript: replacingTranscript)
+        } catch {
+            OverlayLog.write("conversation tree restore failed: \(friendly(error))")
+        }
+    }
+
+    private func applyConversationTree(
+        _ snapshot: ConversationTreeSnapshot,
+        replacingTranscript: Bool,
+        persistSelection: Bool = true
+    ) {
+        conversationTree = snapshot
+        bindTranscriptSources(to: snapshot)
+        if replacingTranscript {
+            let existingItems = items
+            cacheRichRows(items)
+            let projected = snapshot.transcript.map { record in
+                var projected = Self.chatItem(record)
+                if let prior = richTranscriptRows[Self.richKey(entryID: record.entryID, kind: projected.kind)] {
+                    var rich = prior
+                    rich.text = projected.text
+                    rich.toolStatus = projected.toolStatus ?? rich.toolStatus
+                    rich.toolKind = projected.toolKind ?? rich.toolKind
+                    rich.toolOutput = projected.toolOutput ?? rich.toolOutput
+                    rich.sourceEntryId = record.entryID
+                    rich.sourceBranchable = record.branchable
+                    rich.deliveryState = nil
+                    projected = rich
+                }
+                return projected
+            }
+            items = mergeBubbleOnlyRows(projected: projected, existing: existingItems)
+        } else {
+            // Source bindings above are enough; live rows keep their richer local state.
+        }
+        cacheRichRows(items)
+        if persistSelection, let sessionID = client.sessionId, let leafID = snapshot.leafID {
+            var leaves = Self.savedConversationLeaves()
+            leaves[sessionID] = leafID
+            UserDefaults.standard.set(leaves, forKey: "bubble.conversation.leaves")
+        }
+        persist(immediate: true)
+    }
+
+    private func mergeBubbleOnlyRows(projected: [ChatItem], existing: [ChatItem]) -> [ChatItem] {
+        let lastProjectedIndex = Dictionary(
+            projected.enumerated().compactMap { index, item in
+                item.sourceEntryId.map { ($0, index) }
+            },
+            uniquingKeysWith: { _, later in later }
+        )
+        var prefix: [ChatItem] = []
+        var after: [Int: [ChatItem]] = [:]
+        for (index, item) in existing.enumerated()
+        where item.sourceEntryId == nil && (item.kind == .system || item.kind == .workspaceRun) {
+            let anchor = existing[..<index].reversed().compactMap { prior -> Int? in
+                guard let entryID = prior.sourceEntryId else { return nil }
+                return lastProjectedIndex[entryID]
+            }.first
+            if let anchor {
+                after[anchor, default: []].append(item)
+            } else {
+                prefix.append(item)
+            }
+        }
+        var merged = prefix
+        for (index, item) in projected.enumerated() {
+            merged.append(item)
+            merged.append(contentsOf: after[index] ?? [])
+        }
+        return merged
+    }
+
+    private func bindTranscriptSources(to snapshot: ConversationTreeSnapshot) {
+        for kind in [ChatItem.Kind.user, .thought, .assistant, .tool] {
+            let source = snapshot.transcript.filter { Self.chatKind($0.kind) == kind }
+            let local = items.indices.filter {
+                items[$0].kind == kind
+                    && items[$0].deliveryState == nil
+                    && items[$0].sourceEntryId == nil
+            }
+            let count = min(source.count, local.count)
+            guard count > 0 else { continue }
+            for offset in 0..<count {
+                let localIndex = local[local.count - count + offset]
+                let record = source[source.count - count + offset]
+                items[localIndex].sourceEntryId = record.entryID
+                items[localIndex].sourceBranchable = record.branchable
+            }
+        }
+    }
+
+    private static func chatItem(_ record: ConversationTranscriptRecord) -> ChatItem {
+        switch record.kind {
+        case .user:
+            return ChatItem(kind: .user, text: record.text, sourceEntryId: record.entryID, sourceBranchable: record.branchable)
+        case .assistant:
+            return ChatItem(kind: .assistant, text: record.text, sourceEntryId: record.entryID, sourceBranchable: record.branchable)
+        case .thought:
+            return ChatItem(kind: .thought, text: record.text, sourceEntryId: record.entryID, sourceBranchable: record.branchable)
+        case .tool:
+            return ChatItem(
+                kind: .tool,
+                text: record.toolName ?? "Tool",
+                toolId: record.toolCallID ?? record.entryID,
+                toolStatus: record.isError ? "failed" : "completed",
+                toolKind: record.toolName,
+                toolOutput: record.text,
+                sourceEntryId: record.entryID,
+                sourceBranchable: false
+            )
+        }
+    }
+
+    private static func chatKind(_ kind: ConversationTranscriptRecord.Kind) -> ChatItem.Kind {
+        switch kind {
+        case .user: .user
+        case .assistant: .assistant
+        case .thought: .thought
+        case .tool: .tool
+        }
+    }
+
+    private func cacheRichRows(_ rows: [ChatItem]) {
+        for item in rows {
+            guard let key = Self.richKey(item) else { continue }
+            richTranscriptRows[key] = item
+        }
+    }
+
+    private static func richKey(_ item: ChatItem) -> String? {
+        guard let entryID = item.sourceEntryId else { return nil }
+        return richKey(entryID: entryID, kind: item.kind)
+    }
+
+    private static func richKey(entryID: String, kind: ChatItem.Kind) -> String {
+        "\(entryID)|\(kind.rawValue)"
+    }
+
+    private static func savedConversationLeaves() -> [String: String] {
+        UserDefaults.standard.dictionary(forKey: "bubble.conversation.leaves") as? [String: String] ?? [:]
+    }
+
+    private static func savedConversationLeaf(sessionID: String) -> String? {
+        if let leaf = savedConversationLeaves()[sessionID] { return leaf }
+        let url = transcriptURL(sessionID: sessionID)
+        let data = (try? Data(contentsOf: url)) ?? (try? Data(contentsOf: OverlayPaths.transcriptFile))
+        guard let data,
+              let envelope = try? JSONDecoder().decode(TranscriptEnvelope.self, from: data),
+              envelope.sessionId == sessionID else { return nil }
+        return envelope.selectedLeafId
+    }
+
+    private func branchTitle(_ text: String) -> String {
+        let title = text.split(whereSeparator: \.isNewline).first.map(String.init) ?? "message"
+        return title.count > 42 ? String(title.prefix(41)) + "…" : title
+    }
+
     private func persist(immediate: Bool = false) {
         if items.count > 80 {
             items = Array(items.suffix(80))
@@ -1857,19 +2286,41 @@ final class ChatStore {
             return true
         }
         do {
-            let data = try JSONEncoder().encode(Array(stored))
+            guard let sessionID = client.sessionId ?? PiSessions.currentId() else { return }
+            let envelope = TranscriptEnvelope(
+                sessionId: sessionID,
+                selectedLeafId: Self.savedConversationLeaves()[sessionID],
+                items: Array(stored),
+                richItems: Array(richTranscriptRows.values.suffix(160))
+            )
+            let data = try JSONEncoder().encode(envelope)
+            let sessionURL = Self.transcriptURL(sessionID: sessionID)
+            try FileManager.default.createDirectory(
+                at: sessionURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try data.write(to: sessionURL, options: .atomic)
             try data.write(to: OverlayPaths.transcriptFile, options: .atomic)
         } catch {
             OverlayLog.write("transcript save failed: \(error.localizedDescription)")
         }
     }
 
-    private static func loadTranscript() -> [ChatItem] {
-        guard let data = try? Data(contentsOf: OverlayPaths.transcriptFile),
-              let items = try? JSONDecoder().decode([ChatItem].self, from: data) else {
-            return []
-        }
-        let cleaned: [ChatItem] = items.compactMap { item in
+    private static func loadTranscript() -> (items: [ChatItem], richItems: [ChatItem]) {
+        guard let expectedSessionID = PiSessions.currentId() else { return ([], []) }
+        return loadTranscript(sessionID: expectedSessionID)
+    }
+
+    private static func loadTranscript(sessionID: String) -> (items: [ChatItem], richItems: [ChatItem]) {
+        let sessionData = try? Data(contentsOf: transcriptURL(sessionID: sessionID))
+        let currentData = try? Data(contentsOf: OverlayPaths.transcriptFile)
+        let envelope = [sessionData, currentData].compactMap { data -> TranscriptEnvelope? in
+            guard let data,
+                  let decoded = try? JSONDecoder().decode(TranscriptEnvelope.self, from: data),
+                  decoded.sessionId == sessionID else { return nil }
+            return decoded
+        }.first
+        let clean: ([ChatItem]) -> [ChatItem] = { rows in rows.compactMap { item in
             var copy = item
             copy.deliveryState = nil
             if copy.kind == .assistant || copy.kind == .thought {
@@ -1879,8 +2330,28 @@ final class ChatStore {
                 copy.text = "Bubble is ready."
             }
             return copy
+        } }
+        if let envelope {
+            return (repairTranscript(clean(envelope.items)), clean(envelope.richItems ?? []))
         }
-        return repairTranscript(cleaned)
+        // Migrate the pre-envelope transcript once. The legacy file belonged to
+        // the session recorded in session-id, and the next write scopes it by ID.
+        if let currentData,
+           PiSessions.currentId() == sessionID,
+           let legacy = try? JSONDecoder().decode([ChatItem].self, from: currentData) {
+            let migrated = repairTranscript(clean(legacy))
+            return (migrated, migrated)
+        }
+        return ([], [])
+    }
+
+    private static func transcriptURL(sessionID: String) -> URL {
+        let safe = sessionID.map { character -> Character in
+            character.isLetter || character.isNumber || character == "-" || character == "_" ? character : "_"
+        }
+        return OverlayPaths.root
+            .appendingPathComponent("transcripts", isDirectory: true)
+            .appendingPathComponent(String(safe) + ".json")
     }
 
     static func repairTranscript(_ items: [ChatItem]) -> [ChatItem] {

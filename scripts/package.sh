@@ -30,6 +30,12 @@ swiftc -parse-as-library Sources/Bubble/MarkdownFiles.swift scripts/check_markdo
 swiftc -parse-as-library Sources/Bubble/CommandTapPolicy.swift scripts/check_command_tap.swift -o /tmp/bubble-check-tap
 /tmp/bubble-check-tap
 
+swiftc -parse-as-library Sources/Bubble/ConversationTree.swift scripts/check_conversation_tree.swift -o /tmp/bubble-check-conversation-tree
+/tmp/bubble-check-conversation-tree
+
+swiftc -parse-as-library Sources/Bubble/BubblePiAcpPatch.swift scripts/check_pi_acp_patch.swift -o /tmp/bubble-check-pi-acp-patch
+/tmp/bubble-check-pi-acp-patch
+
 swiftc -parse-as-library Sources/BubbleMounts/WorkspaceMounts.swift scripts/check_workspace_mounts.swift -o /tmp/bubble-check-mounts
 /tmp/bubble-check-mounts
 
@@ -37,6 +43,7 @@ swiftc -parse-as-library \
   Sources/Bubble/JSONRPC.swift \
   Sources/Bubble/Paths.swift \
   Sources/Bubble/BubbleConfig.swift \
+  Sources/Bubble/BubblePiAcpPatch.swift \
   Sources/Bubble/PiSetup.swift \
   scripts/check_pi_setup.swift \
   -o /tmp/bubble-check-setup

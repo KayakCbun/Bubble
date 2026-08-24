@@ -46,13 +46,15 @@ enum PiSetup {
     static func diagnose() -> Report {
         let node = OverlayPaths.resolveCommand("node")
         let version = node.flatMap { readNodeVersion($0) }
+        let branchRuntime = BubblePiRuntimePatch.isApplied(runtime: OverlayPaths.runtime)
+        let branchAdapter = branchRuntime && BubblePiAcpPatch.isApplied(runtime: OverlayPaths.runtime)
         return Report(
             nodeInstalled: node != nil,
             nodeVersion: version,
             nodeSupported: version.map(nodeVersionAtLeast) ?? false,
-            piInstalled: OverlayPaths.resolveCommand("pi") != nil,
-            acpInstalled: OverlayPaths.resolveCommand("pi-acp") != nil,
-            acpAvailable: OverlayPaths.resolveAgentLaunch() != nil,
+            piInstalled: branchRuntime,
+            acpInstalled: branchAdapter,
+            acpAvailable: branchAdapter && OverlayPaths.resolveAgentLaunch() != nil,
             credentialProviders: credentialProviders()
         )
     }
