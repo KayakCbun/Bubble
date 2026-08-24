@@ -31,6 +31,7 @@ struct ChatItem: Identifiable, Codable, Equatable {
     var workspaceChildren: [ChatItem]?
     var workspaceStartedAt: TimeInterval?
     var imageNames: [String]?
+    var deliveryState: MessageDeliveryState?
 
     init(
         id: UUID = UUID(),
@@ -50,7 +51,8 @@ struct ChatItem: Identifiable, Codable, Equatable {
         workspaceChangedPaths: [String]? = nil,
         workspaceChildren: [ChatItem]? = nil,
         workspaceStartedAt: TimeInterval? = nil,
-        imageNames: [String]? = nil
+        imageNames: [String]? = nil,
+        deliveryState: MessageDeliveryState? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -70,7 +72,23 @@ struct ChatItem: Identifiable, Codable, Equatable {
         self.workspaceChildren = workspaceChildren
         self.workspaceStartedAt = workspaceStartedAt
         self.imageNames = imageNames
+        self.deliveryState = deliveryState
     }
+}
+
+private struct PendingPrompt {
+    var itemId: UUID
+    var display: String
+    var imageNames: [String]
+    var text: String
+    var attachments: [PromptAttachment]
+    var images: [PromptImage]
+}
+
+struct QueuedUserMessage: Identifiable, Equatable {
+    var id: UUID
+    var text: String
+    var imageNames: [String]
 }
 
 @Observable
@@ -133,8 +151,16 @@ final class ChatStore {
     private var pendingInjection: WorkspaceBrief?
     private var injecting = false
     private var pendingChildSteer: String?
+    private var pendingPrompts: [PendingPrompt] = []
+    private var steeringMessageIds: Set<UUID> = []
     private var runNonce = 0
     private var isInstalling = false
+
+    var queuedMessages: [QueuedUserMessage] {
+        pendingPrompts.map {
+            QueuedUserMessage(id: $0.itemId, text: $0.display, imageNames: $0.imageNames)
+        }
+    }
 
     func toggleAvatarPicker() {
         showAvatarPicker.toggle()
@@ -802,12 +828,12 @@ final class ChatStore {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         let clips = draftClips.map(\.text)
         let imageData = draftImages.map(\.png)
-        guard !text.isEmpty || !clips.isEmpty || !imageData.isEmpty, !isBusy else { return }
-        if handleLocalSlash(text) {
+        guard !text.isEmpty || !clips.isEmpty || !imageData.isEmpty else { return }
+        if !isBusy, handleLocalSlash(text) {
             consumeComposer()
             return
         }
-        if let app = MacApps.launchIntent(from: text) {
+        if !isBusy, let app = MacApps.launchIntent(from: text) {
             consumeComposer()
             openApp(app)
             return
@@ -835,14 +861,29 @@ final class ChatStore {
         let display = payload.display.isEmpty && stored.isEmpty && !images.isEmpty
             ? "Image"
             : payload.display
-        items.append(
-            ChatItem(
-                kind: .user,
-                text: display,
-                imageNames: stored.isEmpty ? nil : stored
-            )
+        let prompt = PendingPrompt(
+            itemId: UUID(),
+            display: display,
+            imageNames: stored,
+            text: mac.text,
+            attachments: attachments,
+            images: images
         )
-        persist(immediate: true)
+        if MessageDeliveryPolicy.shouldQueue(isBusy: isBusy, isBranching: false) {
+            pendingPrompts.append(prompt)
+            status = "waiting"
+            requestFocus()
+            return
+        }
+        appendUserItem(for: prompt)
+        startPrompt(prompt)
+    }
+
+    private func startPrompt(_ prompt: PendingPrompt) {
+        if !items.contains(where: { $0.id == prompt.itemId }) {
+            appendUserItem(for: prompt)
+        }
+        setDeliveryState(nil, for: prompt.itemId)
         isBusy = true
         streamingAssistantId = nil
         streamingThoughtId = nil
@@ -859,17 +900,17 @@ final class ChatStore {
                     guard isConnected else {
                         if nonce == self.runNonce {
                             isBusy = false
+                            startNextWaitingPrompt()
                         }
                         return
                     }
                 }
-                let wrapped = WorkspaceRegistry.wrapUserPrompt(
-                    mac.text,
-                    store: self.workspaceState,
-                    home: OverlayPaths.home.path,
-                    skillsByMount: self.mountSkillNames
+                let wrapped = wrappedText(for: prompt)
+                let stop = try await client.prompt(
+                    wrapped,
+                    attachments: prompt.attachments,
+                    images: prompt.images
                 )
-                let stop = try await client.prompt(wrapped, attachments: attachments, images: images)
                 guard nonce == self.runNonce else { return }
                 status = stop == "end_turn" || stop == "cancelled" ? "ready" : stop
             } catch {
@@ -888,10 +929,86 @@ final class ChatStore {
             streamingAssistantId = nil
             streamingThoughtId = nil
             turnStartedAt = nil
+            clearSteeringMessages()
             persist(immediate: true)
             requestFocus()
             flushPendingInjection()
+            startNextWaitingPrompt()
         }
+    }
+
+    func steerQueuedMessage(_ id: UUID) {
+        guard MessageDeliveryPolicy.canSteer(.waiting, isBusy: isBusy),
+              let pendingIndex = pendingPrompts.firstIndex(where: { $0.itemId == id }) else {
+            return
+        }
+        let prompt = pendingPrompts.remove(at: pendingIndex)
+        steeringMessageIds.insert(id)
+        appendUserItem(for: prompt, deliveryState: .steering)
+
+        Task { @MainActor in
+            do {
+                let wrapped = MessageDeliveryPolicy.steeringText(
+                    wrappedText(for: prompt),
+                    resourceURIs: prompt.attachments.map(\.uri)
+                )
+                try await client.steer(wrapped, images: prompt.images)
+                status = "steering"
+                OverlayLog.write("steered queued message \(id.uuidString)")
+            } catch {
+                let insertion = min(pendingIndex, pendingPrompts.count)
+                pendingPrompts.insert(prompt, at: insertion)
+                steeringMessageIds.remove(id)
+                items.removeAll { $0.id == id }
+                items.append(ChatItem(kind: .system, text: friendly(error)))
+                status = "waiting"
+                persist(immediate: true)
+                startNextWaitingPrompt()
+            }
+            requestFocus()
+        }
+    }
+
+    private func startNextWaitingPrompt() {
+        guard !isBusy, !pendingPrompts.isEmpty else { return }
+        startPrompt(pendingPrompts.removeFirst())
+    }
+
+    private func appendUserItem(
+        for prompt: PendingPrompt,
+        deliveryState: MessageDeliveryState? = nil
+    ) {
+        items.append(
+            ChatItem(
+                id: prompt.itemId,
+                kind: .user,
+                text: prompt.display,
+                imageNames: prompt.imageNames.isEmpty ? nil : prompt.imageNames,
+                deliveryState: deliveryState
+            )
+        )
+        persist(immediate: true)
+    }
+
+    private func wrappedText(for prompt: PendingPrompt) -> String {
+        WorkspaceRegistry.wrapUserPrompt(
+            prompt.text,
+            store: workspaceState,
+            home: OverlayPaths.home.path,
+            skillsByMount: mountSkillNames
+        )
+    }
+
+    private func setDeliveryState(_ state: MessageDeliveryState?, for id: UUID) {
+        guard let index = items.firstIndex(where: { $0.id == id }) else { return }
+        items[index].deliveryState = state
+    }
+
+    private func clearSteeringMessages() {
+        for id in steeringMessageIds {
+            setDeliveryState(nil, for: id)
+        }
+        steeringMessageIds.removeAll()
     }
 
     func cancel() {
@@ -912,9 +1029,11 @@ final class ChatStore {
         streamingAssistantId = nil
         streamingThoughtId = nil
         status = "cancelled"
+        clearSteeringMessages()
         persist(immediate: true)
         OverlayLog.write("cancelled in-flight turn")
         requestFocus()
+        startNextWaitingPrompt()
     }
 
     private func applyUpdateData(_ data: Data) {
@@ -1752,6 +1871,7 @@ final class ChatStore {
         }
         let cleaned: [ChatItem] = items.compactMap { item in
             var copy = item
+            copy.deliveryState = nil
             if copy.kind == .assistant || copy.kind == .thought {
                 copy.text = stripDiagnostics(copy.text)
                 if copy.text.isEmpty { return nil }

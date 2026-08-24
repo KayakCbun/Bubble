@@ -336,6 +336,10 @@ struct OverlayView: View {
                         WorkingRow(startedAt: store.turnStartedAt ?? Date())
                             .id("working")
                     }
+                    ForEach(store.queuedMessages) { message in
+                        queuedUserBubble(message)
+                            .id("waiting-\(message.id.uuidString)")
+                    }
                     Color.clear
                         .frame(height: OverlayMetrics.transcriptCornerRadius)
                         .id("transcript-end")
@@ -862,7 +866,24 @@ struct OverlayView: View {
             )
             .fixedSize(horizontal: false, vertical: lineCount == 1)
 
-            if showComposerStop {
+            if MessageDeliveryPolicy.composerSends(
+                isBusy: store.isBusy,
+                hasPayload: store.hasComposerPayload
+            ) {
+                Button {
+                    store.send()
+                    restoreFocus()
+                } label: {
+                    Image(systemName: "arrow.up.circle.fill")
+                        .font(.system(size: 18, weight: .semibold))
+                        .frame(width: 28, height: 28)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.primary)
+                .help("Add to waiting messages")
+                .accessibilityLabel("Add message to waiting queue")
+            } else if showComposerStop {
                 Button {
                     stopComposer()
                 } label: {
@@ -923,7 +944,7 @@ struct OverlayView: View {
     }
 
     private var showInputPlaceholder: Bool {
-        store.draft.isEmpty && !ime.composing && !store.isBusy
+        store.draft.isEmpty && !ime.composing
     }
 
     private var showInputCaret: Bool {
@@ -1059,12 +1080,72 @@ struct OverlayView: View {
                         .lineSpacing(4)
                         .multilineTextAlignment(.leading)
                 }
+                if item.deliveryState == .steering {
+                    Text("Steering")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
             }
             .padding(.horizontal, names.isEmpty ? 16 : 10)
             .padding(.vertical, names.isEmpty ? 12 : 10)
             .background(
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
                     .fill(Color.primary.opacity(0.08))
+            )
+        }
+    }
+
+    private func queuedUserBubble(_ message: QueuedUserMessage) -> some View {
+        HStack {
+            Spacer(minLength: 72)
+            VStack(alignment: .trailing, spacing: 8) {
+                if !message.imageNames.isEmpty {
+                    VStack(alignment: .trailing, spacing: 8) {
+                        ForEach(message.imageNames, id: \.self) { name in
+                            userImageThumb(name)
+                        }
+                    }
+                }
+                if !message.text.isEmpty {
+                    Text(message.text)
+                        .font(OverlayMetrics.bodyFont)
+                        .foregroundStyle(OverlayMetrics.ink)
+                        .lineSpacing(4)
+                        .multilineTextAlignment(.leading)
+                }
+                HStack(spacing: 10) {
+                    Text("Waiting")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Button {
+                        store.steerQueuedMessage(message.id)
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "arrow.turn.up.right")
+                                .font(.system(size: 10, weight: .semibold))
+                            Text("Steer now")
+                                .font(.system(size: 11, weight: .semibold))
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Capsule().fill(Color.primary.opacity(0.08)))
+                        .contentShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!MessageDeliveryPolicy.canSteer(.waiting, isBusy: store.isBusy))
+                    .help("Send this message into the running turn")
+                    .accessibilityLabel("Change waiting message to steering")
+                }
+            }
+            .padding(.horizontal, message.imageNames.isEmpty ? 16 : 10)
+            .padding(.vertical, message.imageNames.isEmpty ? 12 : 10)
+            .background(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(Color.primary.opacity(0.05))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(Color.primary.opacity(0.10), lineWidth: 1)
             )
         }
     }

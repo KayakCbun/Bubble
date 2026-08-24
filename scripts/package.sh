@@ -19,6 +19,9 @@ swiftc -parse-as-library Sources/Bubble/OverlayLayoutPolicy.swift scripts/check_
 swiftc -parse-as-library Sources/Bubble/OverlayComposer.swift scripts/check_composer.swift -o /tmp/bubble-check-composer
 /tmp/bubble-check-composer
 
+swiftc -parse-as-library Sources/Bubble/MessageDelivery.swift scripts/check_message_delivery.swift -o /tmp/bubble-check-message-delivery
+/tmp/bubble-check-message-delivery
+
 swiftc -parse-as-library Sources/Bubble/MarkdownFiles.swift scripts/check_markdown.swift -o /tmp/bubble-check-markdown
 /tmp/bubble-check-markdown
 

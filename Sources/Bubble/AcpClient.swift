@@ -232,6 +232,13 @@ final class AcpClient: @unchecked Sendable {
         }
     }
 
+    func steer(_ text: String, images: [PromptImage] = []) async throws {
+        guard let sessionId else {
+            throw RPCError(code: -4, message: "no session")
+        }
+        try await SteeringControlClient.send(sessionId: sessionId, text: text, images: images)
+    }
+
     func createSession(cwd: URL) async throws -> String {
         try await newSession(cwd: cwd, persistAsMain: false)
     }
