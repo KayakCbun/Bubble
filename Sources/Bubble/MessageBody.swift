@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import MarkdownUI
 import BeautifulMermaid
+import BubbleDiagramSupport
 import WebKit
 
 struct MessageBody: View {
@@ -322,7 +323,9 @@ enum MessagePart {
             }
             if !extra.isEmpty { break }
         }
-        return joinDirectionLine(insertMermaidNewlines(kept.joined(separator: "\n")))
+        return MermaidSource.normalize(
+            joinDirectionLine(insertMermaidNewlines(kept.joined(separator: "\n")))
+        )
     }
 
     private static func joinDirectionLine(_ source: String) -> String {
@@ -927,6 +930,7 @@ struct MermaidWKView: NSViewRepresentable {
     @Binding var failed: Bool
     var interactive: Bool = false
     var maxHeight: CGFloat = 2400
+    var opaqueBackground = false
 
     func makeCoordinator() -> Coordinator {
         let coordinator = Coordinator(source: source, height: $height, failed: $failed)
@@ -939,8 +943,8 @@ struct MermaidWKView: NSViewRepresentable {
         config.websiteDataStore = .nonPersistent()
         config.userContentController.add(context.coordinator, name: "mermaidReady")
         let webView = MermaidWebView(frame: .zero, configuration: config)
-        webView.setValue(false, forKey: "drawsBackground")
-        webView.underPageBackgroundColor = .clear
+        webView.setValue(opaqueBackground, forKey: "drawsBackground")
+        webView.underPageBackgroundColor = opaqueBackground ? .white : .clear
         webView.allowsMagnification = interactive
         webView.navigationDelegate = context.coordinator
         context.coordinator.webView = webView
