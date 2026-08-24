@@ -194,6 +194,7 @@ final class ChatStore {
     private let control = WorkspaceControlServer()
     private var childSessionId: String?
     private var childSessionIds: Set<String> = []
+    private var workspaceRunGeneration = 0
     private var hushMainAssistant = false
     private var injectSpoke = false
     private var mountSkillNames: [String: [String]] = [:]
@@ -374,7 +375,7 @@ final class ChatStore {
         let previousSessionId = workspaceStage?.sessionId
         let previousCardId = workspaceStage?.cardId
         let cachedRows = sessionId.flatMap { workspacePaneRowsBySession[$0] }
-        let cachedLiveRows = item.workspaceRunId.flatMap { workspacePaneRowsByRun[$0] }
+        let cachedRunRows = item.workspaceRunId.flatMap { workspacePaneRowsByRun[$0] }
         let selectedAnchorIsCached = item.workspaceAnchorEntryId.map { anchor in
             cachedRows?.contains(where: { $0.sourceEntryId == anchor }) == true
         } ?? false
@@ -396,7 +397,7 @@ final class ChatStore {
             currentCardId: previousCardId,
             nextCardId: item.id,
             hasCurrentRows: hasCurrentRows,
-            hasLiveRows: cachedLiveRows != nil,
+            hasRunRows: cachedRunRows != nil,
             cacheIsFresh: cacheIsFresh,
             selectedAnchorIsCached: selectedAnchorIsCached,
             isLive: isLive
@@ -416,9 +417,9 @@ final class ChatStore {
         case .current:
             workspacePaneLoadState = .ready
             break
-        case .live:
-            workspacePaneItems = cachedLiveRows ?? fallbackWorkspacePaneItems(card: item)
-            workspacePaneLoadState = .fallback
+        case .run:
+            workspacePaneItems = cachedRunRows ?? fallbackWorkspacePaneItems(card: item)
+            workspacePaneLoadState = isLive ? .fallback : .ready
         case .cached:
             workspacePaneItems = cachedRows ?? []
             workspacePaneLoadState = .ready
@@ -426,7 +427,7 @@ final class ChatStore {
             workspacePaneItems = fallbackWorkspacePaneItems(card: item)
             workspacePaneLoadState = .fallback
             if isLive, let runId = item.workspaceRunId, !runId.isEmpty {
-                workspacePaneRowsByRun[runId] = workspacePaneItems
+                cacheWorkspaceRunRows(workspacePaneItems, runId: runId)
             }
         case .loading:
             workspacePaneItems = [
@@ -667,16 +668,42 @@ final class ChatStore {
             }
             return projected
         }
-        workspacePaneItems = projected
+        let turnRows = projected.map {
+            WorkspaceTurnRow(
+                id: $0.id.uuidString,
+                sourceEntryId: $0.sourceEntryId,
+                kind: Self.workspaceTurnRowKind($0.kind)
+            )
+        }
+        let card = items.first(where: { $0.id == cardId })
+        let followsLatest = SideStagePolicy.followLatest(status: card?.workspaceStatus)
+        let visibleRows: [ChatItem]
+        if !followsLatest {
+            if let range = SideStagePolicy.runRange(anchorEntryId: anchor, rows: turnRows) {
+                visibleRows = Array(projected[range])
+            } else if let card {
+                visibleRows = fallbackWorkspacePaneItems(card: card)
+            } else {
+                visibleRows = []
+            }
+        } else {
+            visibleRows = projected
+        }
+        workspacePaneItems = visibleRows
         if childBusy {
-            workspacePaneRowsBySession[sessionId] = projected
+            workspacePaneRowsBySession[sessionId] = visibleRows
             workspacePaneLoadState = .ready
         } else {
-            workspacePaneRowsBySession[sessionId] = projected
+            workspacePaneRowsBySession[sessionId] = visibleRows
             workspacePaneInvalidatedSessionIds.remove(sessionId)
             workspacePaneLoadState = .ready
         }
         workspacePaneContentDidBecomeAvailable()
+        if !followsLatest,
+           let runId = card?.workspaceRunId,
+           !runId.isEmpty {
+            cacheWorkspaceRunRows(visibleRows, runId: runId)
+        }
         cacheWorkspacePaneRows(projected)
         workspacePaneScrollToken += 1
     }
@@ -694,6 +721,16 @@ final class ChatStore {
         }
     }
 
+    private static func workspaceTurnRowKind(_ kind: ChatItem.Kind) -> WorkspaceTurnRowKind {
+        switch kind {
+        case .user: .user
+        case .assistant: .assistant
+        case .thought: .thought
+        case .tool: .tool
+        case .system, .workspaceRun: .other
+        }
+    }
+
     private func invalidateWorkspacePaneSession(_ sessionId: String) {
         guard !sessionId.isEmpty else { return }
         workspacePaneInvalidatedSessionIds.insert(sessionId)
@@ -702,8 +739,26 @@ final class ChatStore {
         }
     }
 
-    private func captureWorkspaceAnchor(sessionId: String, goal: String, path: String) async {
+    private func captureWorkspaceAnchor(
+        sessionId: String,
+        goal: String,
+        path: String,
+        generation: Int,
+        runId: String
+    ) async {
+        guard WorkspaceRunLifecyclePolicy.acceptsCompletion(
+            expectedGeneration: generation,
+            currentGeneration: workspaceRunGeneration,
+            expectedRunId: runId,
+            activeRunId: workspaceState.active?.runId
+        ) else { return }
         guard let snapshot = try? await client.conversationTree(sessionId: sessionId) else { return }
+        guard WorkspaceRunLifecyclePolicy.acceptsCompletion(
+            expectedGeneration: generation,
+            currentGeneration: workspaceRunGeneration,
+            expectedRunId: runId,
+            activeRunId: workspaceState.active?.runId
+        ) else { return }
         let turns = snapshot.activePath.filter(\.isUserMessage).map {
             ($0.id, ConversationTreeSnapshot.displayUserText($0.text))
         }
@@ -769,7 +824,7 @@ final class ChatStore {
             guard !cleaned.isEmpty else { return }
             rows.append(ChatItem(kind: .assistant, text: cleaned))
         }
-        workspacePaneRowsByRun[runId] = rows
+        cacheWorkspaceRunRows(rows, runId: runId)
         guard workspacePaneIsCurrent(path: path, sessionId: sessionId, runId: runId) else { return }
         workspacePaneItems = rows
         workspacePaneStreamingAssistantId = rows.last(where: { $0.kind == .assistant })?.id
@@ -781,6 +836,21 @@ final class ChatStore {
             $0.kind == .workspaceRun && $0.workspaceRunId == runId
         }) else { return [] }
         return fallbackWorkspacePaneItems(card: card)
+    }
+
+    private func cacheWorkspaceRunRows(_ rows: [ChatItem], runId: String) {
+        workspacePaneRowsByRun[runId] = rows
+        workspacePaneRunCacheOrder.removeAll { $0 == runId }
+        workspacePaneRunCacheOrder.append(runId)
+        while workspacePaneRunCacheOrder.count > Self.workspacePaneRunCacheLimit {
+            let evicted = workspacePaneRunCacheOrder.removeFirst()
+            workspacePaneRowsByRun.removeValue(forKey: evicted)
+        }
+    }
+
+    private func removeWorkspaceRunRows(runId: String) {
+        workspacePaneRowsByRun.removeValue(forKey: runId)
+        workspacePaneRunCacheOrder.removeAll { $0 == runId }
     }
 
     private func appendWorkspacePaneThought(
@@ -799,7 +869,7 @@ final class ChatStore {
             guard !cleaned.isEmpty else { return }
             rows.append(ChatItem(kind: .thought, text: cleaned))
         }
-        workspacePaneRowsByRun[runId] = rows
+        cacheWorkspaceRunRows(rows, runId: runId)
         guard workspacePaneIsCurrent(path: path, sessionId: sessionId, runId: runId) else { return }
         workspacePaneItems = rows
         workspacePaneStreamingThoughtId = rows.last(where: { $0.kind == .thought })?.id
@@ -835,7 +905,7 @@ final class ChatStore {
                 )
             )
         }
-        workspacePaneRowsByRun[runId] = rows
+        cacheWorkspaceRunRows(rows, runId: runId)
         guard workspacePaneIsCurrent(path: path, sessionId: sessionId, runId: runId) else { return }
         workspacePaneStreamingAssistantId = nil
         workspacePaneStreamingThoughtId = nil
@@ -855,9 +925,11 @@ final class ChatStore {
     private var workspacePaneRichRows: [String: ChatItem] = [:]
     private var workspacePaneRowsBySession: [String: [ChatItem]] = [:]
     private var workspacePaneRowsByRun: [String: [ChatItem]] = [:]
+    private var workspacePaneRunCacheOrder: [String] = []
     private var workspacePaneAttachedSessionIds: Set<String> = []
     private var workspacePaneInvalidatedSessionIds: Set<String> = []
     private static let workspacePaneLoadingText = "Loading workspace session…"
+    private static let workspacePaneRunCacheLimit = 24
 
     init() {
         OverlayPaths.bootstrap()
@@ -1893,13 +1965,15 @@ final class ChatStore {
 
     private func routeUpdate(_ sessionId: String, _ data: Data) {
         let mainId = client.sessionId
-        let isChild = (!sessionId.isEmpty
-            && (sessionId == childSessionId
-                || childSessionIds.contains(sessionId)
-                || (mainId != nil && sessionId != mainId)))
-            || (sessionId.isEmpty && (childBusy || hushMainAssistant))
-        if isChild {
+        if WorkspaceRunLifecyclePolicy.acceptsStreamUpdate(
+            routedSessionId: sessionId,
+            activeChildSessionId: childSessionId,
+            childBusy: childBusy
+        ) {
             applyChildUpdateData(data, sessionId: sessionId)
+            return
+        }
+        if !sessionId.isEmpty, sessionId != mainId {
             return
         }
         applyUpdateData(data)
@@ -2381,6 +2455,7 @@ final class ChatStore {
                     await connect()
                 }
                 _ = try await client.startFreshSession()
+                try resetWorkspaceSessionsForFreshMainSession()
                 isConnected = true
                 status = "ready"
                 syncSessionConfig()
@@ -3183,6 +3258,7 @@ final class ChatStore {
     }
 
     private func clearActiveWorkspaceRun() {
+        workspaceRunGeneration += 1
         if childBusy, let id = childSessionId {
             client.cancel(sessionId: id)
         }
@@ -3197,12 +3273,28 @@ final class ChatStore {
         persistWorkspaceState()
     }
 
+    private func resetWorkspaceSessionsForFreshMainSession() throws {
+        WorkspaceRegistry.resetSessions(in: &workspaceState)
+        childSessionId = nil
+        childSessionIds.removeAll()
+        workspacePaneAttachedSessionIds.removeAll()
+        workspacePaneRowsBySession.removeAll()
+        workspacePaneRowsByRun.removeAll()
+        workspacePaneRunCacheOrder.removeAll()
+        workspacePaneInvalidatedSessionIds.removeAll()
+        try persistWorkspaceStateOrThrow()
+    }
+
     private func persistWorkspaceState() {
         do {
-            try WorkspaceRegistry.save(workspaceState, to: OverlayPaths.mountsFile)
+            try persistWorkspaceStateOrThrow()
         } catch {
             OverlayLog.write("mounts save failed: \(error.localizedDescription)")
         }
+    }
+
+    private func persistWorkspaceStateOrThrow() throws {
+        try WorkspaceRegistry.save(workspaceState, to: OverlayPaths.mountsFile)
         refreshMountSkills()
         macEpoch += 1
     }
@@ -3364,11 +3456,6 @@ final class ChatStore {
                 throw RPCError(code: -4, message: "not connected")
             }
         }
-        let sessionId = try await ensureChildSession(resolved)
-        childSessionId = sessionId
-        childSessionIds.insert(sessionId)
-        hushMainAssistant = true
-        WorkspaceRegistry.rememberSession(path: resolved.path, sessionId: sessionId, in: &workspaceState)
         let brief = WorkspaceBrief(
             runId: UUID().uuidString,
             path: resolved.path,
@@ -3377,7 +3464,9 @@ final class ChatStore {
             goal: prompt,
             summary: activeWorkspaceBrief?.path == resolved.path ? (activeWorkspaceBrief?.summary ?? "") : ""
         )
-        if childBusy {
+        let runId = brief.runId ?? ""
+        let generation = workspaceRunGeneration
+        if !WorkspaceRunLifecyclePolicy.shouldPrepareSession(childBusy: childBusy) {
             pendingChildSteer = brief
             return [
                 "status": "started",
@@ -3386,6 +3475,11 @@ final class ChatStore {
                 "note": "queued follow-up on the running workspace",
             ]
         }
+        let sessionId = try await ensureChildSession(resolved)
+        childSessionId = sessionId
+        childSessionIds.insert(sessionId)
+        hushMainAssistant = true
+        WorkspaceRegistry.rememberSession(path: resolved.path, sessionId: sessionId, in: &workspaceState)
         invalidateWorkspacePaneSession(sessionId)
         workspaceState.active = brief
         persistWorkspaceState()
@@ -3398,11 +3492,23 @@ final class ChatStore {
         childAssistant = ""
         childChanged = []
         Task { @MainActor in
-            await self.awaitChildPrompt(sessionId: sessionId, prompt: prompt, mount: resolved)
+            await self.awaitChildPrompt(
+                sessionId: sessionId,
+                prompt: prompt,
+                mount: resolved,
+                generation: generation,
+                runId: runId
+            )
         }
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 350_000_000)
-            await self.captureWorkspaceAnchor(sessionId: sessionId, goal: prompt, path: resolved.path)
+            await self.captureWorkspaceAnchor(
+                sessionId: sessionId,
+                goal: prompt,
+                path: resolved.path,
+                generation: generation,
+                runId: runId
+            )
         }
         return [
             "status": "started",
@@ -3426,21 +3532,49 @@ final class ChatStore {
         return created
     }
 
-    private func awaitChildPrompt(sessionId: String, prompt: String, mount: WorkspaceMount) async {
+    private func awaitChildPrompt(
+        sessionId: String,
+        prompt: String,
+        mount: WorkspaceMount,
+        generation: Int,
+        runId: String
+    ) async {
         do {
             let stop = try await client.prompt(prompt, sessionId: sessionId)
-            finishChildRun(stopReason: stop, mount: mount)
+            finishChildRun(
+                stopReason: stop,
+                mount: mount,
+                generation: generation,
+                runId: runId
+            )
         } catch {
             OverlayLog.write("workspace run failed: \(error.localizedDescription)")
-            finishChildRun(stopReason: "failed", mount: mount, error: error.localizedDescription)
+            finishChildRun(
+                stopReason: "failed",
+                mount: mount,
+                error: error.localizedDescription,
+                generation: generation,
+                runId: runId
+            )
         }
     }
 
-    private func finishChildRun(stopReason: String, mount: WorkspaceMount, error: String? = nil) {
-        let finishedRunId = workspaceState.active?.runId
+    private func finishChildRun(
+        stopReason: String,
+        mount: WorkspaceMount,
+        error: String? = nil,
+        generation: Int,
+        runId: String
+    ) {
+        guard WorkspaceRunLifecyclePolicy.acceptsCompletion(
+            expectedGeneration: generation,
+            currentGeneration: workspaceRunGeneration,
+            expectedRunId: runId,
+            activeRunId: workspaceState.active?.runId
+        ) else { return }
         defer {
-            if let finishedRunId, !finishedRunId.isEmpty {
-                workspacePaneRowsByRun.removeValue(forKey: finishedRunId)
+            if !runId.isEmpty {
+                removeWorkspaceRunRows(runId: runId)
             }
         }
         childBusy = false
@@ -3456,9 +3590,27 @@ final class ChatStore {
             persistWorkspaceState()
             upsertWorkspaceCard(next)
             let sessionId = childSessionId
+            let nextRunId = next.runId ?? ""
             Task { @MainActor in
                 guard let sessionId else { return }
-                await self.awaitChildPrompt(sessionId: sessionId, prompt: next.goal, mount: mount)
+                await self.awaitChildPrompt(
+                    sessionId: sessionId,
+                    prompt: next.goal,
+                    mount: mount,
+                    generation: generation,
+                    runId: nextRunId
+                )
+            }
+            Task { @MainActor in
+                guard let sessionId else { return }
+                try? await Task.sleep(nanoseconds: 350_000_000)
+                await self.captureWorkspaceAnchor(
+                    sessionId: sessionId,
+                    goal: next.goal,
+                    path: mount.path,
+                    generation: generation,
+                    runId: nextRunId
+                )
             }
             return
         }

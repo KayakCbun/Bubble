@@ -1,7 +1,7 @@
 import AppKit
 
 final class OverlayRootView: NSView {
-    var hitRects: [NSRect] = []
+    var hitRegions: [OverlayCardHitRegion] = []
     private var widthToggleVisible = false
     private var onWidthToggle: (() -> Void)?
     private var onPinToggle: (() -> Void)?
@@ -66,13 +66,21 @@ final class OverlayRootView: NSView {
         if control(at: point) != nil {
             return self
         }
-        if hitRects.contains(where: { $0.contains(point) }) {
+        if hitRegions.contains(where: { $0.contains(point) }) {
             return super.hitTest(point)
         }
         return nil
     }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    func containsVisibleCard(atScreenPoint screenPoint: NSPoint) -> Bool {
+        guard let window else { return false }
+        let windowPoint = window.convertPoint(fromScreen: screenPoint)
+        let localPoint = convert(windowPoint, from: nil)
+        return control(at: localPoint) != nil
+            || hitRegions.contains(where: { $0.contains(localPoint) })
+    }
 
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
@@ -206,9 +214,9 @@ final class OverlayRootView: NSView {
         let inputH = maskComposerHeight > 1 ? maskComposerHeight : OverlayMetrics.minHeight
         let gap = OverlayMetrics.stackSpacing
         widthToggleVisible = transcriptHeight > 1
-        var hit: [CGRect] = []
-        func addRect(_ rect: CGRect) {
-            hit.append(rect)
+        var hit: [OverlayCardHitRegion] = []
+        func addRect(_ rect: CGRect, cornerRadius: CGFloat) {
+            hit.append(OverlayCardHitRegion(rect: rect, cornerRadius: cornerRadius))
         }
 
         let inset = OverlayMetrics.shadowInset
@@ -218,7 +226,10 @@ final class OverlayRootView: NSView {
         let inputY = max(inset, bounds.height - inset - inputH)
         if transcriptHeight > 1 {
             let chatY = max(inset, inputY - gap - transcriptHeight)
-            addRect(CGRect(x: inset, y: chatY, width: chatW, height: transcriptHeight))
+            addRect(
+                CGRect(x: inset, y: chatY, width: chatW, height: transcriptHeight),
+                cornerRadius: OverlayMetrics.transcriptCornerRadius
+            )
             if maskPreviewWidth > 1 {
                 addRect(
                     CGRect(
@@ -226,7 +237,8 @@ final class OverlayRootView: NSView {
                         y: chatY,
                         width: maskPreviewWidth,
                         height: transcriptHeight
-                    )
+                    ),
+                    cornerRadius: OverlayMetrics.transcriptCornerRadius
                 )
             }
         }
@@ -238,7 +250,8 @@ final class OverlayRootView: NSView {
                     y: pickerY,
                     width: OverlayMetrics.pickerWidth,
                     height: pickerHeight
-                )
+                ),
+                cornerRadius: OverlayMetrics.cornerRadius
             )
         }
         if commandPaletteHeight > 1 {
@@ -248,11 +261,15 @@ final class OverlayRootView: NSView {
                     y: max(inset, inputY - gap - commandPaletteHeight),
                     width: inputW,
                     height: commandPaletteHeight
-                )
+                ),
+                cornerRadius: OverlayMetrics.transcriptCornerRadius
             )
         }
-        addRect(CGRect(x: inputX, y: inputY, width: inputW, height: inputH))
-        hitRects = hit
+        addRect(
+            CGRect(x: inputX, y: inputY, width: inputW, height: inputH),
+            cornerRadius: OverlayMetrics.cornerRadius
+        )
+        hitRegions = hit
     }
 
     private var backingScale: CGFloat {

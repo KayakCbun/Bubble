@@ -19,7 +19,7 @@ enum SideStageEscape: Equatable {
 
 enum WorkspacePaneSeed: Equatable {
     case current
-    case live
+    case run
     case cached
     case card
     case loading
@@ -31,7 +31,7 @@ struct WorkspacePaneSeedContext {
     var currentCardId: UUID?
     var nextCardId: UUID
     var hasCurrentRows: Bool
-    var hasLiveRows: Bool
+    var hasRunRows: Bool
     var cacheIsFresh: Bool
     var selectedAnchorIsCached: Bool
     var isLive: Bool
@@ -67,6 +67,31 @@ enum SideStagePresentationPolicy {
     }
 }
 
+enum WorkspaceRunLifecyclePolicy {
+    static func shouldPrepareSession(childBusy: Bool) -> Bool {
+        !childBusy
+    }
+
+    static func acceptsStreamUpdate(
+        routedSessionId: String,
+        activeChildSessionId: String?,
+        childBusy: Bool
+    ) -> Bool {
+        guard childBusy else { return false }
+        if routedSessionId.isEmpty { return true }
+        return routedSessionId == activeChildSessionId
+    }
+
+    static func acceptsCompletion(
+        expectedGeneration: Int,
+        currentGeneration: Int,
+        expectedRunId: String,
+        activeRunId: String?
+    ) -> Bool {
+        expectedGeneration == currentGeneration && expectedRunId == activeRunId
+    }
+}
+
 enum WorkspaceTurnRowKind: Equatable {
     case user
     case assistant
@@ -96,15 +121,15 @@ enum SideStagePolicy {
         guard let nextSessionId = context.nextSessionId, !nextSessionId.isEmpty else {
             return .card
         }
+        if context.hasRunRows {
+            return .run
+        }
         let sameSession = context.currentSessionId == nextSessionId
         if context.isLive {
             if sameSession,
                context.currentCardId == context.nextCardId,
                context.hasCurrentRows {
                 return .current
-            }
-            if context.hasLiveRows {
-                return .live
             }
             return .card
         }
@@ -228,6 +253,19 @@ enum SideStagePolicy {
             return output.id
         }
         return rows[userIndex].id
+    }
+
+    static func runRange(
+        anchorEntryId: String?,
+        rows: [WorkspaceTurnRow]
+    ) -> Range<Int>? {
+        guard let anchorEntryId, !anchorEntryId.isEmpty,
+              let userIndex = rows.firstIndex(where: {
+                  $0.kind == .user && $0.sourceEntryId == anchorEntryId
+              }) else { return nil }
+        let nextUserIndex = rows[(userIndex + 1)...].firstIndex(where: { $0.kind == .user })
+            ?? rows.endIndex
+        return userIndex..<nextUserIndex
     }
 
     /// `session/load` and `session/resume` replay history and set a process-wide

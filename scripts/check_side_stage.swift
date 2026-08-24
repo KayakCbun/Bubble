@@ -158,7 +158,50 @@ struct SideStageCheck {
             WorkspaceTurnRow(id: "thought-b", sourceEntryId: "assistant-b", kind: .thought),
             WorkspaceTurnRow(id: "assistant-b", sourceEntryId: "assistant-b", kind: .assistant),
             WorkspaceTurnRow(id: "user-c", sourceEntryId: "c", kind: .user),
+            WorkspaceTurnRow(id: "assistant-c", sourceEntryId: "assistant-c", kind: .assistant),
         ]
+        expect(
+            SideStagePolicy.runRange(anchorEntryId: "b", rows: turnRows) == 0..<3,
+            "a completed card displays only its anchored workspace run"
+        )
+        expect(
+            !WorkspaceRunLifecyclePolicy.acceptsCompletion(
+                expectedGeneration: 4,
+                currentGeneration: 5,
+                expectedRunId: "run-old",
+                activeRunId: nil
+            ),
+            "a workspace completion from before /new cannot enter the new main session"
+        )
+        expect(
+            WorkspaceRunLifecyclePolicy.acceptsCompletion(
+                expectedGeneration: 5,
+                currentGeneration: 5,
+                expectedRunId: "run-current",
+                activeRunId: "run-current"
+            ),
+            "the current workspace run may complete"
+        )
+        expect(
+            !WorkspaceRunLifecyclePolicy.shouldPrepareSession(childBusy: true),
+            "a queued follow-up never attaches the live child session"
+        )
+        expect(
+            !WorkspaceRunLifecyclePolicy.acceptsStreamUpdate(
+                routedSessionId: "child-old",
+                activeChildSessionId: "child-new",
+                childBusy: true
+            ),
+            "late chunks from an old main session cannot enter the current workspace run"
+        )
+        expect(
+            WorkspaceRunLifecyclePolicy.acceptsStreamUpdate(
+                routedSessionId: "child-new",
+                activeChildSessionId: "child-new",
+                childBusy: true
+            ),
+            "the active child session continues streaming into its run"
+        )
         expect(
             SideStagePolicy.scrollTarget(
                 followLatest: false,
@@ -236,7 +279,7 @@ struct SideStageCheck {
                 currentCardId: card,
                 nextCardId: card,
                 hasCurrentRows: true,
-                hasLiveRows: false,
+                hasRunRows: false,
                 cacheIsFresh: false,
                 selectedAnchorIsCached: false,
                 isLive: true
@@ -250,7 +293,7 @@ struct SideStageCheck {
                 currentCardId: UUID(),
                 nextCardId: card,
                 hasCurrentRows: true,
-                hasLiveRows: false,
+                hasRunRows: false,
                 cacheIsFresh: true,
                 selectedAnchorIsCached: false,
                 isLive: true
@@ -264,11 +307,11 @@ struct SideStageCheck {
                 currentCardId: UUID(),
                 nextCardId: card,
                 hasCurrentRows: true,
-                hasLiveRows: true,
+                hasRunRows: true,
                 cacheIsFresh: false,
                 selectedAnchorIsCached: false,
                 isLive: true
-            )) == .live,
+            )) == .run,
             "returning to a live run restores its streamed pane buffer"
         )
         expect(
@@ -278,7 +321,21 @@ struct SideStageCheck {
                 currentCardId: UUID(),
                 nextCardId: card,
                 hasCurrentRows: true,
-                hasLiveRows: false,
+                hasRunRows: true,
+                cacheIsFresh: false,
+                selectedAnchorIsCached: false,
+                isLive: false
+            )) == .run,
+            "a completed card restores only its run-scoped rows"
+        )
+        expect(
+            SideStagePolicy.paneSeed(.init(
+                currentSessionId: "shared",
+                nextSessionId: "shared",
+                currentCardId: UUID(),
+                nextCardId: card,
+                hasCurrentRows: true,
+                hasRunRows: false,
                 cacheIsFresh: true,
                 selectedAnchorIsCached: true,
                 isLive: false
@@ -292,7 +349,7 @@ struct SideStageCheck {
                 currentCardId: UUID(),
                 nextCardId: card,
                 hasCurrentRows: true,
-                hasLiveRows: false,
+                hasRunRows: false,
                 cacheIsFresh: true,
                 selectedAnchorIsCached: true,
                 isLive: false
@@ -306,7 +363,7 @@ struct SideStageCheck {
                 currentCardId: nil,
                 nextCardId: card,
                 hasCurrentRows: false,
-                hasLiveRows: false,
+                hasRunRows: false,
                 cacheIsFresh: false,
                 selectedAnchorIsCached: false,
                 isLive: false
@@ -320,7 +377,7 @@ struct SideStageCheck {
                 currentCardId: UUID(),
                 nextCardId: card,
                 hasCurrentRows: true,
-                hasLiveRows: false,
+                hasRunRows: false,
                 cacheIsFresh: false,
                 selectedAnchorIsCached: true,
                 isLive: false
@@ -334,7 +391,7 @@ struct SideStageCheck {
                 currentCardId: UUID(),
                 nextCardId: card,
                 hasCurrentRows: true,
-                hasLiveRows: false,
+                hasRunRows: false,
                 cacheIsFresh: true,
                 selectedAnchorIsCached: false,
                 isLive: false

@@ -140,6 +140,26 @@ struct OverlayLayoutCheck {
         expect(OverlayPixel.align(100.25, scale: 2) == 100.5, "2x snaps to half points")
         expect(OverlayPixel.align(100.24, scale: 2) == 100, "2x rounds 0.24 down")
         expect(OverlayPixel.align(100.3, scale: 1) == 100, "1x snaps to whole points")
+        expect(
+            OverlayHitTestPolicy.shouldHide(
+                panelContainsClick: true,
+                visibleCardContainsClick: false
+            ),
+            "visual whitespace inside the transparent panel dismisses Bubble"
+        )
+        expect(
+            !OverlayHitTestPolicy.shouldHide(
+                panelContainsClick: true,
+                visibleCardContainsClick: true
+            ),
+            "clicking a visible Bubble card keeps Bubble open"
+        )
+        let roundedInput = OverlayCardHitRegion(
+            rect: CGRect(x: 0, y: 0, width: 520, height: 46),
+            cornerRadius: 22
+        )
+        expect(roundedInput.contains(CGPoint(x: 260, y: 23)), "composer center is interactive")
+        expect(!roundedInput.contains(CGPoint(x: 1, y: 1)), "transparent rounded corner dismisses Bubble")
         let snapped = OverlayPixel.align(CGRect(x: 12.25, y: 8.75, width: 760, height: 46), scale: 2)
         expect(snapped.origin.x == 12.5 && snapped.origin.y == 9, "rect origin follows backing scale")
         expect(snapped.size.width == 760 && snapped.size.height == 46, "integer sizes stay put")

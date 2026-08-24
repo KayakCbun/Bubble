@@ -9,6 +9,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
     private weak var hostingView: NSView?
     private let tapMonitor = CommandTapMonitor()
     private var mouseMonitor: Any?
+    private var localMouseMonitor: Any?
     private var localKeys: Any?
     private var connecting = false
     private var restoredPosition = false
@@ -42,6 +43,18 @@ final class OverlayController: NSObject, NSWindowDelegate {
             Task { @MainActor in
                 self?.hideIfClickOutside()
             }
+        }
+        localMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
+            guard let self, event.window === self.panel else { return event }
+            let visible = self.rootView.containsVisibleCard(atScreenPoint: NSEvent.mouseLocation)
+            if OverlayHitTestPolicy.shouldHide(
+                panelContainsClick: true,
+                visibleCardContainsClick: visible
+            ) {
+                self.hide()
+                return nil
+            }
+            return event
         }
         localKeys = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             if event.keyCode == 53 {
@@ -104,6 +117,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
     func stop() {
         tapMonitor.stop()
         if let mouseMonitor { NSEvent.removeMonitor(mouseMonitor) }
+        if let localMouseMonitor { NSEvent.removeMonitor(localMouseMonitor) }
         if let localKeys { NSEvent.removeMonitor(localKeys) }
         store.prepareToQuit()
         store.client.stop()
@@ -693,7 +707,11 @@ final class OverlayController: NSObject, NSWindowDelegate {
         if MermaidZoomController.shared.containsMouse() || ImageZoomController.shared.containsMouse() {
             return
         }
-        if !panel.frame.contains(NSEvent.mouseLocation) {
+        let click = NSEvent.mouseLocation
+        if OverlayHitTestPolicy.shouldHide(
+            panelContainsClick: panel.frame.contains(click),
+            visibleCardContainsClick: rootView.containsVisibleCard(atScreenPoint: click)
+        ) {
             hide()
         }
     }

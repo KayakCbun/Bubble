@@ -210,6 +210,15 @@ public enum WorkspaceRegistry {
         }
     }
 
+    public static func resetSessions(in store: inout WorkspaceStoreFile) {
+        for index in store.mounts.indices {
+            store.mounts[index].sessionId = nil
+        }
+        for index in store.recent.indices {
+            store.recent[index].sessionId = nil
+        }
+    }
+
     public static func resolve(_ query: String, in store: WorkspaceStoreFile, home: URL) -> WorkspaceMount? {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }

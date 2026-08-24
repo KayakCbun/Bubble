@@ -1,6 +1,35 @@
 import CoreGraphics
 import Foundation
 
+enum OverlayHitTestPolicy {
+    static func shouldHide(
+        panelContainsClick: Bool,
+        visibleCardContainsClick: Bool
+    ) -> Bool {
+        !panelContainsClick || !visibleCardContainsClick
+    }
+}
+
+struct OverlayCardHitRegion {
+    var rect: CGRect
+    var cornerRadius: CGFloat
+
+    func contains(_ point: CGPoint) -> Bool {
+        guard rect.contains(point) else { return false }
+        let radius = min(cornerRadius, rect.width / 2, rect.height / 2)
+        if radius <= 0 { return true }
+        if rect.insetBy(dx: radius, dy: 0).contains(point) { return true }
+        if rect.insetBy(dx: 0, dy: radius).contains(point) { return true }
+        let center = CGPoint(
+            x: point.x < rect.midX ? rect.minX + radius : rect.maxX - radius,
+            y: point.y < rect.midY ? rect.minY + radius : rect.maxY - radius
+        )
+        let dx = point.x - center.x
+        let dy = point.y - center.y
+        return dx * dx + dy * dy <= radius * radius
+    }
+}
+
 struct OverlayLayout: Equatable {
     var totalHeight: CGFloat
     var transcriptHeight: CGFloat

@@ -39,6 +39,15 @@ struct WorkspaceMountsCheck {
         expect(store.mounts[0].name == "oncall-watcher", "name is folder name")
         try WorkspaceRegistry.unmount(path: "/Users/ada/work/oncall-watcher", in: &store)
         expect(store.mounts.isEmpty, "unmount removes the entry")
+
+        var sessionScoped = WorkspaceStoreFile(
+            mounts: [WorkspaceMount(path: "/tmp/work-a", name: "work-a", sessionId: "child-old")],
+            recent: [WorkspaceMount(path: "/tmp/work-b", name: "work-b", sessionId: "child-recent")]
+        )
+        WorkspaceRegistry.resetSessions(in: &sessionScoped)
+        expect(sessionScoped.mounts.count == 1, "new main session keeps mounted folders")
+        expect(sessionScoped.mounts[0].sessionId == nil, "new main session creates fresh workspace sessions")
+        expect(sessionScoped.recent[0].sessionId == nil, "recent mounts cannot revive an old main session's child")
         expect(store.recent.count == 1, "unmount keeps a recent entry")
     }
 

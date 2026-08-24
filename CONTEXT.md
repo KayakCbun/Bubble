@@ -27,7 +27,7 @@ A durable address-book entry for a local folder (absolute path as id, folder nam
 _Avoid_: workspace (ambiguous with Bubble's default cwd), project, volume
 
 **Workspace session**:
-The reused ACP child session for one mount. cwd is the mount path; that folder's `AGENTS.md` and skills load here. Created on first run, not at mount time.
+The ACP child session for one mount within one main session. cwd is the mount path; that folder's `AGENTS.md` and skills load here. Created on first run, reused only inside that main session, and recreated after Bubble starts a new main session.
 _Avoid_: subagent (not a Pi subagent package), worker
 
 **Brief**:
@@ -39,7 +39,7 @@ The one in-flight child turn. Many mounts may exist; at most one run is active.
 _Avoid_: job, task queue
 
 **Run card**:
-The main-transcript object for one workspace run. It displays the brief. Opening it reveals that mount's workspace session.
+The main-transcript object for one workspace run. It displays the brief. Opening it reveals only that run's anchored turn and output in the workspace session.
 _Avoid_: subagent card, nested tool group
 
 Main sessions persist in `~/.bubble/session-id`. Conversation branch selections persist separately per session so a read-only branch switch survives relaunch.
