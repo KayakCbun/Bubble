@@ -30,6 +30,30 @@ struct OverlayLayoutCheck {
                "a workspace session pane grows the panel by default transcript width plus gap")
         expect(OverlayLayoutPolicy.contentWidth(chatWidth: 760, previewWidth: 760, gap: 8) == 1528,
                "workspace session stage sits beside the main transcript at default width")
+        let fittedDefault = OverlayLayoutPolicy.fittedChatWidth(
+            desired: 760,
+            sideStageWidth: 560,
+            visibleWidth: 1512,
+            gap: 8,
+            bleed: 36,
+            minimum: 520
+        )
+        expect(fittedDefault == 760,
+               "the default transcript stays full width on a 14-inch display")
+        let fittedWide = OverlayLayoutPolicy.fittedChatWidth(
+            desired: 1060,
+            sideStageWidth: 560,
+            visibleWidth: 1512,
+            gap: 8,
+            bleed: 36,
+            minimum: 520
+        )
+        expect(fittedWide == 872,
+               "wide mode contracts while a side stage is open")
+        expect(
+            OverlayLayoutPolicy.contentWidth(chatWidth: fittedWide, previewWidth: 560, gap: 8) + 72 <= 1512,
+            "a unified side stage fits entirely on a 14-inch display"
+        )
 
         let chrome = OverlayLayout(
             totalHeight: 614,

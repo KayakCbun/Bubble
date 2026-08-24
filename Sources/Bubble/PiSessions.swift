@@ -55,6 +55,12 @@ enum PiSessions {
         return turns
     }
 
+    static func conversationTree(sessionId: String, cwd: URL) -> ConversationTreeSnapshot? {
+        guard let file = exactFile(for: sessionId, cwd: cwd),
+              let text = try? String(contentsOf: file, encoding: .utf8) else { return nil }
+        return ConversationTreeSnapshot(jsonl: text)
+    }
+
     static func treeHelp(sessionId: String? = nil) -> String {
         let turns = userTurns(sessionId: sessionId)
         if turns.isEmpty {
@@ -92,6 +98,15 @@ enum PiSessions {
             return folder.appendingPathComponent(match)
         }
         return list(cwd: cwd).first.map { URL(fileURLWithPath: $0.path) }
+    }
+
+    private static func exactFile(for sessionId: String, cwd: URL) -> URL? {
+        let folder = directory(for: cwd)
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []
+        guard let match = names.first(where: {
+            $0.contains(sessionId) && $0.hasSuffix(".jsonl")
+        }) else { return nil }
+        return folder.appendingPathComponent(match)
     }
 
     private static func summary(from url: URL) -> PiSessionInfo? {

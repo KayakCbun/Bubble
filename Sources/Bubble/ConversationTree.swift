@@ -1,6 +1,6 @@
 import Foundation
 
-struct ConversationEntry: Equatable {
+struct ConversationEntry: Equatable, Sendable {
     var id: String
     var parentID: String?
     var type: String
@@ -41,7 +41,7 @@ struct ConversationTranscriptRecord: Equatable {
     var branchable: Bool
 }
 
-struct ConversationTreeSnapshot: Equatable {
+struct ConversationTreeSnapshot: Equatable, Sendable {
     var entries: [ConversationEntry]
     var leafID: String?
 
@@ -58,6 +58,25 @@ struct ConversationTreeSnapshot: Equatable {
             Self.parseEntry(raw, order: index)
         }
         leafID = Self.string(envelope["leafId"])
+    }
+
+    /// Reconstruct the tree directly from Pi's append-only local session. A
+    /// separately persisted read-only selection wins when supplied; otherwise
+    /// Pi reopens the session at its final physical entry.
+    init?(jsonl: String, selectedLeafID: String? = nil) {
+        let rawEntries: [[String: Any]] = jsonl
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .compactMap { line in
+                guard let data = String(line).data(using: .utf8) else { return nil }
+                return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            }
+        entries = rawEntries.enumerated().compactMap { index, raw in
+            Self.parseEntry(raw, order: index)
+        }
+        guard let fallbackLeaf = entries.last?.id else { return nil }
+        leafID = selectedLeafID.flatMap { selected in
+            entries.contains(where: { $0.id == selected }) ? selected : nil
+        } ?? fallbackLeaf
     }
 
     var activePath: [ConversationEntry] {

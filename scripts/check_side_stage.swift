@@ -164,6 +164,14 @@ struct SideStageCheck {
             "an empty workspace stage still loads on show"
         )
         expect(
+            !SideStagePolicy.shouldFallbackWorkspaceLoad(elapsed: 2.49),
+            "local workspace loading keeps its short grace period"
+        )
+        expect(
+            SideStagePolicy.shouldFallbackWorkspaceLoad(elapsed: 2.5),
+            "workspace loading settles to local card data before three seconds"
+        )
+        expect(
             SideStagePolicy.acceptsWorkspaceUpdate(stageRunId: "run-a", incomingRunId: "run-a"),
             "the selected run accepts its own stream"
         )

@@ -164,6 +164,7 @@ final class ChatStore {
     var workspacePaneStreamingThoughtId: UUID?
     var workspacePaneScrollToken = 0
     var workspacePaneLoadState: WorkspacePaneLoadState = .idle
+    var visibleScreenWidth: CGFloat = 1512
     var slashCommands: [SlashCommand] = SlashCommand.builtIn
     var skills: [PiSkill] = []
     var prompts: [PiPrompt] = []
@@ -442,14 +443,12 @@ final class ChatStore {
         workspacePaneScrollToken += 1
         if seed == .loading, let sessionId, !sessionId.isEmpty {
             let path = item.workspacePath ?? ""
-            Task { @MainActor in
-                await loadWorkspacePane(
-                    from: item,
-                    path: path,
-                    sessionId: sessionId,
-                    generation: generation
-                )
-            }
+            startWorkspacePaneLoad(
+                from: item,
+                path: path,
+                sessionId: sessionId,
+                generation: generation
+            )
         }
     }
 
@@ -498,18 +497,37 @@ final class ChatStore {
             return
         }
         guard workspacePaneRequestIsCurrent(cardId: item.id, generation: generation) else { return }
+        let cwd = URL(fileURLWithPath: path)
+        let localSnapshot = await Task.detached(priority: .userInitiated) {
+            PiSessions.conversationTree(sessionId: sessionId, cwd: cwd)
+        }.value
+        guard workspacePaneRequestIsCurrent(cardId: item.id, generation: generation) else { return }
+        if let localSnapshot {
+            applyWorkspaceTree(
+                localSnapshot,
+                path: path,
+                sessionId: sessionId,
+                cardId: item.id,
+                goal: item.workspaceGoal ?? ""
+            )
+            OverlayLog.write("workspace pane loaded local session \(sessionId)")
+            return
+        }
         if !isConnected {
             await connect()
         }
         guard workspacePaneRequestIsCurrent(cardId: item.id, generation: generation) else { return }
         if SideStagePolicy.shouldAttachSession(
             sessionId: sessionId,
-            liveSessionIds: childSessionIds,
+            liveSessionIds: childSessionIds.union(workspacePaneAttachedSessionIds),
             childBusy: childBusy
         ) {
-            let cwd = URL(fileURLWithPath: path)
             do {
-                _ = try await client.attach(sessionId, cwd: cwd)
+                guard try await client.attach(sessionId, cwd: cwd) else {
+                    failWorkspacePaneLoad(for: item, generation: generation)
+                    return
+                }
+                workspacePaneAttachedSessionIds.insert(sessionId)
             } catch {
                 failWorkspacePaneLoad(for: item, generation: generation)
                 return
@@ -533,6 +551,42 @@ final class ChatStore {
             cardId: item.id,
             goal: item.workspaceGoal ?? ""
         )
+    }
+
+    private func startWorkspacePaneLoad(
+        from item: ChatItem,
+        path: String,
+        sessionId: String,
+        generation: Int
+    ) {
+        Task { @MainActor in
+            await loadWorkspacePane(
+                from: item,
+                path: path,
+                sessionId: sessionId,
+                generation: generation
+            )
+        }
+        Task { @MainActor in
+            let delay = SideStagePolicy.workspaceLoadFallbackDelay
+            do {
+                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            } catch {
+                return
+            }
+            guard SideStagePolicy.shouldFallbackWorkspaceLoad(elapsed: delay) else { return }
+            settleSlowWorkspacePaneLoad(for: item, generation: generation)
+        }
+    }
+
+    private func settleSlowWorkspacePaneLoad(for item: ChatItem, generation: Int) {
+        guard workspacePaneRequestIsCurrent(cardId: item.id, generation: generation),
+              workspacePaneLoadState == .loading else { return }
+        workspacePaneItems = fallbackWorkspacePaneItems(card: item)
+        workspacePaneLoadState = .fallback
+        workspacePaneRevision &+= 1
+        workspacePaneScrollToken += 1
+        OverlayLog.write("workspace pane used local fallback after \(SideStagePolicy.workspaceLoadFallbackDelay)s")
     }
 
     private func workspacePaneRequestIsCurrent(cardId: UUID, generation: Int) -> Bool {
@@ -787,6 +841,7 @@ final class ChatStore {
     private var workspacePaneRichRows: [String: ChatItem] = [:]
     private var workspacePaneRowsBySession: [String: [ChatItem]] = [:]
     private var workspacePaneRowsByRun: [String: [ChatItem]] = [:]
+    private var workspacePaneAttachedSessionIds: Set<String> = []
     private var workspacePaneInvalidatedSessionIds: Set<String> = []
     private static let workspacePaneLoadingText = "Loading workspace session…"
 
@@ -822,6 +877,7 @@ final class ChatStore {
             DispatchQueue.main.async {
                 self?.isConnected = false
                 self?.isBusy = false
+                self?.workspacePaneAttachedSessionIds.removeAll()
                 self?.status = "pi-acp exited (\(code))"
             }
         }
@@ -2486,14 +2542,12 @@ final class ChatStore {
                 workspacePaneRevision &+= 1
                 workspacePaneLoadGeneration += 1
                 let generation = workspacePaneLoadGeneration
-                Task { @MainActor in
-                    await self.loadWorkspacePane(
-                        from: item,
-                        path: stage.path,
-                        sessionId: sessionId,
-                        generation: generation
-                    )
-                }
+                startWorkspacePaneLoad(
+                    from: item,
+                    path: stage.path,
+                    sessionId: sessionId,
+                    generation: generation
+                )
             }
         }
     }
@@ -3431,14 +3485,12 @@ final class ChatStore {
             workspacePaneRevision &+= 1
             workspacePaneLoadGeneration += 1
             let generation = workspacePaneLoadGeneration
-            Task { @MainActor in
-                await self.loadWorkspacePane(
-                    from: item,
-                    path: mount.path,
-                    sessionId: sessionId,
-                    generation: generation
-                )
-            }
+            startWorkspacePaneLoad(
+                from: item,
+                path: mount.path,
+                sessionId: sessionId,
+                generation: generation
+            )
         }
         OverlayLog.write("workspace run \(brief.status.rawValue) \(brief.name)")
         if isBusy && !injecting {

@@ -36,7 +36,22 @@ enum OverlayMetrics {
         wide ? transcriptWidthWide : transcriptWidthDefault
     }
 
-    static let previewWidth: CGFloat = 440
+    static let previewWidth: CGFloat = 560
+
+    static func fittedTranscriptWidth(
+        wide: Bool,
+        sideStageWidth: CGFloat,
+        visibleWidth: CGFloat
+    ) -> CGFloat {
+        OverlayLayoutPolicy.fittedChatWidth(
+            desired: transcriptWidth(wide: wide),
+            sideStageWidth: sideStageWidth,
+            visibleWidth: visibleWidth,
+            gap: stackSpacing,
+            bleed: shadowInset,
+            minimum: inputWidth
+        )
+    }
 
     static var transcriptMaxHeight: CGFloat {
         let visible = NSScreen.main?.visibleFrame.height ?? 800
@@ -81,7 +96,7 @@ struct OverlayView: View {
             showingMarkdown: store.markdownPreview != nil,
             showingWorkspace: store.workspaceStage != nil,
             markdownWidth: OverlayMetrics.previewWidth,
-            workspaceWidth: OverlayMetrics.transcriptWidthDefault
+            workspaceWidth: OverlayMetrics.previewWidth
         )
     }
 
@@ -135,7 +150,11 @@ struct OverlayView: View {
     }
 
     private var chatWidth: CGFloat {
-        OverlayMetrics.transcriptWidth(wide: store.transcriptWide)
+        OverlayMetrics.fittedTranscriptWidth(
+            wide: store.transcriptWide,
+            sideStageWidth: previewWidth,
+            visibleWidth: store.visibleScreenWidth
+        )
     }
 
     private var layout: OverlayLayout {
@@ -322,7 +341,7 @@ struct OverlayView: View {
             Divider().opacity(0.28)
             workspaceTranscriptList
         }
-        .frame(width: OverlayMetrics.transcriptWidthDefault, height: transcriptHeight)
+        .frame(width: previewWidth, height: transcriptHeight)
         .frostedGlass(in: transcriptShape)
         .overlay(alignment: .topTrailing) {
             PreviewChromeButton(symbol: "xmark", help: "Close workspace session") {
@@ -464,7 +483,7 @@ struct OverlayView: View {
                 .scrollIndicators(.never)
             }
         }
-        .frame(width: OverlayMetrics.previewWidth, height: transcriptHeight)
+        .frame(width: previewWidth, height: transcriptHeight)
         .frostedGlass(in: transcriptShape)
         .overlay(alignment: .topTrailing) {
             HStack(spacing: 2) {
@@ -2139,12 +2158,16 @@ final class IMEComposingMonitor: ObservableObject {
 private struct InputCaret: View {
     var body: some View {
         LayerPulsingCaret(width: 1.5, height: 16, duration: 0.53)
+            .frame(width: 1.5, height: 16)
+            .fixedSize()
     }
 }
 
 private struct StreamingCaret: View {
     var body: some View {
         LayerPulsingCaret(width: 1.6, height: 14, duration: 0.48)
+            .frame(width: 1.6, height: 14)
+            .fixedSize()
             .offset(y: 1)
     }
 }
@@ -2161,25 +2184,39 @@ private struct LayerPulsingCaret: NSViewRepresentable {
     func updateNSView(_ view: PulsingCaretNSView, context: Context) {
         view.configure(width: width, height: height, duration: duration)
     }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: PulsingCaretNSView, context: Context) -> CGSize {
+        CGSize(width: width, height: height)
+    }
 }
 
 private final class PulsingCaretNSView: NSView {
+    private var caretWidth: CGFloat
+    private var caretHeight: CGFloat
     private var duration: CFTimeInterval
 
     init(width: CGFloat, height: CGFloat, duration: CFTimeInterval) {
+        caretWidth = width
+        caretHeight = height
         self.duration = duration
         super.init(frame: NSRect(x: 0, y: 0, width: width, height: height))
         wantsLayer = true
+        setContentHuggingPriority(.required, for: .horizontal)
+        setContentHuggingPriority(.required, for: .vertical)
+        setContentCompressionResistancePriority(.required, for: .horizontal)
+        setContentCompressionResistancePriority(.required, for: .vertical)
         configure(width: width, height: height, duration: duration)
     }
 
     required init?(coder: NSCoder) { nil }
 
     func configure(width: CGFloat, height: CGFloat, duration: CFTimeInterval) {
-        frame.size = NSSize(width: width, height: height)
+        caretWidth = width
+        caretHeight = height
         layer?.backgroundColor = NSColor.labelColor.cgColor
         layer?.cornerRadius = width / 2
         layer?.opacity = 0.9
+        invalidateIntrinsicContentSize()
         if self.duration != duration || layer?.animation(forKey: "bubble-pulse") == nil {
             self.duration = duration
             let pulse = CABasicAnimation(keyPath: "opacity")
@@ -2192,7 +2229,9 @@ private final class PulsingCaretNSView: NSView {
         }
     }
 
-    override var intrinsicContentSize: NSSize { frame.size }
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: caretWidth, height: caretHeight)
+    }
 }
 
 struct OverlayLayoutKey: PreferenceKey {

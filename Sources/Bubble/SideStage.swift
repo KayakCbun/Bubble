@@ -46,6 +46,12 @@ enum WorkspacePaneLoadState: Equatable {
 }
 
 enum SideStagePolicy {
+    static let workspaceLoadFallbackDelay: TimeInterval = 2.5
+
+    static func shouldFallbackWorkspaceLoad(elapsed: TimeInterval) -> Bool {
+        elapsed >= workspaceLoadFallbackDelay
+    }
+
     static func paneSeed(_ context: WorkspacePaneSeedContext) -> WorkspacePaneSeed {
         guard let nextSessionId = context.nextSessionId, !nextSessionId.isEmpty else {
             return .card

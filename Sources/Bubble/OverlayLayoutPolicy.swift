@@ -29,6 +29,19 @@ enum OverlayLayoutPolicy {
         chatWidth + previewExtraWidth(previewWidth, gap: gap)
     }
 
+    static func fittedChatWidth(
+        desired: CGFloat,
+        sideStageWidth: CGFloat,
+        visibleWidth: CGFloat,
+        gap: CGFloat,
+        bleed: CGFloat,
+        minimum: CGFloat
+    ) -> CGFloat {
+        guard sideStageWidth > 1 else { return desired }
+        let available = visibleWidth - sideStageWidth - gap - bleed * 2
+        return min(desired, max(minimum, available.rounded(.down)))
+    }
+
     /// Left edge of the panel so the visual center (composer) stays put while preview opens.
     static func panelOriginX(centerX: CGFloat, contentWidth: CGFloat, bleed: CGFloat) -> CGFloat {
         centerX - (contentWidth + bleed * 2) / 2

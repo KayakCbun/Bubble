@@ -117,6 +117,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
 
     func show() {
         restorePositionIfNeeded()
+        syncVisibleScreenWidth()
         hideGeneration += 1
         isHiding = false
         panel.ignoresMouseEvents = false
@@ -287,7 +288,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
             || store.isStartingSession
             || store.sideStagePresented
         let chatWidth = hasTranscript
-            ? OverlayMetrics.transcriptWidth(wide: store.transcriptWide)
+            ? layout.transcriptWidth
             : OverlayMetrics.inputWidth
         let previewExtra = OverlayLayoutPolicy.previewExtraWidth(
             layout.previewWidth,
@@ -343,6 +344,12 @@ final class OverlayController: NSObject, NSWindowDelegate {
             OverlayMetrics.minHeight,
             panel.frame.height - OverlayMetrics.shadowInset * 2
         )
+        let previewWidth = currentPreviewWidth
+        let transcriptWidth = OverlayMetrics.fittedTranscriptWidth(
+            wide: store.transcriptWide,
+            sideStageWidth: previewWidth,
+            visibleWidth: store.visibleScreenWidth
+        )
         apply(OverlayLayout(
             totalHeight: contentHeight,
             transcriptHeight: (store.visibleItems.isEmpty && !store.isStartingSession && !store.sideStagePresented)
@@ -350,7 +357,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
                 : max(0, contentHeight - OverlayMetrics.minHeight - OverlayMetrics.stackSpacing),
             pickerHeight: store.showAvatarPicker ? OverlayMetrics.pickerHeight : 0,
             commandPaletteHeight: store.slashPaletteHeight,
-            transcriptWidth: OverlayMetrics.transcriptWidth(wide: store.transcriptWide),
+            transcriptWidth: transcriptWidth,
             composerHeight: OverlayComposer.composerHeight(
                 draft: store.draft,
                 minHeight: OverlayMetrics.minHeight,
@@ -359,7 +366,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
                 chipHeight: OverlayMetrics.chipHeight,
                 attachmentCount: store.draftClips.count + store.draftImages.count
             ),
-            previewWidth: currentPreviewWidth
+            previewWidth: previewWidth
         ))
     }
 
@@ -464,7 +471,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
             showingMarkdown: store.markdownPreview != nil,
             showingWorkspace: store.workspaceStage != nil,
             markdownWidth: OverlayMetrics.previewWidth,
-            workspaceWidth: OverlayMetrics.transcriptWidthDefault
+            workspaceWidth: OverlayMetrics.previewWidth
         )
     }
 
@@ -482,7 +489,12 @@ final class OverlayController: NSObject, NSWindowDelegate {
 
         var frame = targetPanelFrame ?? panel.frame
         let centerX = restCenterX ?? frame.midX
-        let targetWidth = OverlayMetrics.transcriptWidth(wide: targetWide)
+        syncVisibleScreenWidth()
+        let targetWidth = OverlayMetrics.fittedTranscriptWidth(
+            wide: targetWide,
+            sideStageWidth: currentPreviewWidth,
+            visibleWidth: store.visibleScreenWidth
+        )
         let previewExtra = OverlayLayoutPolicy.previewExtraWidth(
             currentPreviewWidth,
             gap: OverlayMetrics.stackSpacing
@@ -530,6 +542,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
     }
 
     func windowDidMove(_ notification: Notification) {
+        syncVisibleScreenWidth()
         guard panel.isVisible, !isUpdatingFrame, !isHiding else { return }
         rememberRestPosition(panel.frame)
         let defaults = UserDefaults.standard
@@ -550,9 +563,23 @@ final class OverlayController: NSObject, NSWindowDelegate {
     }
 
     private func currentVisibleFrame() -> NSRect? {
+        if let screen = panel.screen {
+            return screen.visibleFrame
+        }
+        let panelCenter = NSPoint(x: panel.frame.midX, y: panel.frame.midY)
+        if let screen = NSScreen.screens.first(where: { NSMouseInRect(panelCenter, $0.frame, false) }) {
+            return screen.visibleFrame
+        }
         let mouse = NSEvent.mouseLocation
         let screen = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) } ?? NSScreen.main
         return screen?.visibleFrame
+    }
+
+    private func syncVisibleScreenWidth() {
+        let width = currentVisibleFrame()?.width ?? 1512
+        if abs(store.visibleScreenWidth - width) > 0.5 {
+            store.visibleScreenWidth = width
+        }
     }
 
     private func hideIfClickOutside() {

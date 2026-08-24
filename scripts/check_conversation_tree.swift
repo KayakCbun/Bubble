@@ -140,6 +140,21 @@ let attachmentOnlyResponse: [String: Any] = [
 let attachmentOnly = ConversationTreeSnapshot(response: attachmentOnlyResponse)
 require(attachmentOnly?.transcript.first?.text == "Attachment", "image-only user entries remain visible")
 require(attachmentOnly?.transcript.first?.branchable == false, "image-only entries cannot be edited as text branches")
+
+let jsonl = rawEntries.map { entry -> String in
+    let data = try! JSONSerialization.data(withJSONObject: entry, options: [.sortedKeys])
+    return String(data: data, encoding: .utf8)!
+}.joined(separator: "\n")
+guard let localSnapshot = ConversationTreeSnapshot(jsonl: jsonl) else {
+    fputs("conversation tree check failed: local JSONL did not parse\n", stderr)
+    exit(1)
+}
+require(localSnapshot.leafID == "a2b", "local JSONL selects its latest active leaf")
+require(localSnapshot.activePath.map(\.id) == snapshot.activePath.map(\.id), "local JSONL reconstructs the active path")
+require(localSnapshot.transcript == snapshot.transcript, "local JSONL reconstructs the complete transcript")
+let locallySelectedBranch = ConversationTreeSnapshot(jsonl: jsonl, selectedLeafID: "a2a")
+require(locallySelectedBranch?.leafID == "a2a", "persisted local leaf selection overrides the physical tail")
+require(locallySelectedBranch?.activePath.map(\.id) == oldBranch.activePath.map(\.id), "local selected leaf reconstructs its branch")
 require(ConversationBranchInteraction.canSend(isSwitchingBranch: false), "composer sends when the active path is stable")
 require(!ConversationBranchInteraction.canSend(isSwitchingBranch: true), "composer cannot race an in-flight branch switch")
 
