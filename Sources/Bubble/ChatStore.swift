@@ -3003,7 +3003,8 @@ final class ChatStore {
             runId.isEmpty ? nil : availableCards.first(where: { $0.workspaceRunId == runId })
         }
         let legacyCard = brief.runId?.isEmpty != false ? availableCards.first(where: { item in
-            item.workspacePath.map(WorkspaceRegistry.normalize) == WorkspaceRegistry.normalize(brief.path)
+            item.workspaceRunId?.isEmpty != false
+                && item.workspacePath.map(WorkspaceRegistry.normalize) == WorkspaceRegistry.normalize(brief.path)
                 && item.workspaceGoal?.trimmingCharacters(in: .whitespacesAndNewlines)
                     == brief.goal.trimmingCharacters(in: .whitespacesAndNewlines)
         }) : nil
