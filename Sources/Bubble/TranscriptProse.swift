@@ -1,20 +1,6 @@
 import AppKit
 import SwiftUI
 
-enum PathChipKind: Equatable {
-    case code
-    case file(String)
-    case folder
-    case url
-
-    var isMonospaced: Bool {
-        switch self {
-        case .code, .file, .folder: return true
-        case .url: return false
-        }
-    }
-}
-
 struct PathChipIcon: Equatable {
     var symbol: String
     var color: Color
@@ -114,11 +100,6 @@ enum PathChipStyle {
     }
 }
 
-enum InlineRun: Equatable {
-    case text(String)
-    case chip(String, PathChipKind)
-}
-
 enum ProseBlock: Equatable {
     case heading(Int, [InlineRun])
     case paragraph([InlineRun])
@@ -192,13 +173,12 @@ enum ProseParser {
                 continue
             }
             if remaining.hasPrefix("**") {
-                remaining.removeFirst(2)
-                if let end = remaining.range(of: "**") {
-                    let inner = String(remaining[..<end.lowerBound])
-                    remaining = String(remaining[end.upperBound...])
-                    emitEmphasis(inner, into: &runs)
+                if let span = MarkdownEmphasis.consumeLeading(in: remaining) {
+                    remaining = span.remainder
+                    emitEmphasis(span.inner, into: &runs)
                     continue
                 }
+                remaining.removeFirst(2)
                 runs.append(.text("**"))
                 continue
             }
@@ -282,24 +262,36 @@ enum ProseParser {
     }
 
     private static func emitEmphasis(_ inner: String, into runs: inout [InlineRun]) {
-        if inner.isEmpty { return }
-        if CodeToken.looksLike(inner) {
-            runs.append(.chip(inner, PathChipStyle.classify(inner)))
-            return
-        }
-        let innerRuns = tokenize(inner)
-        let hasChip = innerRuns.contains { if case .chip = $0 { return true }; return false }
-        guard hasChip else {
+        let parts = MarkdownEmphasis.boundaries(in: inner)
+        guard !parts.core.isEmpty else {
             runs.append(.text("**" + inner + "**"))
             return
         }
+        if CodeToken.looksLike(parts.core) {
+            if !parts.leading.isEmpty { runs.append(.text(parts.leading)) }
+            runs.append(.chip(parts.core, PathChipStyle.classify(parts.core)))
+            if !parts.trailing.isEmpty { runs.append(.text(parts.trailing)) }
+            return
+        }
+        let innerRuns = tokenize(parts.core)
+        let hasChip = innerRuns.contains { if case .chip = $0 { return true }; return false }
+        guard hasChip else {
+            runs.append(contentsOf: MarkdownEmphasis.runs(for: inner))
+            return
+        }
+        if !parts.leading.isEmpty { runs.append(.text(parts.leading)) }
         for run in innerRuns {
             switch run {
             case .chip:
                 runs.append(run)
             case .text(let text):
                 appendBoldText(text, into: &runs)
+            case .strong(let text):
+                appendBoldText(text, into: &runs)
             }
+        }
+        if !parts.trailing.isEmpty {
+            runs.append(.text(parts.trailing))
         }
     }
 
@@ -317,7 +309,7 @@ enum ProseParser {
             runs.append(.text(String(lead)))
         }
         let core = String(text[text.index(text.startIndex, offsetBy: coreStart)..<text.index(text.startIndex, offsetBy: coreEnd)])
-        runs.append(.text("**" + core + "**"))
+        runs.append(.strong(core))
         if !trail.isEmpty {
             runs.append(.text(String(trail.reversed())))
         }
@@ -379,6 +371,8 @@ enum ProseParser {
         for run in runs {
             if case .text(let text) = run, case .text(let last) = merged.last {
                 merged[merged.count - 1] = .text(last + text)
+            } else if case .strong(let text) = run, case .strong(let last) = merged.last {
+                merged[merged.count - 1] = .strong(last + text)
             } else {
                 merged.append(run)
             }
@@ -519,6 +513,14 @@ struct ProseDocument: View {
                             .lineLimit(1)
                             .fixedSize(horizontal: true, vertical: true)
                             .textSelection(.enabled)
+                    case .strong(let text):
+                        Text(inlineMarkdown(text))
+                            .font(font)
+                            .fontWeight(.semibold)
+                            .foregroundStyle(OverlayMetrics.ink)
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: true)
+                            .textSelection(.enabled)
                     case .chip(let text, let kind):
                         InlineChip(text: text, kind: kind)
                     }
@@ -554,7 +556,7 @@ struct ProseDocument: View {
                 result.append(run)
                 x += w + spacing
                 if x >= width { x = 0 }
-            case .text(let raw):
+            case .text(let raw), .strong(let raw):
                 let segments = raw.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline)
                 for (index, segment) in segments.enumerated() {
                     if index > 0 { x = 0 }
@@ -571,11 +573,11 @@ struct ProseDocument: View {
                                 x = 0
                                 continue
                             }
-                            result.append(.text(remainingText))
+                            result.append(run.replacingText(with: remainingText))
                             x = 0
                             break
                         }
-                        result.append(.text(head))
+                        result.append(run.replacingText(with: head))
                         if tail.isEmpty {
                             x += widthOf(head, font: font) + spacing
                             if x >= width { x = 0 }

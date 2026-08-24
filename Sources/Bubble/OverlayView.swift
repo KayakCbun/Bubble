@@ -190,8 +190,10 @@ struct OverlayView: View {
                         }
                     if store.sideStagePresented {
                         sideStagePane
+                            .transition(.opacity)
                     }
                 }
+                .animation(OverlayMotion.panel, value: store.sideStagePresented)
             }
             VStack(spacing: 8) {
                 if let brief = store.activeWorkspaceBrief, brief.isActive {
@@ -203,6 +205,7 @@ struct OverlayView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
             .frame(width: OverlayMetrics.inputWidth, height: composerHeight)
+            .background(WindowDragArea())
             .frostedGlass(in: inputShape)
             .overlay(alignment: .bottom) {
                 Group {
@@ -1167,6 +1170,24 @@ struct OverlayView: View {
     }
 
     private func rowRenderKey(_ row: TranscriptRow) -> RowRenderKey {
+        let expansionKey: String
+        switch row {
+        case .message(let item):
+            expansionKey = TranscriptExpansionPolicy.renderKey(
+                containerExpanded: item.kind == .thought && expandedThoughts.contains(item.id),
+                expandedChildIDs: []
+            )
+        case .tool(let item):
+            expansionKey = TranscriptExpansionPolicy.renderKey(
+                containerExpanded: expandedTools.contains(item.id),
+                expandedChildIDs: []
+            )
+        case .collapsedTools(let id, let items):
+            expansionKey = TranscriptExpansionPolicy.renderKey(
+                containerExpanded: expandedToolGroups.contains(id),
+                expandedChildIDs: items.filter { expandedTools.contains($0.id) }.map { $0.id.uuidString }
+            )
+        }
         switch row {
         case .message(let item), .tool(let item):
             return RowRenderKey(
@@ -1184,7 +1205,8 @@ struct OverlayView: View {
                     || store.streamingThoughtId == item.id
                     || store.workspacePaneStreamingAssistantId == item.id
                     || store.workspacePaneStreamingThoughtId == item.id,
-                selected: store.workspaceStage?.cardId == item.id
+                selected: store.workspaceStage?.cardId == item.id,
+                expansionKey: expansionKey
             )
         case .collapsedTools(let id, let items):
             return RowRenderKey(
@@ -1199,7 +1221,8 @@ struct OverlayView: View {
                 workspaceStatus: nil,
                 workspaceSummary: nil,
                 live: false,
-                selected: false
+                selected: false,
+                expansionKey: expansionKey
             )
         }
     }
@@ -1345,6 +1368,7 @@ struct OverlayView: View {
                         .foregroundStyle(OverlayMetrics.ink)
                         .lineSpacing(4)
                         .multilineTextAlignment(.leading)
+                        .textSelection(.enabled)
                 }
                 if item.deliveryState == .steering {
                     Text("Steering")
@@ -1978,6 +2002,23 @@ private struct RowRenderKey: Equatable {
     var workspaceSummary: String?
     var live: Bool
     var selected: Bool
+    var expansionKey: String
+}
+
+private struct WindowDragArea: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        ComposerDragView()
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
+}
+
+private final class ComposerDragView: NSView {
+    override var isOpaque: Bool { false }
+
+    override func mouseDown(with event: NSEvent) {
+        window?.performDrag(with: event)
+    }
 }
 
 private struct EquatableSection<Value: Equatable, Content: View>: View, Equatable {

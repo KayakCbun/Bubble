@@ -25,12 +25,10 @@ enum OverlayRenderPolicy {
         panelVisible && !isMoving
     }
 
-    /// Side-stage insertion/removal changes the root view's width immediately.
-    /// Animating the AppKit frame afterwards exposes a clipped intermediate frame.
     static func shouldAnimateSideStageResize(
         previousPreviewWidth: CGFloat,
         nextPreviewWidth: CGFloat
     ) -> Bool {
-        previousPreviewWidth == nextPreviewWidth
+        true
     }
 }

@@ -53,6 +53,20 @@ private enum TranscriptInteractionCheck {
             TranscriptFollowPolicy.followsContentHeightChange(isBusy: true),
             "streaming content growth should continue following the latest response"
         )
+        let collapsed = TranscriptExpansionPolicy.renderKey(
+            containerExpanded: false,
+            expandedChildIDs: []
+        )
+        let expanded = TranscriptExpansionPolicy.renderKey(
+            containerExpanded: true,
+            expandedChildIDs: []
+        )
+        expect(collapsed != expanded, "expanding a thought or tool must invalidate its equatable row")
+        expect(
+            TranscriptExpansionPolicy.renderKey(containerExpanded: true, expandedChildIDs: ["tool-b", "tool-a"])
+                == TranscriptExpansionPolicy.renderKey(containerExpanded: true, expandedChildIDs: ["tool-a", "tool-b"]),
+            "group expansion keys are stable regardless of Set iteration order"
+        )
         if !failures.isEmpty {
             for failure in failures {
                 FileHandle.standardError.write(Data("FAIL: \(failure)\n".utf8))

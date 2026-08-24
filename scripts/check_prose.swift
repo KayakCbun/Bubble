@@ -22,6 +22,7 @@ struct ProseCheck {
         testWallReflow()
         testChecklistReflow()
         testCodeSpanProtected()
+        testEmphasisBoundaryWhitespace()
         testKinsokuWrap()
         testTableReflow()
         print("PASS: prose reflow and code tokens")
@@ -96,6 +97,29 @@ struct ProseCheck {
         let text = ProseReflow.reflow("前面`<at id=工号>## 不是标题</at>`后面。## 问题现象后面是一段足够长的正文内容")
         expectContains(text, "`<at id=工号>## 不是标题</at>`", "hashes inside code stay put")
         expectContains(text, "\n## 问题现象\n", "real heading still splits")
+    }
+
+    static func testEmphasisBoundaryWhitespace() {
+        let runs = MarkdownEmphasis.runs(for: "边界划得很干净，状态机经过推演。 ")
+        expect(runs == [.strong("边界划得很干净，状态机经过推演。"), .text(" ")], "move trailing space outside the semantic bold run \(runs)")
+
+        let multiline = MarkdownEmphasis.runs(for: "第一句。\n第二句。\u{3000}")
+        expect(multiline == [.strong("第一句。\n第二句。"), .text("\u{3000}")], "newlines and Chinese punctuation remain inside bold \(multiline)")
+        expect(
+            InlineRun.strong("一段很长的中文句子。").replacingText(with: "句子后半段。") == .strong("句子后半段。"),
+            "line wrapping preserves strong semantics instead of splitting Markdown delimiters"
+        )
+        expect(MarkdownEmphasis.runs(for: " ") == [.text("** **")], "empty emphasis stays literal")
+
+        let source = "**边界划得很干净。\n但数据库风险仍需解决。 **后文"
+        let span = MarkdownEmphasis.consumeLeading(in: source)
+        expect(span?.inner == "边界划得很干净。\n但数据库风险仍需解决。 ", "consume the complete multiline emphasis from source Markdown")
+        expect(span?.remainder == "后文", "leave following prose outside the emphasis")
+        expect(
+            span.map { MarkdownEmphasis.runs(for: $0.inner) }
+                == [.strong("边界划得很干净。\n但数据库风险仍需解决。"), .text(" ")],
+            "the production delimiter seam emits semantic strong text with trailing whitespace outside"
+        )
     }
 
     static func testKinsokuWrap() {

@@ -23,6 +23,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
     private var layoutQueued = false
     private var lastAppliedLayout: OverlayLayout?
     private let frameAnimator = OverlayFrameAnimator()
+    private var commandReturnApplication: NSRunningApplication?
 
     private let positionCenterXKey = "bubble.position.centerX"
     private let positionBottomYKey = "bubble.position.bottomY"
@@ -31,7 +32,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         OverlayPaths.bootstrap()
         installView()
         tapMonitor.onDoubleTap = { [weak self] in
-            self?.toggle()
+            self?.toggleFromCommandTap()
         }
         tapMonitor.start()
         mouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
@@ -115,7 +116,33 @@ final class OverlayController: NSObject, NSWindowDelegate {
         }
     }
 
+    private func toggleFromCommandTap() {
+        if panel.isVisible {
+            let application = commandReturnApplication
+            commandReturnApplication = nil
+            hide(animated: true, returningFocusTo: application)
+            return
+        }
+        let frontmost = NSWorkspace.shared.frontmostApplication
+        let bubblePID = ProcessInfo.processInfo.processIdentifier
+        let origin = CommandFocusReturnPolicy.remembers(
+            frontmostPID: frontmost?.processIdentifier,
+            bubblePID: bubblePID
+        ) ? frontmost : nil
+        show(returningFocusTo: origin)
+    }
+
     func show() {
+        show(returningFocusTo: nil)
+    }
+
+    private func show(returningFocusTo application: NSRunningApplication?) {
+        if !CommandFocusReturnPolicy.preservesExistingTarget(
+            panelVisible: panel.isVisible,
+            requestedTargetPresent: application != nil
+        ) {
+            commandReturnApplication = application
+        }
         restorePositionIfNeeded()
         syncVisibleScreenWidth()
         hideGeneration += 1
@@ -162,11 +189,17 @@ final class OverlayController: NSObject, NSWindowDelegate {
     }
 
     func hide(animated: Bool = true) {
+        hide(animated: animated, returningFocusTo: nil)
+    }
+
+    private func hide(animated: Bool, returningFocusTo application: NSRunningApplication?) {
+        commandReturnApplication = nil
         store.setStreamUISuspended(true)
         ImageZoomController.shared.close()
         MermaidZoomController.shared.close()
         guard panel.isVisible else {
             panel.orderOut(nil)
+            application?.activate(options: [])
             return
         }
         guard animated else {
@@ -174,6 +207,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
             frameAnimator.cancel()
             panel.alphaValue = 1
             panel.orderOut(nil)
+            application?.activate(options: [])
             return
         }
         if isHiding { return }
@@ -198,6 +232,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
             }
             self.isHiding = false
             self.finishFrameAnimation()
+            application?.activate(options: [])
         }
         frameAnimator.retarget(frame: dest, alpha: 0)
     }
@@ -458,6 +493,8 @@ final class OverlayController: NSObject, NSWindowDelegate {
             finishFrameAnimation()
             return
         }
+
+        store.setStreamUISuspended(true)
 
         frameAnimator.onSettled = { [weak self] in
             self?.finishFrameAnimation()

@@ -7,6 +7,17 @@ enum CommandTapPolicy {
     static let maxHold: TimeInterval = 0.22
 }
 
+enum CommandFocusReturnPolicy {
+    static func remembers(frontmostPID: Int32?, bubblePID: Int32) -> Bool {
+        guard let frontmostPID else { return false }
+        return frontmostPID != bubblePID
+    }
+
+    static func preservesExistingTarget(panelVisible: Bool, requestedTargetPresent: Bool) -> Bool {
+        panelVisible && !requestedTargetPresent
+    }
+}
+
 struct CommandTapMachine {
     private var commandDown = false
     private var combo = false

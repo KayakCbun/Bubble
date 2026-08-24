@@ -25,3 +25,10 @@ enum TranscriptFollowPolicy {
         isBusy
     }
 }
+
+enum TranscriptExpansionPolicy {
+    static func renderKey(containerExpanded: Bool, expandedChildIDs: [String]) -> String {
+        let children = expandedChildIDs.sorted().joined(separator: ",")
+        return "\(containerExpanded ? 1 : 0):\(children)"
+    }
+}

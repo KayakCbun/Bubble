@@ -297,7 +297,7 @@ final class OverlayPanel: NSPanel {
         becomesKeyOnlyIfNeeded = false
         titleVisibility = .hidden
         titlebarAppearsTransparent = true
-        isMovableByWindowBackground = true
+        isMovableByWindowBackground = false
         animationBehavior = .none
         hidesOnDeactivate = false
         displaysWhenScreenProfileChanges = true

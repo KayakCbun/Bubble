@@ -1,5 +1,81 @@
 import Foundation
 
+enum PathChipKind: Equatable {
+    case code
+    case file(String)
+    case folder
+    case url
+
+    var isMonospaced: Bool {
+        switch self {
+        case .code, .file, .folder: return true
+        case .url: return false
+        }
+    }
+}
+
+enum InlineRun: Equatable {
+    case text(String)
+    case strong(String)
+    case chip(String, PathChipKind)
+
+    func replacingText(with text: String) -> InlineRun {
+        switch self {
+        case .text:
+            return .text(text)
+        case .strong:
+            return .strong(text)
+        case .chip:
+            return self
+        }
+    }
+}
+
+enum MarkdownEmphasis {
+    struct Span: Equatable {
+        var inner: String
+        var remainder: String
+    }
+
+    struct Boundaries: Equatable {
+        var leading: String
+        var core: String
+        var trailing: String
+    }
+
+    static func boundaries(in text: String) -> Boundaries {
+        let leading = text.prefix { $0.isWhitespace }
+        let withoutLeading = text.dropFirst(leading.count)
+        let trailing = withoutLeading.reversed().prefix { $0.isWhitespace }
+        let core = withoutLeading.dropLast(trailing.count)
+        return Boundaries(
+            leading: String(leading),
+            core: String(core),
+            trailing: String(trailing.reversed())
+        )
+    }
+
+    static func runs(for text: String) -> [InlineRun] {
+        let parts = boundaries(in: text)
+        guard !parts.core.isEmpty else { return [.text("**" + text + "**")] }
+        var runs: [InlineRun] = []
+        if !parts.leading.isEmpty { runs.append(.text(parts.leading)) }
+        runs.append(.strong(parts.core))
+        if !parts.trailing.isEmpty { runs.append(.text(parts.trailing)) }
+        return runs
+    }
+
+    static func consumeLeading(in text: String) -> Span? {
+        guard text.hasPrefix("**") else { return nil }
+        let body = String(text.dropFirst(2))
+        guard let end = body.range(of: "**") else { return nil }
+        return Span(
+            inner: String(body[..<end.lowerBound]),
+            remainder: String(body[end.upperBound...])
+        )
+    }
+}
+
 enum CodeToken {
     static func looksLike(_ raw: String) -> Bool {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)

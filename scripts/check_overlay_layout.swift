@@ -89,8 +89,12 @@ struct OverlayLayoutCheck {
         expect(OverlayRenderPolicy.shouldResumeStream(panelVisible: true, isMoving: false),
                "settled visible panel resumes accumulated stream work")
         expect(
-            !OverlayRenderPolicy.shouldAnimateSideStageResize(previousPreviewWidth: 0, nextPreviewWidth: 560),
-            "opening a side stage applies its panel width atomically"
+            OverlayRenderPolicy.shouldAnimateSideStageResize(previousPreviewWidth: 0, nextPreviewWidth: 560),
+            "opening a side stage uses the high-refresh panel animator"
+        )
+        expect(
+            OverlayRenderPolicy.shouldAnimateSideStageResize(previousPreviewWidth: 560, nextPreviewWidth: 0),
+            "closing a side stage uses the high-refresh panel animator"
         )
         expect(
             OverlayRenderPolicy.shouldAnimateSideStageResize(previousPreviewWidth: 560, nextPreviewWidth: 560),
