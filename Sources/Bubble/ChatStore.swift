@@ -2532,7 +2532,11 @@ final class ChatStore {
     }
 
     private func handleReload() {
-        clearActiveWorkspaceRun()
+        if let active = workspaceState.active, active.isActive {
+            interruptActiveWorkspaceRun(active)
+        } else {
+            clearActiveWorkspaceRun()
+        }
         isConnected = false
         status = "reloading"
         client.stop()
@@ -3492,6 +3496,53 @@ final class ChatStore {
         persistWorkspaceState()
     }
 
+    private func interruptActiveWorkspaceRun(_ active: WorkspaceBrief) {
+        let pending = pendingChildSteer
+        workspaceRunGeneration += 1
+        if let id = childSessionId {
+            client.cancel(sessionId: id)
+        }
+        childBusy = false
+        childSessionId = nil
+        hushMainAssistant = false
+        pendingChildSteer = nil
+        var interrupted = active
+        interrupted.status = .interrupted
+        interrupted.question = nil
+        if interrupted.summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            interrupted.summary = "Cancelled."
+        }
+        workspaceState.active = interrupted
+        persistWorkspaceState()
+        upsertWorkspaceCard(interrupted)
+        if let pending {
+            recordUnstartedWorkspaceFollowUp(
+                pending,
+                status: .interrupted,
+                summary: "Not started because the preceding workspace run was cancelled."
+            )
+        }
+    }
+
+    private func recordUnstartedWorkspaceFollowUp(
+        _ brief: WorkspaceBrief,
+        status: WorkspaceStatus,
+        summary: String
+    ) {
+        var terminal = brief
+        terminal.status = status
+        terminal.summary = summary
+        terminal.question = nil
+        upsertWorkspaceCard(terminal)
+        if let index = items.lastIndex(where: {
+            $0.kind == .workspaceRun && $0.workspaceRunId == terminal.runId
+        }) {
+            items[index].workspaceSessionId = nil
+            items[index].workspaceAnchorEntryId = nil
+            persist()
+        }
+    }
+
     private func resetWorkspaceSessionsForFreshMainSession() throws {
         WorkspaceRegistry.resetSessions(in: &workspaceState)
         childSessionId = nil
@@ -3669,12 +3720,6 @@ final class ChatStore {
         if let active = workspaceState.active, active.isActive, active.path != resolved.path {
             throw WorkspaceError.otherRunning(active.name)
         }
-        if !isConnected {
-            await connect()
-            guard isConnected else {
-                throw RPCError(code: -4, message: "not connected")
-            }
-        }
         let brief = WorkspaceBrief(
             runId: UUID().uuidString,
             path: resolved.path,
@@ -3694,37 +3739,18 @@ final class ChatStore {
                 "note": "queued follow-up on the running workspace",
             ]
         }
-        let sessionId = try await ensureChildSession(resolved)
-        childSessionId = sessionId
-        childSessionIds.insert(sessionId)
         hushMainAssistant = true
-        WorkspaceRegistry.rememberSession(path: resolved.path, sessionId: sessionId, in: &workspaceState)
-        invalidateWorkspacePaneSession(sessionId)
         workspaceState.active = brief
         persistWorkspaceState()
         upsertWorkspaceCard(brief)
-        if let index = items.lastIndex(where: { $0.kind == .workspaceRun && $0.workspacePath == resolved.path }) {
-            items[index].workspaceSessionId = sessionId
-        }
-        try? await client.applyBubblePreferences(sessionId: sessionId)
         childBusy = true
         childAssistant = ""
         childChanged = []
         Task { @MainActor in
-            await self.awaitChildPrompt(
-                sessionId: sessionId,
+            await self.prepareAndRunWorkspace(
+                brief: brief,
                 prompt: prompt,
                 mount: resolved,
-                generation: generation,
-                runId: runId
-            )
-        }
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 350_000_000)
-            await self.captureWorkspaceAnchor(
-                sessionId: sessionId,
-                goal: prompt,
-                path: resolved.path,
                 generation: generation,
                 runId: runId
             )
@@ -3736,19 +3762,88 @@ final class ChatStore {
         ]
     }
 
+    private func prepareAndRunWorkspace(
+        brief: WorkspaceBrief,
+        prompt: String,
+        mount: WorkspaceMount,
+        generation: Int,
+        runId: String
+    ) async {
+        do {
+            if !isConnected {
+                await connect()
+                guard isConnected else {
+                    throw RPCError(code: -4, message: "not connected")
+                }
+            }
+            guard WorkspaceRunLifecyclePolicy.acceptsCompletion(
+                expectedGeneration: generation,
+                currentGeneration: workspaceRunGeneration,
+                expectedRunId: runId,
+                activeRunId: workspaceState.active?.runId
+            ) else { return }
+            let sessionId = try await ensureChildSession(mount)
+            guard WorkspaceRunLifecyclePolicy.acceptsCompletion(
+                expectedGeneration: generation,
+                currentGeneration: workspaceRunGeneration,
+                expectedRunId: runId,
+                activeRunId: workspaceState.active?.runId
+            ) else { return }
+            childSessionId = sessionId
+            childSessionIds.insert(sessionId)
+            WorkspaceRegistry.rememberSession(path: mount.path, sessionId: sessionId, in: &workspaceState)
+            invalidateWorkspacePaneSession(sessionId)
+            persistWorkspaceState()
+            if let index = items.lastIndex(where: {
+                $0.kind == .workspaceRun && $0.workspaceRunId == brief.runId
+            }) {
+                items[index].workspaceSessionId = sessionId
+                persist()
+            }
+            try? await client.applyBubblePreferences(sessionId: sessionId)
+            guard WorkspaceRunLifecyclePolicy.acceptsCompletion(
+                expectedGeneration: generation,
+                currentGeneration: workspaceRunGeneration,
+                expectedRunId: runId,
+                activeRunId: workspaceState.active?.runId
+            ) else { return }
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 350_000_000)
+                await self.captureWorkspaceAnchor(
+                    sessionId: sessionId,
+                    goal: prompt,
+                    path: mount.path,
+                    generation: generation,
+                    runId: runId
+                )
+            }
+            await awaitChildPrompt(
+                sessionId: sessionId,
+                prompt: prompt,
+                mount: mount,
+                generation: generation,
+                runId: runId
+            )
+        } catch {
+            OverlayLog.write("workspace preparation failed: \(error.localizedDescription)")
+            finishChildRun(
+                stopReason: "failed",
+                mount: mount,
+                error: error.localizedDescription,
+                generation: generation,
+                runId: runId
+            )
+        }
+    }
+
     private func ensureChildSession(_ mount: WorkspaceMount) async throws -> String {
         let cwd = URL(fileURLWithPath: mount.path)
         if let existing = mount.sessionId, !existing.isEmpty {
-            childSessionIds.insert(existing)
-            childSessionId = existing
             if try await client.attach(existing, cwd: cwd) {
                 return existing
             }
         }
-        let created = try await client.createSession(cwd: cwd)
-        childSessionIds.insert(created)
-        childSessionId = created
-        return created
+        return try await client.createSession(cwd: cwd)
     }
 
     private func awaitChildPrompt(
@@ -3795,6 +3890,22 @@ final class ChatStore {
             if !runId.isEmpty {
                 removeWorkspaceRunRows(runId: runId)
             }
+        }
+        var unstartedFollowUp: WorkspaceBrief?
+        if var pending = pendingChildSteer,
+           stopReason == "cancelled" || error != nil || stopReason == "failed" {
+            pending.question = nil
+            if stopReason == "cancelled" {
+                pending.status = .interrupted
+                pending.summary = "Not started because the preceding workspace run was cancelled."
+            } else {
+                pending.status = .failed
+                let reason = error?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                pending.summary = reason.isEmpty
+                    ? "Not started because the preceding workspace run failed."
+                    : "Not started because the preceding workspace run failed: \(reason)"
+            }
+            unstartedFollowUp = pending
         }
         childBusy = false
         if stopReason != "cancelled", error == nil, let next = pendingChildSteer {
@@ -3860,6 +3971,13 @@ final class ChatStore {
         workspaceState.active = brief
         persistWorkspaceState()
         upsertWorkspaceCard(brief)
+        if let unstartedFollowUp {
+            recordUnstartedWorkspaceFollowUp(
+                unstartedFollowUp,
+                status: unstartedFollowUp.status,
+                summary: unstartedFollowUp.summary
+            )
+        }
         if workspacePaneIsCurrent(path: mount.path),
            let item = items.last(where: { $0.kind == .workspaceRun && $0.workspacePath == mount.path }),
            workspaceStage?.cardId == item.id,
@@ -3890,15 +4008,17 @@ final class ChatStore {
         guard let active = workspaceState.active, active.isActive else {
             throw WorkspaceError.noActiveRun
         }
-        if let childSessionId {
-            client.cancel(sessionId: childSessionId)
-        }
+        interruptActiveWorkspaceRun(active)
         return ["status": "cancelling", "name": active.name]
     }
 
     func cancelWorkspaceRun() {
         let parentBusy = injecting || isBusy
-        clearActiveWorkspaceRun()
+        if let active = workspaceState.active, active.isActive {
+            interruptActiveWorkspaceRun(active)
+        } else {
+            clearActiveWorkspaceRun()
+        }
         if parentBusy {
             cancel()
         }
