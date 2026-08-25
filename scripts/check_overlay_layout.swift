@@ -239,6 +239,33 @@ struct OverlayLayoutCheck {
         expect(OverlaySpring.settled(value: value, velocity: velocity, target: 100), "spring settles within two seconds at 120Hz")
         expect(abs(value - 100) < 0.5, "settled value is on the target")
 
+        let sweepStart = RunningSweepPolicy.progress(at: 0)
+        let sweepQuarter = RunningSweepPolicy.progress(at: RunningSweepPolicy.cycleDuration / 4)
+        let sweepHalf = RunningSweepPolicy.progress(at: RunningSweepPolicy.cycleDuration / 2)
+        expect(sweepStart == 0, "running highlight starts at the leading edge")
+        expect(sweepQuarter > sweepStart && sweepHalf > sweepQuarter,
+               "running highlight advances continuously from left to right")
+        expect(
+            RunningSweepPolicy.progress(at: RunningSweepPolicy.cycleDuration) == 0,
+            "running highlight loops without accumulating animation state"
+        )
+        expect(
+            RunningSweepPolicy.minimumFrameInterval <= 1.0 / 120.0,
+            "running highlight is eligible to follow a 120 Hz display"
+        )
+        let sweepEntry = RunningSweepPolicy.highlightCenter(at: 0)
+        let sweepExit = RunningSweepPolicy.highlightCenter(
+            at: RunningSweepPolicy.cycleDuration - 0.000_001
+        )
+        expect(
+            sweepEntry + RunningSweepPolicy.highlightRadius < 0,
+            "running highlight begins fully outside the leading edge"
+        )
+        expect(
+            sweepExit - RunningSweepPolicy.highlightRadius > 1,
+            "running highlight exits fully beyond the trailing edge before looping"
+        )
+
         print("PASS: overlay layout policy")
     }
 }

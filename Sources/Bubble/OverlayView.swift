@@ -937,9 +937,32 @@ struct OverlayView: View {
 
     private struct RunningSweepLabel: View {
         var body: some View {
-            Text("running")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.tertiary)
+            TimelineView(
+                .animation(minimumInterval: RunningSweepPolicy.minimumFrameInterval)
+            ) { context in
+                let center = RunningSweepPolicy.highlightCenter(
+                    at: context.date.timeIntervalSinceReferenceDate
+                )
+                Text("running")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(
+                        LinearGradient(
+                            colors: [
+                                Color.secondary.opacity(0.34),
+                                Color.primary.opacity(0.84),
+                                Color.secondary.opacity(0.34),
+                            ],
+                            startPoint: UnitPoint(
+                                x: center - RunningSweepPolicy.highlightRadius,
+                                y: 0.5
+                            ),
+                            endPoint: UnitPoint(
+                                x: center + RunningSweepPolicy.highlightRadius,
+                                y: 0.5
+                            )
+                        )
+                    )
+            }
         }
     }
 

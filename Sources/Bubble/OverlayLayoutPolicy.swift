@@ -137,6 +137,25 @@ enum OverlayPixel {
     }
 }
 
+enum RunningSweepPolicy {
+    static let cycleDuration: TimeInterval = 1.45
+    static let minimumFrameInterval: TimeInterval = 1.0 / 120.0
+    static let highlightRadius = 0.24
+    static let offscreenPadding = 0.12
+
+    static func progress(at time: TimeInterval) -> Double {
+        let cycle = max(cycleDuration, .leastNonzeroMagnitude)
+        let remainder = time.truncatingRemainder(dividingBy: cycle)
+        return (remainder < 0 ? remainder + cycle : remainder) / cycle
+    }
+
+    static func highlightCenter(at time: TimeInterval) -> Double {
+        let start = -(highlightRadius + offscreenPadding)
+        let end = 1 + highlightRadius + offscreenPadding
+        return start + (end - start) * progress(at: time)
+    }
+}
+
 enum OverlaySpring {
     static let panelResponse: CGFloat = 0.32
     static let panelDamping: CGFloat = 0.94
