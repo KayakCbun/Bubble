@@ -56,7 +56,23 @@ private enum TranscriptRenderPlanCheck {
             streamingSeedIDs: ["assistant-599"]
         )
         expect(streaming.units.count > 2, "a long streaming answer splits into stable render units")
-        expect(streaming.units.last?.copyText == longAnswer, "the live tail keeps the complete text for copy and branch controls")
+        expect(streaming.units.first(where: { $0.kind == .assistant })?.isChunked == true, "the source-id chunk still renders as a chunk")
+        expect(streaming.units.last?.isTerminal == true, "the live tail is marked explicitly")
+        expect(streaming.units.last?.isStreaming == true, "the live tail keeps streaming presentation state")
+        expect(streaming.units.last?.copyText == nil, "copy and branch controls stay hidden while streaming")
+        expect(
+            TranscriptChunkRenderPolicy.sourceText(longAnswer, isChunked: true).isEmpty,
+            "stable prefix chunk keys exclude the complete growing source text"
+        )
+        expect(
+            !TranscriptChunkRenderPolicy.sourceIsLive(
+                sourceIsLive: true,
+                isChunked: true,
+                isStreaming: true,
+                isTerminal: false
+            ),
+            "only the terminal chunk invalidates for streaming presentation"
+        )
         let streamingIDs = streaming.units.map(\.id)
         var grownSeeds = Array(seeds.suffix(2))
         grownSeeds[grownSeeds.count - 1].text += "\n\nA newly streamed tail paragraph."
@@ -74,9 +90,18 @@ private enum TranscriptRenderPlanCheck {
             .joined(separator: "\n\n")
         let unicodeChunks = WorkspaceTranscriptChunker.chunks(unicode, identity: "unicode")
         expect(unicodeChunks.joined() == unicode, "UTF-8 chunking must be lossless")
+        let longCode = "```swift\n" + Array(repeating: "let value = 1", count: 1_200).joined(separator: "\n") + "\n```"
+        let codeChunks = WorkspaceTranscriptChunker.chunks(longCode, identity: "long-code")
+        expect(codeChunks.count > 4, "a giant fenced code block virtualizes into independently valid fences")
+        expect(
+            codeChunks.allSatisfy { $0.hasPrefix("```swift\n") && $0.hasSuffix("```") },
+            "every virtual code row preserves fenced-code semantics"
+        )
+        let giantTable = "| A | B |\n|---|---|\n" + Array(repeating: "| 1 | 2 |", count: 12_000).joined(separator: "\n")
+        let tableChunks = WorkspaceTranscriptChunker.chunks(giantTable, identity: "giant-table")
+        expect(tableChunks.count > 20, "a giant GFM table virtualizes into repeated-header row groups")
+        expect(tableChunks.allSatisfy { $0.hasPrefix("| A | B |\n|---|---|\n") }, "every virtual table row preserves its header")
         let documentScoped = [
-            Array(repeating: "```swift\nlet value = 1\n```", count: 120).joined(separator: "\n\n"),
-            Array(repeating: "| A | B |\n|---|---|\n| 1 | 2 |", count: 120).joined(separator: "\n"),
             Array(repeating: "sequenceDiagram\nA->>B: hello", count: 120).joined(separator: "\n"),
         ]
         for (index, document) in documentScoped.enumerated() {
@@ -101,6 +126,49 @@ private enum TranscriptRenderPlanCheck {
             + Double(incrementalElapsed.components.attoseconds) / 1_000_000_000_000_000
         expect(incremental.units.last?.text.hasSuffix("A newly streamed tail paragraph.") == true, "streaming updates only replace the live tail unit")
         expect(incrementalMilliseconds < 20, "a streaming tail update must stay near one frame, got \(incrementalMilliseconds)ms")
+
+        let structuredSource = "```swift\n" + Array(repeating: "let stableStructuredRow = true", count: 5_000).joined(separator: "\n")
+        let structuredPlanner = TranscriptRenderPlanner()
+        let structuredSeed = TranscriptRenderSeed(id: "structured", kind: .assistant, text: structuredSource)
+        let structuredBefore = structuredPlanner.plan(
+            seeds: [structuredSeed],
+            branchSourceID: nil,
+            streamingSeedIDs: ["structured"]
+        )
+        var grownStructuredSeed = structuredSeed
+        grownStructuredSeed.text += "\nlet liveStructuredTail = true"
+        let structuredStart = ContinuousClock.now
+        let structuredAfter = structuredPlanner.plan(
+            seeds: [grownStructuredSeed],
+            branchSourceID: nil,
+            streamingSeedIDs: ["structured"]
+        )
+        let structuredElapsed = structuredStart.duration(to: .now)
+        let structuredMilliseconds = Double(structuredElapsed.components.seconds) * 1_000
+            + Double(structuredElapsed.components.attoseconds) / 1_000_000_000_000_000
+        expect(structuredAfter.units.count > 20, "100k+ streaming code is split into bounded render rows")
+        expect(
+            Array(structuredAfter.units.map(\.id).prefix(structuredBefore.units.count))
+                == structuredBefore.units.map(\.id),
+            "structured stream growth preserves every existing row identity"
+        )
+        expect(structuredMilliseconds < 20, "100k+ structured stream planning must stay near one frame, got \(structuredMilliseconds)ms")
+        let tablePlanner = TranscriptRenderPlanner()
+        let tableSeed = TranscriptRenderSeed(id: "table", kind: .assistant, text: giantTable)
+        let tableBefore = tablePlanner.plan(seeds: [tableSeed], branchSourceID: nil, streamingSeedIDs: ["table"])
+        var grownTableSeed = tableSeed
+        grownTableSeed.text += "\n| live | tail |"
+        let tableStart = ContinuousClock.now
+        let tableAfter = tablePlanner.plan(seeds: [grownTableSeed], branchSourceID: nil, streamingSeedIDs: ["table"])
+        let tableElapsed = tableStart.duration(to: .now)
+        let tableMilliseconds = Double(tableElapsed.components.seconds) * 1_000
+            + Double(tableElapsed.components.attoseconds) / 1_000_000_000_000_000
+        expect(tableAfter.units.count > 20, "100k+ streaming table remains split into bounded render rows")
+        expect(
+            Array(tableAfter.units.map(\.id).prefix(tableBefore.units.count)) == tableBefore.units.map(\.id),
+            "table stream growth preserves every existing row identity"
+        )
+        expect(tableMilliseconds < 20, "100k+ table stream planning must stay near one frame, got \(tableMilliseconds)ms")
         _ = planner.plan(seeds: seeds, branchSourceID: nil, streamingSeedIDs: [])
         let warmStart = ContinuousClock.now
         var checksum = 0

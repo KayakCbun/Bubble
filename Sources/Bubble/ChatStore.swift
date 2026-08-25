@@ -153,6 +153,7 @@ final class ChatStore {
     private var pendingAssistantChunk = ""
     private var pendingThoughtChunk = ""
     private var streamFlushQueued = false
+    private var lastStreamFlushUptime: TimeInterval = 0
     var streamingThoughtId: UUID?
     var turnStartedAt: Date?
     var lastTurnDuration: TimeInterval = 0
@@ -2830,13 +2831,27 @@ final class ChatStore {
         }
         guard !streamFlushQueued else { return }
         streamFlushQueued = true
-        OverlayPulse.shared.onNextFrame { [weak self] in
-            self?.flushStreamChunks()
+        let renderedAssistantBytes = items.last(where: { $0.id == streamingAssistantId })?.text.utf8.count ?? 0
+        let renderedThoughtBytes = items.last(where: { $0.id == streamingThoughtId })?.text.utf8.count ?? 0
+        let interval = OverlayRenderPolicy.streamFlushInterval(
+            renderedBytes: max(
+                renderedAssistantBytes + pendingAssistantChunk.utf8.count,
+                renderedThoughtBytes + pendingThoughtChunk.utf8.count
+            )
+        )
+        let elapsed = ProcessInfo.processInfo.systemUptime - lastStreamFlushUptime
+        let delay = max(0, interval - elapsed)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self else { return }
+            OverlayPulse.shared.onNextFrame { [weak self] in
+                self?.flushStreamChunks()
+            }
         }
     }
 
     private func flushStreamChunks() {
         streamFlushQueued = false
+        lastStreamFlushUptime = ProcessInfo.processInfo.systemUptime
         let assistant = pendingAssistantChunk
         let thought = pendingThoughtChunk
         pendingAssistantChunk = ""
@@ -3297,23 +3312,28 @@ final class ChatStore {
     }
 
     private func writeTranscript() {
-        let stored = items.suffix(TranscriptVirtualizationLimits.retainedItems).filter { item in
-            if item.kind == .assistant || item.kind == .thought {
-                return !item.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            }
-            return true
-        }
         guard let sessionID = client.sessionId ?? PiSessions.currentId() else { return }
-        let envelope = TranscriptEnvelope(
-            sessionId: sessionID,
-            selectedLeafId: Self.savedConversationLeaves()[sessionID],
-            items: Array(stored),
-            richItems: Array(richTranscriptRows.values.suffix(TranscriptVirtualizationLimits.retainedItems))
-        )
+        let itemSnapshot = items
+        let richSnapshot = richTranscriptRows
+        let selectedLeafID = Self.savedConversationLeaves()[sessionID]
         let sessionURL = Self.transcriptURL(sessionID: sessionID)
         let transcriptURL = OverlayPaths.transcriptFile
         Self.transcriptPersistQueue.async {
             do {
+                let stored = itemSnapshot
+                    .suffix(TranscriptVirtualizationLimits.retainedItems)
+                    .filter { item in
+                        if item.kind == .assistant || item.kind == .thought {
+                            return !item.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        }
+                        return true
+                    }
+                let envelope = TranscriptEnvelope(
+                    sessionId: sessionID,
+                    selectedLeafId: selectedLeafID,
+                    items: Array(stored),
+                    richItems: Array(richSnapshot.values.suffix(TranscriptVirtualizationLimits.retainedItems))
+                )
                 let data = try JSONEncoder().encode(envelope)
                 try FileManager.default.createDirectory(
                     at: sessionURL.deletingLastPathComponent(),

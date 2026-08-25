@@ -19,6 +19,54 @@ enum PathChipKind: Equatable {
     }
 }
 
+enum CodeDisplayChunker {
+    static let targetCharacters = 6_000
+
+    private static let cache: NSCache<NSString, CodeDisplayChunksBox> = {
+        let cache = NSCache<NSString, CodeDisplayChunksBox>()
+        cache.countLimit = 48
+        cache.totalCostLimit = 8 * 1_024 * 1_024
+        return cache
+    }()
+
+    static func chunks(_ text: String, target: Int = targetCharacters) -> [String] {
+        guard text.count > target else { return [text] }
+        let key = "\(target):\(text)" as NSString
+        if let cached = cache.object(forKey: key) {
+            return cached.chunks
+        }
+        let hardLimit = max(target + 1, target * 5 / 4)
+        var chunks: [String] = []
+        var start = text.startIndex
+        var index = start
+        var count = 0
+        while index < text.endIndex {
+            let character = text[index]
+            index = text.index(after: index)
+            count += 1
+            if count >= target, character == "\n" || count >= hardLimit {
+                chunks.append(String(text[start..<index]))
+                start = index
+                count = 0
+            }
+        }
+        if start < text.endIndex {
+            chunks.append(String(text[start...]))
+        }
+        let result = chunks.isEmpty ? [text] : chunks
+        cache.setObject(CodeDisplayChunksBox(result), forKey: key, cost: text.utf8.count)
+        return result
+    }
+}
+
+private final class CodeDisplayChunksBox {
+    let chunks: [String]
+
+    init(_ chunks: [String]) {
+        self.chunks = chunks
+    }
+}
+
 enum InlineRun: Equatable {
     case text(String)
     case strong(String)

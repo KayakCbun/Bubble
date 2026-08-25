@@ -90,6 +90,18 @@ struct OverlayLayoutCheck {
                "hide animation must not rebuild SwiftUI on tokens")
         expect(OverlayRenderPolicy.shouldFlushStreamToUI(overlayVisible: true, isHiding: false),
                "a visible overlay still streams")
+        expect(OverlayRenderPolicy.streamFlushInterval(renderedBytes: 20_000) < 0.01,
+               "ordinary replies retain display-rate streaming")
+        expect(OverlayRenderPolicy.streamFlushInterval(renderedBytes: 1_000_000) >= 0.05,
+               "very large structured replies use a bounded streaming cadence")
+        let longThought = String(repeating: "reasoning ", count: 2_000)
+        let liveThought = ThoughtDisplayPolicy.chunks(longThought, streaming: true)
+        expect(liveThought.count == 1 && liveThought[0].count == ThoughtDisplayPolicy.liveTailCharacters,
+               "a live thought renders only its bounded tail")
+        expect(ThoughtDisplayPolicy.isTailTruncated(longThought),
+               "a large live thought advertises its virtualized prefix")
+        expect(ThoughtDisplayPolicy.chunks(longThought, streaming: false).count > 1,
+               "a completed large thought uses lazy display chunks")
         expect(!OverlayRenderPolicy.shouldResumeStream(panelVisible: true, isMoving: true),
                "show animation keeps accumulated stream work suspended")
         expect(OverlayRenderPolicy.shouldResumeStream(panelVisible: true, isMoving: false),

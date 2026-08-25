@@ -26,7 +26,21 @@ struct ProseCheck {
         testBoldNumberedTitles()
         testKinsokuWrap()
         testTableReflow()
+        testCodeDisplayChunks()
         print("PASS: prose reflow and code tokens")
+    }
+
+    static func testCodeDisplayChunks() {
+        let source = Array(repeating: "let stableRow = true\n", count: 2_000).joined()
+        let chunks = CodeDisplayChunker.chunks(source)
+        expect(chunks.count > 4, "very long code is split into stable display rows")
+        expect(chunks.joined() == source, "code display chunking is lossless")
+        let grown = source + "let liveTail = true\n"
+        let grownChunks = CodeDisplayChunker.chunks(grown)
+        expect(
+            Array(grownChunks.prefix(chunks.count - 1)) == Array(chunks.prefix(chunks.count - 1)),
+            "streaming code preserves every completed display chunk"
+        )
     }
 
     static func testCodeTokens() {

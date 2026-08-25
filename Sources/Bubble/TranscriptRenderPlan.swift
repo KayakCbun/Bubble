@@ -6,6 +6,21 @@ enum TranscriptVirtualizationLimits {
     static let retainedItems = 4_000
 }
 
+enum TranscriptChunkRenderPolicy {
+    static func sourceText(_ sourceText: String, isChunked: Bool) -> String {
+        isChunked ? "" : sourceText
+    }
+
+    static func sourceIsLive(
+        sourceIsLive: Bool,
+        isChunked: Bool,
+        isStreaming: Bool,
+        isTerminal: Bool
+    ) -> Bool {
+        isChunked ? isStreaming && isTerminal : sourceIsLive
+    }
+}
+
 struct TranscriptRenderSeed: Equatable, Sendable {
     enum Kind: Equatable, Sendable {
         case user
@@ -33,6 +48,9 @@ struct TranscriptRenderUnit: Identifiable, Equatable, Sendable {
     var text: String
     var copyText: String?
     var isContinuation: Bool
+    var isChunked: Bool
+    var isTerminal: Bool
+    var isStreaming: Bool
     var isAfterBranchPoint: Bool
     var startsAfterBranchPoint: Bool
 }
@@ -77,6 +95,9 @@ struct TranscriptRenderPlan: Equatable, Sendable {
                     text: template.text,
                     copyText: template.copyText,
                     isContinuation: template.isContinuation,
+                    isChunked: template.isChunked,
+                    isTerminal: template.isTerminal,
+                    isStreaming: template.isStreaming,
                     isAfterBranchPoint: isAfterBranchPoint,
                     startsAfterBranchPoint: startsAfterBranchPoint && !template.isContinuation
                 ))
@@ -101,8 +122,11 @@ struct TranscriptRenderPlan: Equatable, Sendable {
             return TranscriptRenderTemplate(
                 id: chunkIndex == 0 ? seed.id : "\(seed.id)-chunk-\(chunkIndex)",
                 text: text,
-                copyText: chunks.count > 1 && isLast ? seed.text : nil,
-                isContinuation: chunkIndex > 0
+                copyText: chunks.count > 1 && isLast && !streaming ? seed.text : nil,
+                isContinuation: chunkIndex > 0,
+                isChunked: chunks.count > 1,
+                isTerminal: isLast,
+                isStreaming: streaming
             )
         }
     }
@@ -113,6 +137,9 @@ private struct TranscriptRenderTemplate {
     var text: String
     var copyText: String?
     var isContinuation: Bool
+    var isChunked: Bool
+    var isTerminal: Bool
+    var isStreaming: Bool
 }
 
 /// Keeps the row and chunk plan stable across unrelated SwiftUI updates. The

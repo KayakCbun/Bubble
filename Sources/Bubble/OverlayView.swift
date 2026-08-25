@@ -1547,9 +1547,22 @@ struct OverlayView: View {
     }
 
     private func mainRowRenderKey(_ row: MainTranscriptRenderRow) -> MainTranscriptRenderKey {
-        MainTranscriptRenderKey(
+        var source = rowRenderKey(row.source)
+        // The source item contains the complete growing answer. Keeping it in
+        // every chunk key would invalidate all stable prefix rows per token.
+        source.text = TranscriptChunkRenderPolicy.sourceText(
+            source.text,
+            isChunked: row.isAssistantChunk
+        )
+        source.live = TranscriptChunkRenderPolicy.sourceIsLive(
+            sourceIsLive: source.live,
+            isChunked: row.isAssistantChunk,
+            isStreaming: row.isStreaming,
+            isTerminal: row.isTerminal
+        )
+        return MainTranscriptRenderKey(
             id: row.id,
-            source: rowRenderKey(row.source),
+            source: source,
             text: row.text,
             copyText: row.copyText
         )
@@ -1664,7 +1677,12 @@ struct OverlayView: View {
     @ViewBuilder
     private func mainTranscriptRow(_ row: MainTranscriptRenderRow) -> some View {
         if row.isAssistantChunk, case .message(let item) = row.source {
-            assistantChunkRow(item: item, text: row.text, copyText: row.copyText)
+            assistantChunkRow(
+                item: item,
+                text: row.text,
+                copyText: row.copyText,
+                live: row.isStreaming && row.isTerminal
+            )
         } else {
             transcriptRow(row.source)
         }
@@ -1886,7 +1904,7 @@ struct OverlayView: View {
         }
     }
 
-    private func assistantChunkRow(item: ChatItem, text: String, copyText: String?) -> some View {
+    private func assistantChunkRow(item: ChatItem, text: String, copyText: String?, live: Bool) -> some View {
         let completeText = copyText?.trimmingCharacters(in: .whitespacesAndNewlines)
         let isTerminalChunk = completeText != nil
         let showBranchControl = isTerminalChunk
@@ -1895,8 +1913,13 @@ struct OverlayView: View {
                 isStreaming: false
             )
         return VStack(alignment: .leading, spacing: 8) {
-            MessageBody(text: text)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                MessageBody(text: text, streaming: live, virtualizedChunk: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                if live {
+                    StreamingCaret()
+                }
+            }
             if let completeText, !completeText.isEmpty {
                 HStack(alignment: .center, spacing: 0) {
                     AssistantCopyButton(text: completeText)
@@ -2002,19 +2025,35 @@ struct OverlayView: View {
                     Capsule()
                         .fill(Color.primary.opacity(0.16))
                         .frame(width: 2)
-                    Text(item.text.isEmpty && live ? "…" : item.text)
-                        .font(.system(size: 12.5, weight: .regular))
-                        .italic()
-                        .lineSpacing(OverlaySurface.proseLineSpacing)
-                        .foregroundStyle(.secondary.opacity(0.88))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled)
+                    thoughtText(item.text, live: live)
                 }
                 .padding(.leading, 14)
             }
         }
         .padding(.vertical, 2)
         .opacity(0.92)
+    }
+
+    @ViewBuilder
+    private func thoughtText(_ text: String, live: Bool) -> some View {
+        let displayChunks = ThoughtDisplayPolicy.chunks(text, streaming: live)
+        LazyVStack(alignment: .leading, spacing: 0) {
+            if live, ThoughtDisplayPolicy.isTailTruncated(text) {
+                Text("Earlier reasoning stays virtualized while thinking…")
+                    .font(.system(size: 10.5, weight: .regular))
+                    .foregroundStyle(.tertiary)
+                    .padding(.bottom, 4)
+            }
+            ForEach(Array(displayChunks.enumerated()), id: \.offset) { _, chunk in
+                Text(chunk.isEmpty && live ? "…" : chunk)
+                    .font(.system(size: 12.5, weight: .regular))
+                    .italic()
+                    .lineSpacing(OverlaySurface.proseLineSpacing)
+                    .foregroundStyle(.secondary.opacity(0.88))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+            }
+        }
     }
 
     private func workspaceRunCard(_ item: ChatItem) -> some View {
@@ -2761,10 +2800,12 @@ private struct MainTranscriptRenderRow: Identifiable {
     var text: String { unit.text }
     var copyText: String? { unit.copyText }
     var isContinuation: Bool { unit.isContinuation }
+    var isTerminal: Bool { unit.isTerminal }
+    var isStreaming: Bool { unit.isStreaming }
     var isAfterBranchPoint: Bool { unit.isAfterBranchPoint }
     var startsAfterBranchPoint: Bool { unit.startsAfterBranchPoint }
     var isAssistantChunk: Bool {
-        unit.kind == .assistant && (unit.id != source.id || unit.copyText != nil)
+        unit.kind == .assistant && unit.isChunked
     }
 }
 

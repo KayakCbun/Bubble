@@ -8,12 +8,15 @@ import WebKit
 struct MessageBody: View {
     var text: String
     var streaming: Bool = false
+    /// The outer transcript planner may split one large structured block into
+    /// bounded rows. Make the local copy affordance explicit in that case.
+    var virtualizedChunk: Bool = false
     /// File previews always go through MarkdownUI. Chat bubbles stay on ProseDocument
     /// unless the slice is a table or a leading fence MarkdownUI already owns.
     var preferClassicMarkdown: Bool = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        LazyVStack(alignment: .leading, spacing: 16) {
             ForEach(Array(MessagePart.displayParts(text).enumerated()), id: \.offset) { _, part in
                 switch part {
                 case .markdown(let markdown):
@@ -31,7 +34,12 @@ struct MessageBody: View {
                         ProseDocument(text: markdown)
                     }
                 case .code(let language, let body):
-                    CodeBlockView(language: language, source: body)
+                    CodeBlockView(
+                        language: language,
+                        source: body,
+                        streaming: streaming,
+                        virtualizedChunk: virtualizedChunk
+                    )
                 case .mermaid(let source):
                     MermaidView(source: MessagePart.normalizeMermaid(source), streaming: streaming)
                 }
@@ -423,9 +431,22 @@ enum MessagePart {
         }
 
         func flushTable() {
-            let text = table.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-            if !text.isEmpty {
-                parts.append(.markdown(text))
+            let rowsPerPart = 80
+            if table.count > rowsPerPart + 2,
+               table.count >= 2,
+               isSeparatorLine(table[1]) {
+                let header = Array(table.prefix(2))
+                var bodyStart = 2
+                while bodyStart < table.count {
+                    let bodyEnd = min(table.count, bodyStart + rowsPerPart)
+                    parts.append(.markdown((header + Array(table[bodyStart..<bodyEnd])).joined(separator: "\n")))
+                    bodyStart = bodyEnd
+                }
+            } else {
+                let text = table.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+                if !text.isEmpty {
+                    parts.append(.markdown(text))
+                }
             }
             table.removeAll()
         }
@@ -730,6 +751,8 @@ private extension Theme {
 struct CodeBlockView: View {
     var language: String
     var source: String
+    var streaming = false
+    var virtualizedChunk = false
 
     @State private var copied = false
     @State private var wrap = true
@@ -737,7 +760,7 @@ struct CodeBlockView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                Text(displayLanguage)
+                Text(virtualizedChunk ? "\(displayLanguage) · section" : displayLanguage)
                     .font(.system(size: 11, weight: .regular, design: .monospaced))
                     .foregroundStyle(.tertiary)
                 Spacer(minLength: 8)
@@ -748,16 +771,35 @@ struct CodeBlockView: View {
                 codeChromeButton(copied ? "checkmark" : "square.on.square") {
                     copy()
                 }
-                .help("Copy")
+                .help(virtualizedChunk ? "Copy this virtualized section" : "Copy")
             }
             Group {
-                if wrap {
-                    Text(source)
-                        .font(.system(size: OverlayMetrics.codeSize, weight: .regular, design: .monospaced))
-                        .foregroundStyle(OverlayMetrics.ink.opacity(0.88))
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .fixedSize(horizontal: false, vertical: true)
+                if streaming {
+                    let tail = source.suffix(CodeDisplayChunker.targetCharacters)
+                    VStack(alignment: .leading, spacing: 6) {
+                        if tail.startIndex != source.startIndex {
+                            Text("Earlier code stays virtualized while this block streams…")
+                                .font(.system(size: 10.5, weight: .regular))
+                                .foregroundStyle(.tertiary)
+                        }
+                        Text(String(tail))
+                            .font(.system(size: OverlayMetrics.codeSize, weight: .regular, design: .monospaced))
+                            .foregroundStyle(OverlayMetrics.ink.opacity(0.88))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                } else if wrap {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(Array(CodeDisplayChunker.chunks(source).enumerated()), id: \.offset) { _, chunk in
+                            Text(chunk.hasSuffix("\n") ? String(chunk.dropLast()) : chunk)
+                                .font(.system(size: OverlayMetrics.codeSize, weight: .regular, design: .monospaced))
+                                .foregroundStyle(OverlayMetrics.ink.opacity(0.88))
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
                 } else {
                     ScrollView(.horizontal, showsIndicators: false) {
                         Text(source)
@@ -899,6 +941,7 @@ struct MermaidView: View {
         .help("Click to enlarge")
         .onAppear { enqueueRender() }
         .onChange(of: source) { _, _ in enqueueRender() }
+        .onChange(of: streaming) { _, _ in enqueueRender() }
         .onChange(of: colorScheme) { _, _ in enqueueRender() }
         .onChange(of: webFailed) { _, failed in
             if failed, image == nil, !streaming {
@@ -911,13 +954,17 @@ struct MermaidView: View {
         let token = UUID()
         renderID = token
         webFailed = false
+        if streaming {
+            image = nil
+            useWeb = false
+            return
+        }
         if useWeb {
             return
         }
         let src = source
         let dark = colorScheme == .dark
-        let delay = streaming ? 0.08 : 0
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+        DispatchQueue.main.async {
             guard renderID == token else { return }
             renderNative(src, dark: dark, token: token)
         }

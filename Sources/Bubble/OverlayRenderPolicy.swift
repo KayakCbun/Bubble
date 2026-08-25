@@ -30,6 +30,18 @@ enum OverlayRenderPolicy {
         overlayVisible && !isHiding
     }
 
+    /// Parsing a growing structured response is proportional to the rendered
+    /// prefix. Keep small replies at display rate, but give very large code,
+    /// tables, and diagrams a bounded UI update cadence.
+    static func streamFlushInterval(renderedBytes: Int) -> TimeInterval {
+        switch renderedBytes {
+        case ..<64_000: 1.0 / 120.0
+        case ..<256_000: 1.0 / 60.0
+        case ..<768_000: 1.0 / 30.0
+        default: 1.0 / 20.0
+        }
+    }
+
     static func shouldResumeStream(panelVisible: Bool, isMoving: Bool) -> Bool {
         panelVisible && !isMoving
     }
@@ -62,5 +74,29 @@ enum OverlayRenderPolicy {
         nextPreviewWidth: CGFloat
     ) -> Bool {
         abs(previousPreviewWidth - nextPreviewWidth) < 1
+    }
+}
+
+enum ThoughtDisplayPolicy {
+    static let liveTailCharacters = 6_000
+    static let completedChunkCharacters = 6_000
+
+    static func isTailTruncated(_ text: String) -> Bool {
+        text.count > liveTailCharacters
+    }
+
+    static func chunks(_ text: String, streaming: Bool) -> [String] {
+        if streaming {
+            return [String(text.suffix(liveTailCharacters))]
+        }
+        guard text.count > completedChunkCharacters else { return [text] }
+        var chunks: [String] = []
+        var start = text.startIndex
+        while start < text.endIndex {
+            let end = text.index(start, offsetBy: completedChunkCharacters, limitedBy: text.endIndex) ?? text.endIndex
+            chunks.append(String(text[start..<end]))
+            start = end
+        }
+        return chunks
     }
 }
