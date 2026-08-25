@@ -667,32 +667,32 @@ private extension Theme {
         }
         .heading1 { configuration in
             configuration.label
-                .relativeLineSpacing(.em(0.28))
-                .markdownTextStyle { FontWeight(.medium); FontSize(OverlayMetrics.heading1Size) }
-                .markdownMargin(top: 14, bottom: 8)
+                .relativeLineSpacing(.em(OverlaySurface.proseHeadingLineSpacingEm))
+                .markdownTextStyle { FontWeight(.semibold); FontSize(OverlayMetrics.heading1Size) }
+                .markdownMargin(top: 20, bottom: 8)
         }
         .heading2 { configuration in
             configuration.label
-                .relativeLineSpacing(.em(0.28))
-                .markdownTextStyle { FontWeight(.medium); FontSize(OverlayMetrics.heading2Size) }
-                .markdownMargin(top: 12, bottom: 6)
+                .relativeLineSpacing(.em(OverlaySurface.proseHeadingLineSpacingEm))
+                .markdownTextStyle { FontWeight(.semibold); FontSize(OverlayMetrics.heading2Size) }
+                .markdownMargin(top: 20, bottom: 8)
         }
         .heading3 { configuration in
             configuration.label
-                .relativeLineSpacing(.em(0.3))
-                .markdownTextStyle { FontWeight(.medium); FontSize(OverlayMetrics.heading3Size) }
-                .markdownMargin(top: 10, bottom: 6)
+                .relativeLineSpacing(.em(OverlaySurface.proseHeadingLineSpacingEm))
+                .markdownTextStyle { FontWeight(.semibold); FontSize(OverlayMetrics.heading3Size) }
+                .markdownMargin(top: 16, bottom: 8)
         }
         .paragraph { configuration in
             configuration.label
                 .fixedSize(horizontal: false, vertical: true)
-                .relativeLineSpacing(.em(0.62))
-                .markdownMargin(top: 0, bottom: 18)
+                .relativeLineSpacing(.em(OverlaySurface.proseLineSpacingEm))
+                .markdownMargin(top: 0, bottom: OverlaySurface.proseBlockSpacing)
         }
         .listItem { configuration in
             configuration.label
                 .fixedSize(horizontal: false, vertical: true)
-                .relativeLineSpacing(.em(0.58))
+                .relativeLineSpacing(.em(OverlaySurface.proseLineSpacingEm))
                 .markdownMargin(top: 10, bottom: 0)
         }
         .codeBlock { configuration in
@@ -723,7 +723,7 @@ private extension Theme {
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.vertical, 8)
                 .padding(.horizontal, 12)
-                .relativeLineSpacing(.em(0.35))
+                .relativeLineSpacing(.em(0.40))
         }
 }
 

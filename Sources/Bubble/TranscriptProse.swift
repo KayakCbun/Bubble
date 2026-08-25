@@ -602,7 +602,7 @@ struct ProseDocument: View {
     var text: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: OverlaySurface.proseBlockSpacing) {
             ForEach(Array(ProseParser.blocks(in: text).enumerated()), id: \.offset) { _, block in
                 switch block {
                 case .heading(let level, let runs):
@@ -610,11 +610,11 @@ struct ProseDocument: View {
                         runs,
                         font: .system(
                             size: level <= 1 ? OverlayMetrics.heading1Size : level == 2 ? OverlayMetrics.heading2Size : OverlayMetrics.heading3Size,
-                            weight: .medium
+                            weight: .semibold
                         )
                     )
-                    .padding(.top, level <= 2 ? 8 : 4)
-                    .padding(.bottom, 1)
+                    .padding(.top, level <= 2 ? 20 : 16)
+                    .padding(.bottom, 8)
                 case .paragraph(let runs):
                     inlineFlow(runs)
                 case .rule:
@@ -642,7 +642,7 @@ struct ProseDocument: View {
 
     private func inlineFlow(_ runs: [InlineRun], font: Font = OverlayMetrics.bodyFont) -> some View {
         FlowWidthReader { width in
-            FlowLayout(horizontalSpacing: 5, verticalSpacing: 5) {
+            FlowLayout(horizontalSpacing: 5, verticalSpacing: OverlaySurface.proseLineSpacing) {
                 ForEach(Array(Self.breakRuns(runs, width: width).enumerated()), id: \.offset) { _, run in
                     switch run {
                     case .text(let text):
@@ -942,16 +942,31 @@ private struct FlowWidthReader<Content: View>: View {
 
 struct FlowLayout: Layout {
     var horizontalSpacing: CGFloat = 5
-    var verticalSpacing: CGFloat = 7
+    var verticalSpacing: CGFloat = OverlaySurface.proseLineSpacing
 
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        arrange(proposal: proposal, subviews: subviews).size
+    struct Cache {
+        var width: CGFloat?
+        var subviewCount = 0
+        var result: (size: CGSize, frames: [CGRect])?
     }
 
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        let result = arrange(
-            proposal: ProposedViewSize(width: bounds.width, height: bounds.height),
-            subviews: subviews
+    func makeCache(subviews: Subviews) -> Cache {
+        Cache()
+    }
+
+    func updateCache(_ cache: inout Cache, subviews: Subviews) {
+        cache = Cache()
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) -> CGSize {
+        cachedArrangement(proposal: proposal, subviews: subviews, cache: &cache).size
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) {
+        let result = cachedArrangement(
+            proposal: ProposedViewSize(width: bounds.width, height: nil),
+            subviews: subviews,
+            cache: &cache
         )
         for (subview, frame) in zip(subviews, result.frames) {
             subview.place(
@@ -962,6 +977,24 @@ struct FlowLayout: Layout {
                 proposal: ProposedViewSize(frame.size)
             )
         }
+    }
+
+    private func cachedArrangement(
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout Cache
+    ) -> (size: CGSize, frames: [CGRect]) {
+        let width = proposal.width
+        if cache.width == width,
+           cache.subviewCount == subviews.count,
+           let result = cache.result {
+            return result
+        }
+        let result = arrange(proposal: proposal, subviews: subviews)
+        cache.width = width
+        cache.subviewCount = subviews.count
+        cache.result = result
+        return result
     }
 
     private func arrange(proposal: ProposedViewSize, subviews: Subviews) -> (size: CGSize, frames: [CGRect]) {

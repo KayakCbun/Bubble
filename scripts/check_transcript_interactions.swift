@@ -61,6 +61,16 @@ private enum TranscriptInteractionCheck {
             TranscriptFollowPolicy.followsRevisionChange(isBusy: true),
             "a live main turn still follows revision while streaming"
         )
+        var follow = TranscriptFollowState()
+        expect(follow.followsLatest, "a transcript starts pinned to the live edge")
+        follow.userNavigated(atEnd: false)
+        expect(!follow.followsLatest, "an upward user scroll immediately disables live follow")
+        expect(!follow.shouldFollowRevision(isBusy: true), "streaming cannot yank a history reader back to the end")
+        follow.userNavigated(atEnd: true)
+        expect(follow.followsLatest, "returning to the end re-arms live follow")
+        follow.userNavigated(atEnd: false)
+        follow.resumeAtEnd()
+        expect(follow.followsLatest, "sending a new user turn deliberately resumes live follow")
         let collapsed = TranscriptExpansionPolicy.renderKey(
             containerExpanded: false,
             expandedChildIDs: []

@@ -1,5 +1,11 @@
 import Foundation
 
+enum TranscriptVirtualizationLimits {
+    /// Enough room for hundreds of rich turns while the view layer keeps only
+    /// visible rows alive. This is a persistence guard, not a render window.
+    static let retainedItems = 4_000
+}
+
 struct TranscriptRenderSeed: Equatable, Sendable {
     enum Kind: Equatable, Sendable {
         case user

@@ -32,6 +32,29 @@ enum TranscriptFollowPolicy {
     }
 }
 
+struct TranscriptFollowState: Equatable {
+    private enum Mode: Equatable {
+        case followingEnd
+        case freeScrolling
+    }
+
+    private var mode: Mode = .followingEnd
+
+    var followsLatest: Bool { mode == .followingEnd }
+
+    mutating func userNavigated(atEnd: Bool) {
+        mode = atEnd ? .followingEnd : .freeScrolling
+    }
+
+    mutating func resumeAtEnd() {
+        mode = .followingEnd
+    }
+
+    func shouldFollowRevision(isBusy: Bool) -> Bool {
+        followsLatest && TranscriptFollowPolicy.followsRevisionChange(isBusy: isBusy)
+    }
+}
+
 enum TranscriptExpansionPolicy {
     static func renderKey(containerExpanded: Bool, expandedChildIDs: [String]) -> String {
         let children = expandedChildIDs.sorted().joined(separator: ",")

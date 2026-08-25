@@ -1117,7 +1117,7 @@ final class ChatStore {
     }
 
     var visibleItems: [ChatItem] {
-        Array(items.suffix(40)).filter { item in
+        items.filter { item in
             switch item.kind {
             case .assistant:
                 return !item.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -3274,8 +3274,8 @@ final class ChatStore {
            !OverlayRenderPolicy.shouldPersistStreamChunk(isBusy: isBusy, childBusy: childBusy) {
             return
         }
-        if items.count > 80 {
-            items = Array(items.suffix(80))
+        if items.count > TranscriptVirtualizationLimits.retainedItems {
+            items = Array(items.suffix(TranscriptVirtualizationLimits.retainedItems))
         }
         persistWork?.cancel()
         let write = DispatchWorkItem { [weak self] in
@@ -3290,7 +3290,7 @@ final class ChatStore {
     }
 
     private func writeTranscript() {
-        let stored = items.suffix(80).filter { item in
+        let stored = items.suffix(TranscriptVirtualizationLimits.retainedItems).filter { item in
             if item.kind == .assistant || item.kind == .thought {
                 return !item.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             }
@@ -3302,7 +3302,7 @@ final class ChatStore {
                 sessionId: sessionID,
                 selectedLeafId: Self.savedConversationLeaves()[sessionID],
                 items: Array(stored),
-                richItems: Array(richTranscriptRows.values.suffix(160))
+                richItems: Array(richTranscriptRows.values.suffix(TranscriptVirtualizationLimits.retainedItems))
             )
             let data = try JSONEncoder().encode(envelope)
             let sessionURL = Self.transcriptURL(sessionID: sessionID)

@@ -14,11 +14,19 @@ swiftc -O -parse-as-library \
   Sources/Bubble/ProseFormat.swift \
   Sources/Bubble/MarkdownFiles.swift \
   Sources/Bubble/OverlayLayoutPolicy.swift \
+  Sources/Bubble/OverlaySurface.swift \
   Sources/Bubble/WorkspaceTranscriptRenderPlan.swift \
   Sources/Bubble/TranscriptProse.swift \
   scripts/check_workspace_render_perf.swift \
   -o /tmp/bubble-check-workspace-render-perf
 /tmp/bubble-check-workspace-render-perf
+
+swiftc -O -parse-as-library \
+  Sources/Bubble/WorkspaceTranscriptRenderPlan.swift \
+  Sources/Bubble/TranscriptRenderPlan.swift \
+  scripts/check_transcript_render_plan.swift \
+  -o /tmp/bubble-check-transcript-render-plan
+/tmp/bubble-check-transcript-render-plan
 
 swiftc -parse-as-library Sources/Bubble/TranscriptStream.swift Sources/Bubble/ProseFormat.swift scripts/check_transcript_stream.swift -o /tmp/bubble-check-stream
 /tmp/bubble-check-stream

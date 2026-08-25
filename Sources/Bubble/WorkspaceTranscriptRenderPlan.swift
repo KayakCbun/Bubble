@@ -67,8 +67,9 @@ enum WorkspaceTranscriptChunker {
     private static func hasParagraphLocalSemantics(_ bytes: [UInt8]) -> Bool {
         let globalMarkers = [
             "```", "~~~", "flowchart", "sequencediagram", "classdiagram",
-            "statediagram", "erdiagram", "gitgraph", "xychart", "<table",
-            "<details", "<div", "<pre", "<script", "mermaid graph",
+            "statediagram", "erdiagram", "gitgraph", "xychart",
+            "graph td", "graph tb", "graph bt", "graph lr", "graph rl", "<table",
+            "<details", "<div", "<pre", "<script", "mermaid",
         ]
         if globalMarkers.contains(where: { containsASCII(bytes, $0) }) { return false }
 

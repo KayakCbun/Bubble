@@ -62,20 +62,6 @@ enum OverlayMetrics {
     }
 }
 
-enum OverlaySurface {
-    static var userFill: Color { Color.primary.opacity(0.045) }
-    static var userQueuedFill: Color { Color.primary.opacity(0.03) }
-    static var chipFill: Color { Color.primary.opacity(0.04) }
-    static var chipStroke: Color { Color.primary.opacity(0.10) }
-    static var hairline: Color { Color.primary.opacity(0.10) }
-    static var cardFill: Color { Color.primary.opacity(0.035) }
-    static var cardStroke: Color { Color.primary.opacity(0.06) }
-    static var conversationInk: Color { Color.primary.opacity(0.88) }
-    static let userRadius: CGFloat = 22
-    static let chipRadius: CGFloat = 7
-    static let rowSpacing: CGFloat = 22
-}
-
 struct OverlayView: View {
     @Bindable var store: ChatStore
     var onEscape: () -> Void
@@ -87,7 +73,7 @@ struct OverlayView: View {
     @State private var expandedToolGroups: Set<String> = []
     @State private var expandedTools: Set<UUID> = []
     @State private var expandedFileChanges: Set<String> = []
-    @State private var followLatest = true
+    @State private var followState = TranscriptFollowState()
     @State private var followQueued = false
     private var inputShape: RoundedRectangle {
         RoundedRectangle(cornerRadius: OverlayMetrics.cornerRadius, style: .continuous)
@@ -731,11 +717,7 @@ struct OverlayView: View {
             .background {
                 TranscriptScrollObserver { atEnd, userDriven in
                     guard userDriven else { return }
-                    if atEnd {
-                        followLatest = true
-                    } else if followLatest {
-                        followLatest = false
-                    }
+                    followState.userNavigated(atEnd: atEnd)
                 }
             }
             .transaction { transaction in
@@ -756,7 +738,7 @@ struct OverlayView: View {
                         ticks: ticks,
                         viewportHeight: transcriptHeight
                     ) { id in
-                        followLatest = false
+                        followState.userNavigated(atEnd: false)
                         OverlayPulse.shared.onNextFrame {
                             withAnimation(OverlayMotion.scroll) {
                                 proxy.scrollTo(id.uuidString, anchor: .top)
@@ -768,18 +750,18 @@ struct OverlayView: View {
             .onAppear { requestFollowLatest(proxy) }
             .onChange(of: store.items.count) { _, _ in
                 if store.items.last?.kind == .user {
-                    followLatest = true
+                    followState.resumeAtEnd()
                 }
                 requestFollowLatest(proxy)
             }
             .onChange(of: store.transcriptRevision) { _, _ in
-                if TranscriptFollowPolicy.followsRevisionChange(isBusy: store.isBusy) {
+                if followState.shouldFollowRevision(isBusy: store.isBusy) {
                     requestFollowLatest(proxy)
                 }
             }
             .onChange(of: store.branchDraft?.sourceItemID) { _, sourceID in
                 guard let sourceID else { return }
-                followLatest = false
+                followState.userNavigated(atEnd: false)
                 OverlayPulse.shared.onNextFrame {
                     withAnimation(OverlayMotion.scroll) {
                         proxy.scrollTo(sourceID.uuidString, anchor: .center)
@@ -790,7 +772,7 @@ struct OverlayView: View {
                 requestFollowLatest(proxy)
             }
             .onChange(of: composerHeight) { _, _ in
-                if followLatest {
+                if followState.followsLatest {
                     requestFollowLatest(proxy)
                 }
             }
@@ -1635,11 +1617,11 @@ struct OverlayView: View {
     }
 
     private func requestFollowLatest(_ proxy: ScrollViewProxy) {
-        guard followLatest, !followQueued else { return }
+        guard followState.followsLatest, !followQueued else { return }
         followQueued = true
         OverlayPulse.shared.onNextFrame {
             followQueued = false
-            guard followLatest else { return }
+            guard followState.followsLatest else { return }
             var transaction = Transaction()
             transaction.disablesAnimations = true
             withTransaction(transaction) {
@@ -1722,7 +1704,7 @@ struct OverlayView: View {
                     Text(text)
                         .font(OverlayMetrics.bodyFont)
                         .foregroundStyle(OverlaySurface.conversationInk)
-                        .lineSpacing(5)
+                        .lineSpacing(OverlaySurface.proseLineSpacing)
                         .multilineTextAlignment(.leading)
                         .textSelection(.enabled)
                 }
@@ -1782,7 +1764,7 @@ struct OverlayView: View {
                     Text(message.text)
                         .font(OverlayMetrics.bodyFont)
                         .foregroundStyle(OverlaySurface.conversationInk)
-                        .lineSpacing(5)
+                        .lineSpacing(OverlaySurface.proseLineSpacing)
                         .multilineTextAlignment(.leading)
                 }
                 HStack(spacing: 10) {
@@ -1959,7 +1941,7 @@ struct OverlayView: View {
             if !body.isEmpty {
                 Text(body)
                     .font(.system(size: 12.5, weight: .regular))
-                    .lineSpacing(4)
+                    .lineSpacing(OverlaySurface.proseLineSpacing)
                     .foregroundStyle(.secondary.opacity(0.88))
                     .textSelection(.enabled)
                     .padding(.leading, 18)
@@ -2019,7 +2001,7 @@ struct OverlayView: View {
                     Text(item.text.isEmpty && live ? "…" : item.text)
                         .font(.system(size: 12.5, weight: .regular))
                         .italic()
-                        .lineSpacing(3)
+                        .lineSpacing(OverlaySurface.proseLineSpacing)
                         .foregroundStyle(.secondary.opacity(0.88))
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .textSelection(.enabled)
@@ -2662,6 +2644,13 @@ private struct RowRenderKey: Equatable {
     var expansionKey: String
 }
 
+private struct MainTranscriptRenderKey: Equatable {
+    var id: String
+    var source: RowRenderKey
+    var text: String
+    var copyText: String?
+}
+
 private struct WindowDragArea: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView {
         ComposerDragView()
@@ -2750,6 +2739,32 @@ private enum TranscriptRow: Identifiable {
         case .fileChanges:
             false
         }
+    }
+
+    var sourceItemIDs: Set<String> {
+        switch self {
+        case .message(let item), .tool(let item):
+            return [item.id.uuidString]
+        case .collapsedTools(_, let items):
+            return Set(items.map { $0.id.uuidString })
+        case .fileChanges:
+            return []
+        }
+    }
+}
+
+private struct MainTranscriptRenderRow: Identifiable {
+    var unit: TranscriptRenderUnit
+    var source: TranscriptRow
+
+    var id: String { unit.id }
+    var text: String { unit.text }
+    var copyText: String? { unit.copyText }
+    var isContinuation: Bool { unit.isContinuation }
+    var isAfterBranchPoint: Bool { unit.isAfterBranchPoint }
+    var startsAfterBranchPoint: Bool { unit.startsAfterBranchPoint }
+    var isAssistantChunk: Bool {
+        unit.kind == .assistant && (unit.id != source.id || unit.copyText != nil)
     }
 }
 
@@ -3419,9 +3434,107 @@ struct HeightPreferenceKey: PreferenceKey {
     }
 }
 
-private struct TranscriptContentHeightKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
+private struct TranscriptScrollObserver: NSViewRepresentable {
+    var onChange: (_ atEnd: Bool, _ userDriven: Bool) -> Void
+
+    func makeNSView(context: Context) -> TranscriptScrollProbe {
+        let view = TranscriptScrollProbe()
+        view.onChange = onChange
+        return view
+    }
+
+    func updateNSView(_ view: TranscriptScrollProbe, context: Context) {
+        view.onChange = onChange
+        view.attachWhenReady()
+    }
+}
+
+private final class TranscriptScrollProbe: NSView {
+    var onChange: ((_ atEnd: Bool, _ userDriven: Bool) -> Void)?
+
+    private weak var observedScrollView: NSScrollView?
+    private var boundsObserver: NSObjectProtocol?
+    private var eventMonitor: Any?
+    private var userEventDeadline: TimeInterval = 0
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        attachWhenReady()
+    }
+
+    override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview()
+        attachWhenReady()
+    }
+
+    deinit {
+        detach()
+    }
+
+    func attachWhenReady() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self,
+                  let scrollView = self.enclosingScrollView else { return }
+            if self.observedScrollView === scrollView { return }
+            self.detach()
+            self.observedScrollView = scrollView
+            scrollView.contentView.postsBoundsChangedNotifications = true
+            self.boundsObserver = NotificationCenter.default.addObserver(
+                forName: NSView.boundsDidChangeNotification,
+                object: scrollView.contentView,
+                queue: .main
+            ) { [weak self] _ in
+                self?.reportPosition()
+            }
+            self.eventMonitor = NSEvent.addLocalMonitorForEvents(
+                matching: [.scrollWheel, .leftMouseDragged, .keyDown]
+            ) { [weak self] event in
+                self?.recordUserEvent(event)
+                return event
+            }
+            self.reportPosition()
+        }
+    }
+
+    private func detach() {
+        if let boundsObserver {
+            NotificationCenter.default.removeObserver(boundsObserver)
+            self.boundsObserver = nil
+        }
+        if let eventMonitor {
+            NSEvent.removeMonitor(eventMonitor)
+            self.eventMonitor = nil
+        }
+        observedScrollView = nil
+    }
+
+    private func recordUserEvent(_ event: NSEvent) {
+        guard let scrollView = observedScrollView,
+              event.window === scrollView.window else { return }
+        let frameInWindow = scrollView.convert(scrollView.bounds, to: nil)
+        guard frameInWindow.contains(event.locationInWindow) else { return }
+        if event.type == .keyDown {
+            let navigationKeys: Set<UInt16> = [115, 116, 121, 125, 126]
+            guard navigationKeys.contains(event.keyCode) else { return }
+        }
+        userEventDeadline = ProcessInfo.processInfo.systemUptime + 0.35
+        DispatchQueue.main.async { [weak self] in self?.reportPosition() }
+    }
+
+    private func reportPosition() {
+        guard let scrollView = observedScrollView,
+              let document = scrollView.documentView else { return }
+        let visible = scrollView.contentView.bounds
+        let distanceToEnd: CGFloat
+        if document.isFlipped {
+            distanceToEnd = document.bounds.maxY - visible.maxY
+        } else {
+            distanceToEnd = visible.minY - document.bounds.minY
+        }
+        let atEnd = distanceToEnd <= 36
+        let userDriven = ProcessInfo.processInfo.systemUptime <= userEventDeadline
+        onChange?(atEnd, userDriven)
     }
 }
