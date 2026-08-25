@@ -15,34 +15,46 @@ struct MessageBody: View {
     /// unless the slice is a table or a leading fence MarkdownUI already owns.
     var preferClassicMarkdown: Bool = false
 
+    @ViewBuilder
     var body: some View {
-        LazyVStack(alignment: .leading, spacing: 16) {
-            ForEach(Array(MessagePart.displayParts(text).enumerated()), id: \.offset) { _, part in
-                switch part {
-                case .markdown(let markdown):
-                    if preferClassicMarkdown || PathChipStyle.needsClassicMarkdown(markdown) {
-                        Markdown(markdown)
-                            .markdownTheme(.overlay)
-                            .markdownTextStyle(\.text) {
-                                FontSize(OverlayMetrics.fontSize)
-                                FontWeight(.regular)
-                            }
-                            .font(OverlayMetrics.bodyFont)
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    } else {
-                        ProseDocument(text: markdown)
-                    }
-                case .code(let language, let body):
-                    CodeBlockView(
-                        language: language,
-                        source: body,
-                        streaming: streaming,
-                        virtualizedChunk: virtualizedChunk
-                    )
-                case .mermaid(let source):
-                    MermaidView(source: MessagePart.normalizeMermaid(source), streaming: streaming)
+        if preferClassicMarkdown {
+            LazyVStack(alignment: .leading, spacing: 16) {
+                messageParts
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 16) {
+                messageParts
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var messageParts: some View {
+        ForEach(Array(MessagePart.displayParts(text).enumerated()), id: \.offset) { _, part in
+            switch part {
+            case .markdown(let markdown):
+                if preferClassicMarkdown || PathChipStyle.needsClassicMarkdown(markdown) {
+                    Markdown(markdown)
+                        .markdownTheme(.overlay)
+                        .markdownTextStyle(\.text) {
+                            FontSize(OverlayMetrics.fontSize)
+                            FontWeight(.regular)
+                        }
+                        .font(OverlayMetrics.bodyFont)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    ProseDocument(text: markdown)
                 }
+            case .code(let language, let body):
+                CodeBlockView(
+                    language: language,
+                    source: body,
+                    streaming: streaming,
+                    virtualizedChunk: virtualizedChunk
+                )
+            case .mermaid(let source):
+                MermaidView(source: MessagePart.normalizeMermaid(source), streaming: streaming)
             }
         }
     }
@@ -790,16 +802,7 @@ struct CodeBlockView: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 } else if wrap {
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(Array(CodeDisplayChunker.chunks(source).enumerated()), id: \.offset) { _, chunk in
-                            Text(chunk.hasSuffix("\n") ? String(chunk.dropLast()) : chunk)
-                                .font(.system(size: OverlayMetrics.codeSize, weight: .regular, design: .monospaced))
-                                .foregroundStyle(OverlayMetrics.ink.opacity(0.88))
-                                .textSelection(.enabled)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
+                    wrappedCode
                 } else {
                     ScrollView(.horizontal, showsIndicators: false) {
                         Text(source)
@@ -820,6 +823,32 @@ struct CodeBlockView: View {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .stroke(OverlaySurface.chipStroke, lineWidth: 0.5)
         )
+    }
+
+    @ViewBuilder
+    private var wrappedCode: some View {
+        let chunks = CodeDisplayChunker.chunks(source)
+        if source.count > CodeDisplayChunker.targetCharacters {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                codeChunks(chunks)
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 0) {
+                codeChunks(chunks)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func codeChunks(_ chunks: [String]) -> some View {
+        ForEach(Array(chunks.enumerated()), id: \.offset) { _, chunk in
+            Text(chunk.hasSuffix("\n") ? String(chunk.dropLast()) : chunk)
+                .font(.system(size: OverlayMetrics.codeSize, weight: .regular, design: .monospaced))
+                .foregroundStyle(OverlayMetrics.ink.opacity(0.88))
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     private var displayLanguage: String {

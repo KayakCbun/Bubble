@@ -57,13 +57,13 @@ struct TranscriptScrollObserver: NSViewRepresentable {
     func makeNSView(context: Context) -> TranscriptScrollProbe {
         let view = TranscriptScrollProbe()
         view.onChange = onChange
-        view.maintainsVisibleContent = maintainsVisibleContent
+        view.setMaintainsVisibleContent(maintainsVisibleContent)
         return view
     }
 
     func updateNSView(_ view: TranscriptScrollProbe, context: Context) {
         view.onChange = onChange
-        view.maintainsVisibleContent = maintainsVisibleContent
+        view.setMaintainsVisibleContent(maintainsVisibleContent)
         view.attachWhenReady()
     }
 }
@@ -92,9 +92,13 @@ final class TranscriptScrollProbe: NSView {
     private var rowAnchorObserver: NSObjectProtocol?
     private var eventMonitor: Any?
     private var userEventDeadline: TimeInterval = 0
+    private var userEventGeneration = 0
     private var visibleAnchor: (id: String, offset: CGFloat)?
     private var correctingAnchor = false
     private let diagnosticsMode = ProcessInfo.processInfo.environment["BUBBLE_SCROLL_DIAGNOSTICS"]
+    private let diagnosticScrollStep = CGFloat(
+        Double(ProcessInfo.processInfo.environment["BUBBLE_SCROLL_DIAGNOSTIC_STEP"] ?? "") ?? 96
+    )
     private var diagnosedUserScroll = false
     private var diagnosedAnchorRestore = false
     private var rowAnchors: [ObjectIdentifier: WeakTranscriptRowAnchor] = [:]
@@ -106,9 +110,20 @@ final class TranscriptScrollProbe: NSView {
     private var diagnosticDirection: CGFloat = -1
     private var diagnosticLastTick: TimeInterval?
     private var diagnosticFrameIntervals: [TimeInterval] = []
+    private var diagnosticPeakAnchorCount = 0
     private var diagnosticDisplayLink: CADisplayLink?
+    private var diagnosticMountTimer: Timer?
+    private var diagnosticMountStep = 0
+    private var diagnosticMountAwaitingContent = false
+    private var diagnosticBlankSamples = 0
+    private var diagnosticLongestBlankStreak = 0
+    private var diagnosticCurrentBlankStreak = 0
 
     private var diagnosticsEnabled: Bool { diagnosticsMode != nil }
+
+    func setMaintainsVisibleContent(_ enabled: Bool) {
+        maintainsVisibleContent = enabled || diagnosticsEnabled
+    }
 
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
@@ -175,6 +190,8 @@ final class TranscriptScrollProbe: NSView {
             }
             if self.diagnosticsMode == "drive" {
                 self.startDiagnosticDrive()
+            } else if self.diagnosticsMode == "mount-audit" {
+                self.startMountAudit()
             }
         }
     }
@@ -204,8 +221,11 @@ final class TranscriptScrollProbe: NSView {
         anchorCaptureQueued = false
         anchorRestoreQueued = false
         anchorIndexRebuildQueued = false
+        userEventGeneration += 1
         diagnosticDisplayLink?.invalidate()
         diagnosticDisplayLink = nil
+        diagnosticMountTimer?.invalidate()
+        diagnosticMountTimer = nil
     }
 
     private func recordUserEvent(_ event: NSEvent) {
@@ -219,7 +239,7 @@ final class TranscriptScrollProbe: NSView {
             let frameInWindow = scrollView.convert(scrollView.bounds, to: nil)
             guard frameInWindow.contains(event.locationInWindow) else { return }
         }
-        userEventDeadline = ProcessInfo.processInfo.systemUptime + Self.userEventWindow
+        deferAnchorMaintenanceUntilUserSettles()
         if diagnosticsEnabled, !diagnosedUserScroll {
             diagnosedUserScroll = true
             OverlayLog.write("transcript physical scroll observed")
@@ -229,8 +249,24 @@ final class TranscriptScrollProbe: NSView {
 
     private func boundsChanged() {
         reportPosition()
-        if maintainsVisibleContent, !correctingAnchor {
+        if maintainsVisibleContent,
+           !correctingAnchor,
+           CACurrentMediaTime() > userEventDeadline {
             scheduleVisibleAnchorCapture()
+        }
+    }
+
+    private func deferAnchorMaintenanceUntilUserSettles() {
+        visibleAnchor = nil
+        userEventDeadline = CACurrentMediaTime() + Self.userEventWindow
+        userEventGeneration += 1
+        let generation = userEventGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.userEventWindow) { [weak self] in
+            guard let self,
+                  generation == self.userEventGeneration,
+                  CACurrentMediaTime() >= self.userEventDeadline else { return }
+            self.rebuildAnchorIndex()
+            self.captureVisibleAnchor()
         }
     }
 
@@ -246,6 +282,13 @@ final class TranscriptScrollProbe: NSView {
 
     private func documentFrameChanged() {
         guard maintainsVisibleContent, visibleAnchor != nil else { return }
+        // Lazy row realization changes the document height while a wheel or
+        // drag is still moving. Correcting the viewport in that window makes
+        // AppKit lay out twice and visibly fights the gesture. Capture a fresh
+        // anchor after the gesture settles; later size changes can restore it.
+        if CACurrentMediaTime() <= userEventDeadline {
+            return
+        }
         guard !anchorRestoreQueued else { return }
         anchorRestoreQueued = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 120.0) { [weak self] in
@@ -264,7 +307,7 @@ final class TranscriptScrollProbe: NSView {
             ? document.bounds.maxY - visible.maxY
             : visible.minY - document.bounds.minY
         let atEnd = distanceToEnd <= Self.endThreshold
-        let userDriven = ProcessInfo.processInfo.systemUptime <= userEventDeadline
+        let userDriven = CACurrentMediaTime() <= userEventDeadline
         onChange?(atEnd, userDriven)
     }
 
@@ -328,6 +371,7 @@ final class TranscriptScrollProbe: NSView {
             return (anchor.id, frame, document.isFlipped ? frame.minY : frame.maxY)
         }
         .sorted { $0.frame.minY < $1.frame.minY }
+        diagnosticPeakAnchorCount = max(diagnosticPeakAnchorCount, anchorIndex.count)
     }
 
     private func visibleAnchorCandidates(in visible: CGRect) -> ArraySlice<(id: String, frame: CGRect, position: CGFloat)> {
@@ -355,7 +399,9 @@ final class TranscriptScrollProbe: NSView {
         } else {
             rowAnchors.removeValue(forKey: key)
         }
-        scheduleAnchorIndexRebuild()
+        if CACurrentMediaTime() > userEventDeadline {
+            scheduleAnchorIndexRebuild()
+        }
     }
 
     private func scheduleAnchorIndexRebuild() {
@@ -382,14 +428,143 @@ final class TranscriptScrollProbe: NSView {
     private func startDiagnosticDrive() {
         guard diagnosticFramesRemaining == 0,
               let window else { return }
+        diagnosticFramesRemaining = -1
+        NSRunningApplication.current.activate()
+        window.makeKeyAndOrderFront(nil)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self, weak window] in
+            guard let self, let window else { return }
+            self.beginDiagnosticDrive(in: window)
+        }
+    }
+
+    private func beginDiagnosticDrive(in window: NSWindow) {
         maintainsVisibleContent = true
         diagnosticFramesRemaining = 720
         diagnosticFrameIntervals.removeAll(keepingCapacity: true)
         diagnosticLastTick = nil
+        diagnosticPeakAnchorCount = anchorIndex.count
+        diagnosticBlankSamples = 0
+        diagnosticLongestBlankStreak = 0
+        diagnosticCurrentBlankStreak = 0
+        visibleAnchor = nil
+        userEventDeadline = CACurrentMediaTime() + 120
         let link = window.displayLink(target: self, selector: #selector(diagnosticTick(_:)))
         link.preferredFrameRateRange = OverlayMotion.frameRate
         link.add(to: .main, forMode: .common)
         diagnosticDisplayLink = link
+    }
+
+    private func startMountAudit() {
+        guard diagnosticMountTimer == nil else { return }
+        maintainsVisibleContent = true
+        diagnosticMountStep = 0
+        diagnosticMountAwaitingContent = false
+        diagnosticPeakAnchorCount = anchorIndex.count
+        diagnosticBlankSamples = 0
+        diagnosticLongestBlankStreak = 0
+        diagnosticCurrentBlankStreak = 0
+        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] timer in
+            self?.mountAuditTick(timer)
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        diagnosticMountTimer = timer
+    }
+
+    private func mountAuditTick(_ timer: Timer) {
+        guard let scrollView = observedScrollView,
+              let document = observedDocument else {
+            timer.invalidate()
+            diagnosticMountTimer = nil
+            return
+        }
+        let sampleCount = 600
+        if diagnosticMountStep >= sampleCount {
+            timer.invalidate()
+            diagnosticMountTimer = nil
+            let visible = scrollView.contentView.bounds
+            let maximumY = max(document.bounds.minY, document.bounds.maxY - visible.height)
+            scrollView.contentView.scroll(to: NSPoint(x: visible.minX, y: document.bounds.minY + (maximumY - document.bounds.minY) * 0.5))
+            scrollView.reflectScrolledClipView(scrollView.contentView)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                self?.finishMountAudit(sampleCount: sampleCount)
+            }
+            return
+        }
+        if !diagnosticMountAwaitingContent {
+            let visible = scrollView.contentView.bounds
+            let maximumY = max(document.bounds.minY, document.bounds.maxY - visible.height)
+            let progress = CGFloat(diagnosticMountStep) / CGFloat(max(1, sampleCount - 1))
+            let nextY = document.bounds.minY + (maximumY - document.bounds.minY) * progress
+            scrollView.contentView.scroll(to: NSPoint(x: visible.minX, y: nextY))
+            scrollView.reflectScrolledClipView(scrollView.contentView)
+            diagnosticMountAwaitingContent = true
+        } else {
+            // SwiftUI may insert a lazy row before its AppKit move notification
+            // is delivered. Audit the actual mounted hierarchy so a delayed
+            // registration cannot be mistaken for a blank viewport.
+            registerExistingAnchors(in: document)
+            rebuildAnchorIndex()
+            let visible = scrollView.contentView.bounds
+            if visibleAnchorCandidates(in: visible).isEmpty {
+                diagnosticBlankSamples += 1
+                diagnosticCurrentBlankStreak += 1
+                diagnosticLongestBlankStreak = max(
+                    diagnosticLongestBlankStreak,
+                    diagnosticCurrentBlankStreak
+                )
+            } else {
+                diagnosticCurrentBlankStreak = 0
+                diagnosticMountAwaitingContent = false
+                diagnosticMountStep += 1
+            }
+        }
+    }
+
+    private func finishMountAudit(sampleCount: Int) {
+        guard let scrollView = observedScrollView,
+              let document = observedDocument else { return }
+        rebuildAnchorIndex()
+        guard let anchor = anchorIndex.min(by: {
+            abs($0.position - visibleEdge(scrollView.contentView.bounds, document: document))
+                < abs($1.position - visibleEdge(scrollView.contentView.bounds, document: document))
+        }) else {
+            logMountAudit(sampleCount: sampleCount, document: document, anchorError: .infinity)
+            return
+        }
+        let visible = scrollView.contentView.bounds
+        let maximumY = max(document.bounds.minY, document.bounds.maxY - visible.height)
+        let alignedY = document.isFlipped ? anchor.position - 100 : anchor.position - visible.height + 100
+        scrollView.contentView.scroll(
+            to: NSPoint(x: visible.minX, y: min(maximumY, max(document.bounds.minY, alignedY)))
+        )
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        let alignedVisible = scrollView.contentView.bounds
+        let capturedOffset = anchor.position - visibleEdge(alignedVisible, document: document)
+        visibleAnchor = (anchor.id, capturedOffset)
+        let displacedY = min(maximumY, alignedVisible.minY + 80)
+        scrollView.contentView.scroll(to: NSPoint(x: alignedVisible.minX, y: displacedY))
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        restoreVisibleAnchor()
+        let restoredVisible = scrollView.contentView.bounds
+        let anchorError = abs(
+            (anchor.position - visibleEdge(restoredVisible, document: document)) - capturedOffset
+        )
+        logMountAudit(sampleCount: sampleCount, document: document, anchorError: anchorError)
+    }
+
+    private func logMountAudit(sampleCount: Int, document: NSView, anchorError: CGFloat) {
+        OverlayLog.write(
+            String(
+                format: "transcript mount audit samples=%d anchors=%d peakAnchors=%d blankSamples=%d longestBlankStreak=%d documentHeight=%.0f anchorError=%.2f",
+                sampleCount,
+                anchorIndex.count,
+                diagnosticPeakAnchorCount,
+                diagnosticBlankSamples,
+                diagnosticLongestBlankStreak,
+                document.bounds.height,
+                anchorError
+            )
+        )
     }
 
     @objc private func diagnosticTick(_ link: CADisplayLink) {
@@ -400,19 +575,33 @@ final class TranscriptScrollProbe: NSView {
             diagnosticDisplayLink = nil
             return
         }
-        let now = ProcessInfo.processInfo.systemUptime
+        let now = CACurrentMediaTime()
         if let last = diagnosticLastTick {
             diagnosticFrameIntervals.append(now - last)
+            let visible = scrollView.contentView.bounds
+            if mountedAnchorIntersects(visible, in: document) {
+                diagnosticCurrentBlankStreak = 0
+            } else {
+                diagnosticBlankSamples += 1
+                diagnosticCurrentBlankStreak += 1
+                diagnosticLongestBlankStreak = max(
+                    diagnosticLongestBlankStreak,
+                    diagnosticCurrentBlankStreak
+                )
+            }
         }
         diagnosticLastTick = now
 
         let visible = scrollView.contentView.bounds
         let minimumY = document.bounds.minY
         let maximumY = max(minimumY, document.bounds.maxY - visible.height)
-        var nextY = visible.minY + diagnosticDirection * 180
+        var nextY = visible.minY + diagnosticDirection * diagnosticScrollStep
         if nextY <= minimumY || nextY >= maximumY {
             diagnosticDirection *= -1
-            nextY = min(maximumY, max(minimumY, visible.minY + diagnosticDirection * 180))
+            nextY = min(
+                maximumY,
+                max(minimumY, visible.minY + diagnosticDirection * diagnosticScrollStep)
+            )
         }
         scrollView.contentView.scroll(to: NSPoint(x: visible.minX, y: nextY))
         scrollView.reflectScrolledClipView(scrollView.contentView)
@@ -421,20 +610,39 @@ final class TranscriptScrollProbe: NSView {
         if diagnosticFramesRemaining == 0 {
             let sorted = diagnosticFrameIntervals.sorted()
             let p95Index = min(max(0, Int(Double(sorted.count) * 0.95)), max(0, sorted.count - 1))
+            let p99Index = min(max(0, Int(Double(sorted.count) * 0.99)), max(0, sorted.count - 1))
             let p95 = sorted.isEmpty ? 0 : sorted[p95Index] * 1_000
+            let p99 = sorted.isEmpty ? 0 : sorted[p99Index] * 1_000
             let maximum = (sorted.last ?? 0) * 1_000
             OverlayLog.write(
                 String(
-                    format: "transcript scroll benchmark frames=%d p95=%.2fms max=%.2fms anchors=%d",
+                    format: "transcript scroll benchmark frames=%d step=%.0f p95=%.2fms p99=%.2fms max=%.2fms anchors=%d peakAnchors=%d blankFrames=%d longestBlankStreak=%d",
                     diagnosticFrameIntervals.count,
+                    diagnosticScrollStep,
                     p95,
+                    p99,
                     maximum,
-                    anchorIndex.count
+                    anchorIndex.count,
+                    diagnosticPeakAnchorCount,
+                    diagnosticBlankSamples,
+                    diagnosticLongestBlankStreak
                 )
             )
+            userEventDeadline = 0
+            rebuildAnchorIndex()
+            captureVisibleAnchor()
             link.invalidate()
             diagnosticDisplayLink = nil
             return
+        }
+    }
+
+    private func mountedAnchorIntersects(_ visible: CGRect, in document: NSView) -> Bool {
+        rowAnchors.values.contains { weakAnchor in
+            guard let anchor = weakAnchor.value,
+                  anchor.window != nil,
+                  anchor.enclosingScrollView === observedScrollView else { return false }
+            return anchor.convert(anchor.bounds, to: document).intersects(visible)
         }
     }
 }

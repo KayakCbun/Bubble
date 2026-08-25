@@ -640,32 +640,68 @@ struct ProseDocument: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    @ViewBuilder
     private func inlineFlow(_ runs: [InlineRun], font: Font = OverlayMetrics.bodyFont) -> some View {
-        FlowWidthReader { width in
-            FlowLayout(horizontalSpacing: 5, verticalSpacing: OverlaySurface.proseLineSpacing) {
-                ForEach(Array(Self.breakRuns(runs, width: width).enumerated()), id: \.offset) { _, run in
-                    switch run {
-                    case .text(let text):
-                        Text(inlineMarkdown(text))
-                            .font(font)
-                            .foregroundStyle(OverlaySurface.conversationInk)
-                            .lineLimit(1)
-                            .fixedSize(horizontal: true, vertical: true)
-                            .textSelection(.enabled)
-                    case .strong(let text):
-                        Text(inlineMarkdown(text))
-                            .font(font)
-                            .fontWeight(.semibold)
-                            .foregroundStyle(OverlaySurface.conversationInk)
-                            .lineLimit(1)
-                            .fixedSize(horizontal: true, vertical: true)
-                            .textSelection(.enabled)
-                    case .chip(let text, let kind):
-                        InlineChip(text: text, kind: kind)
+        if InlineRun.usesNativeTextLayout(runs) {
+            Text(Self.nativeAttributedText(runs, font: font))
+                .font(font)
+                .foregroundStyle(OverlaySurface.conversationInk)
+                .lineSpacing(OverlaySurface.proseLineSpacing)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+        } else {
+            FlowWidthReader { width in
+                FlowLayout(horizontalSpacing: 5, verticalSpacing: OverlaySurface.proseLineSpacing) {
+                    ForEach(Array(Self.breakRuns(runs, width: width).enumerated()), id: \.offset) { _, run in
+                        switch run {
+                        case .text(let text):
+                            Text(inlineMarkdown(text))
+                                .font(font)
+                                .foregroundStyle(OverlaySurface.conversationInk)
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: true)
+                                .textSelection(.enabled)
+                        case .strong(let text):
+                            Text(inlineMarkdown(text))
+                                .font(font)
+                                .fontWeight(.semibold)
+                                .foregroundStyle(OverlaySurface.conversationInk)
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: true)
+                                .textSelection(.enabled)
+                        case .chip(let text, let kind):
+                            InlineChip(text: text, kind: kind)
+                        }
                     }
                 }
             }
         }
+    }
+
+    private static func nativeAttributedText(_ runs: [InlineRun], font: Font) -> AttributedString {
+        var result = AttributedString()
+        for run in runs {
+            let text: String
+            switch run {
+            case .text(let value), .strong(let value), .chip(let value, _):
+                text = value
+            }
+            var part = AttributedString(text)
+            part.foregroundColor = OverlaySurface.conversationInk
+            switch run {
+            case .text:
+                break
+            case .strong:
+                part.font = font.weight(.semibold)
+            case .chip(_, .code):
+                part.font = .system(size: OverlayMetrics.chipSize, weight: .regular, design: .monospaced)
+                part.backgroundColor = OverlaySurface.chipFill
+            case .chip:
+                break
+            }
+            result.append(part)
+        }
+        return result
     }
 
     private static func breakRuns(_ runs: [InlineRun], width: CGFloat) -> [InlineRun] {

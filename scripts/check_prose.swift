@@ -19,6 +19,7 @@ struct ProseCheck {
 
     static func main() {
         testCodeTokens()
+        testNativeTextLayoutRouting()
         testWallReflow()
         testChecklistReflow()
         testCodeSpanProtected()
@@ -28,6 +29,24 @@ struct ProseCheck {
         testTableReflow()
         testCodeDisplayChunks()
         print("PASS: prose reflow and code tokens")
+    }
+
+    static func testNativeTextLayoutRouting() {
+        let ordinary: [InlineRun] = [.text("Plain "), .strong("strong"), .chip("inline_code", .code)]
+        expect(
+            InlineRun.usesNativeTextLayout(ordinary),
+            "ordinary prose and non-actionable code use one native text layout"
+        )
+        let path: [InlineRun] = [.text("Open "), .chip("/Users/example/Project/File.swift", .file("swift"))]
+        expect(
+            !InlineRun.usesNativeTextLayout(path),
+            "actionable path chips keep the interactive flow layout"
+        )
+        let url: [InlineRun] = [.text("Visit "), .chip("https://example.com", .url)]
+        expect(
+            !InlineRun.usesNativeTextLayout(url),
+            "actionable URL chips keep the interactive flow layout"
+        )
     }
 
     static func testCodeDisplayChunks() {

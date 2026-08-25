@@ -82,6 +82,13 @@ enum InlineRun: Equatable {
             return self
         }
     }
+
+    static func usesNativeTextLayout(_ runs: [InlineRun]) -> Bool {
+        runs.allSatisfy { run in
+            guard case .chip(_, let kind) = run else { return true }
+            return kind == .code
+        }
+    }
 }
 
 enum MarkdownEmphasis {

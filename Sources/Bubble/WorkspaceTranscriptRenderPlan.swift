@@ -1,7 +1,11 @@
 import Foundation
 
 enum WorkspaceTranscriptChunker {
-    static let targetBytes = 2_100
+    /// Keep a newly realized text row cheap enough to lay out inside one
+    /// high-refresh display interval. The outer transcript virtualizes these
+    /// stable units, so smaller rows trade a little planning work for much
+    /// lower scroll hitch latency.
+    static let targetBytes = 700
 
     private static let cache: NSCache<NSString, WorkspaceTextChunksBox> = {
         let cache = NSCache<NSString, WorkspaceTextChunksBox>()
