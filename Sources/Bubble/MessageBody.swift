@@ -443,7 +443,7 @@ enum MessagePart {
         }
 
         func flushTable() {
-            let rowsPerPart = 80
+            let rowsPerPart = 20
             if table.count > rowsPerPart + 2,
                table.count >= 2,
                isSeparatorLine(table[1]) {

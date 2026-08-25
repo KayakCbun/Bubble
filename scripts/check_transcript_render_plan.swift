@@ -101,6 +101,15 @@ private enum TranscriptRenderPlanCheck {
         let tableChunks = WorkspaceTranscriptChunker.chunks(giantTable, identity: "giant-table")
         expect(tableChunks.count > 20, "a giant GFM table virtualizes into repeated-header row groups")
         expect(tableChunks.allSatisfy { $0.hasPrefix("| A | B |\n|---|---|\n") }, "every virtual table row preserves its header")
+        let mixedTable = "Summary before the table.\n\n" + giantTable + "\n\nConclusion after the table."
+        let mixedTableChunks = WorkspaceTranscriptChunker.chunks(mixedTable, identity: "mixed-table")
+        expect(mixedTableChunks.count > tableChunks.count, "a large table embedded in prose still virtualizes")
+        expect(mixedTableChunks.first == "Summary before the table.", "mixed-table prefix keeps its prose semantics")
+        expect(mixedTableChunks.last == "Conclusion after the table.", "mixed-table suffix keeps its prose semantics")
+        expect(
+            mixedTableChunks.dropFirst().dropLast().allSatisfy { $0.hasPrefix("| A | B |\n|---|---|\n") },
+            "every mixed-table virtual row repeats the table header"
+        )
         let documentScoped = [
             Array(repeating: "sequenceDiagram\nA->>B: hello", count: 120).joined(separator: "\n"),
         ]
@@ -169,6 +178,26 @@ private enum TranscriptRenderPlanCheck {
             "table stream growth preserves every existing row identity"
         )
         expect(tableMilliseconds < 20, "100k+ table stream planning must stay near one frame, got \(tableMilliseconds)ms")
+        let mixedTablePlanner = TranscriptRenderPlanner()
+        let mixedTableSeed = TranscriptRenderSeed(id: "mixed-table", kind: .assistant, text: mixedTable)
+        let mixedTableBefore = mixedTablePlanner.plan(
+            seeds: [mixedTableSeed],
+            branchSourceID: nil,
+            streamingSeedIDs: ["mixed-table"]
+        )
+        var grownMixedTableSeed = mixedTableSeed
+        grownMixedTableSeed.text = "Summary before the table.\n\n" + giantTable
+            + "\n| live | tail |\n\nConclusion after the table."
+        let mixedTableAfter = mixedTablePlanner.plan(
+            seeds: [grownMixedTableSeed],
+            branchSourceID: nil,
+            streamingSeedIDs: ["mixed-table"]
+        )
+        expect(
+            Array(mixedTableAfter.units.map(\.id).prefix(mixedTableBefore.units.count - 2))
+                == Array(mixedTableBefore.units.map(\.id).prefix(mixedTableBefore.units.count - 2)),
+            "mixed-table growth preserves completed prefix row identities"
+        )
         _ = planner.plan(seeds: seeds, branchSourceID: nil, streamingSeedIDs: [])
         let warmStart = ContinuousClock.now
         var checksum = 0

@@ -78,8 +78,8 @@ enum OverlayRenderPolicy {
 }
 
 enum ThoughtDisplayPolicy {
-    static let liveTailCharacters = 6_000
-    static let completedChunkCharacters = 6_000
+    static let liveTailCharacters = 2_000
+    static let completedChunkCharacters = 2_000
 
     static func isTailTruncated(_ text: String) -> Bool {
         text.count > liveTailCharacters

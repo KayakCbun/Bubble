@@ -46,7 +46,7 @@ enum WorkspaceTranscriptChunker {
         if containsASCII(bytes, "```") || containsASCII(bytes, "~~~") {
             return fencedCodeChunks(text, target: target) ?? [text]
         }
-        if let tableChunks = gfmTableChunks(text), tableChunks.count > 1 {
+        if let tableChunks = mixedGFMTableChunks(text, target: target), tableChunks.count > 1 {
             return tableChunks
         }
         guard hasParagraphLocalSemantics(bytes) else { return [text] }
@@ -71,29 +71,55 @@ enum WorkspaceTranscriptChunker {
         return chunks.filter { !$0.isEmpty }
     }
 
-    private static func gfmTableChunks(_ text: String) -> [String]? {
-        let rowsPerChunk = 80
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let lines = trimmed.components(separatedBy: "\n")
-        guard lines.count > rowsPerChunk + 2,
-              lines.allSatisfy({ line in
-                  let row = line.trimmingCharacters(in: .whitespaces)
-                  return row.hasPrefix("|") && row.dropFirst().contains("|")
-              }),
-              lines[1].split(separator: "|").allSatisfy({ cell in
-                  let marker = cell.trimmingCharacters(in: .whitespaces)
-                  return !marker.isEmpty && marker.allSatisfy({ $0 == "-" || $0 == ":" })
-              }) else { return nil }
+    private static func mixedGFMTableChunks(_ text: String, target: Int) -> [String]? {
+        let rowsPerChunk = 20
+        let lines = text.components(separatedBy: "\n")
 
-        let header = Array(lines.prefix(2))
-        var chunks: [String] = []
-        var start = 2
-        while start < lines.count {
-            let end = min(lines.count, start + rowsPerChunk)
-            chunks.append((header + Array(lines[start..<end])).joined(separator: "\n"))
-            start = end
+        func isTableRow(_ line: String) -> Bool {
+            let row = line.trimmingCharacters(in: .whitespaces)
+            return row.hasPrefix("|") && row.dropFirst().contains("|")
         }
-        return chunks
+
+        func isSeparator(_ line: String) -> Bool {
+            let cells = line.split(separator: "|")
+            return !cells.isEmpty && cells.allSatisfy { cell in
+                let marker = cell.trimmingCharacters(in: .whitespaces)
+                return !marker.isEmpty && marker.allSatisfy { $0 == "-" || $0 == ":" }
+            }
+        }
+
+        guard lines.count > rowsPerChunk + 2 else { return nil }
+        for tableStart in 0..<(lines.count - 1) {
+            guard isTableRow(lines[tableStart]), isSeparator(lines[tableStart + 1]) else { continue }
+            var tableEnd = tableStart + 2
+            while tableEnd < lines.count, isTableRow(lines[tableEnd]) {
+                tableEnd += 1
+            }
+            guard tableEnd - tableStart > rowsPerChunk + 2 else { continue }
+
+            var chunks: [String] = []
+            let prefix = lines[..<tableStart].joined(separator: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !prefix.isEmpty {
+                chunks.append(contentsOf: buildChunks(prefix, target: target))
+            }
+
+            let header = Array(lines[tableStart..<(tableStart + 2)])
+            var bodyStart = tableStart + 2
+            while bodyStart < tableEnd {
+                let bodyEnd = min(tableEnd, bodyStart + rowsPerChunk)
+                chunks.append((header + Array(lines[bodyStart..<bodyEnd])).joined(separator: "\n"))
+                bodyStart = bodyEnd
+            }
+
+            let suffix = lines[tableEnd...].joined(separator: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !suffix.isEmpty {
+                chunks.append(contentsOf: buildChunks(suffix, target: target))
+            }
+            return chunks
+        }
+        return nil
     }
 
     private static func fencedCodeChunks(_ text: String, target: Int) -> [String]? {
