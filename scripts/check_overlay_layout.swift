@@ -103,8 +103,32 @@ struct OverlayLayoutCheck {
             "closing a side stage uses the high-refresh panel animator"
         )
         expect(
-            OverlayRenderPolicy.shouldAnimateSideStageResize(previousPreviewWidth: 560, nextPreviewWidth: 560),
-            "same-width settled layouts retain ordinary panel animation policy"
+            !OverlayRenderPolicy.shouldAnimateSideStageResize(previousPreviewWidth: 560, nextPreviewWidth: 560),
+            "same-width settled layouts skip the high-refresh panel animator"
+        )
+        expect(
+            OverlayLayoutPolicy.fittedTranscriptHeight(
+                base: 560,
+                composerHeight: 96,
+                restingComposerHeight: 46
+            ) == 510,
+            "quote chrome eats transcript height instead of growing the overlay"
+        )
+        expect(
+            OverlayLayoutPolicy.fittedTranscriptHeight(
+                base: 0,
+                composerHeight: 96,
+                restingComposerHeight: 46
+            ) == 0,
+            "an empty conversation still lets the composer own the panel height"
+        )
+        expect(
+            OverlayLayoutPolicy.fittedTranscriptHeight(
+                base: 560,
+                composerHeight: 46,
+                restingComposerHeight: 46
+            ) == 560,
+            "resting composer keeps the default transcript height"
         )
         expect(
             !OverlayRenderPolicy.shouldDeferLayoutPulse(previousPreviewWidth: 0, nextPreviewWidth: 560),
@@ -228,6 +252,9 @@ struct OverlayLayoutCheck {
         expect(snapped.origin.x == 12.5 && snapped.origin.y == 9, "rect origin follows backing scale")
         expect(snapped.size.width == 760 && snapped.size.height == 46, "integer sizes stay put")
 
+        expect(OverlaySpring.panelResponse <= 0.24, "panel motion uses a short spring")
+        expect(OverlaySpring.panelDamping < 0.92, "panel motion keeps a little spring instead of a long critically damped tail")
+        expect(OverlaySpring.fadeResponse < OverlaySpring.panelResponse, "opacity reaches the target ahead of the window travel")
         var value: CGFloat = 0
         var velocity: CGFloat = 0
         OverlaySpring.step(value: &value, velocity: &velocity, target: 100, dt: 1.0 / 120.0)
@@ -253,17 +280,63 @@ struct OverlayLayoutCheck {
             RunningSweepPolicy.minimumFrameInterval <= 1.0 / 120.0,
             "running highlight is eligible to follow a 120 Hz display"
         )
-        let sweepEntry = RunningSweepPolicy.highlightCenter(at: 0)
-        let sweepExit = RunningSweepPolicy.highlightCenter(
-            at: RunningSweepPolicy.cycleDuration - 0.000_001
+
+        expect(
+            !OverlayPalettePolicy.needsScroll(items: 1, isMount: false),
+            "a single command does not scroll"
         )
         expect(
-            sweepEntry + RunningSweepPolicy.highlightRadius < 0,
-            "running highlight begins fully outside the leading edge"
+            OverlayPalettePolicy.listHeight(items: 1, isMount: false)
+                == OverlayPalettePolicy.rowHeight,
+            "one command sizes the list to a single row"
         )
         expect(
-            sweepExit - RunningSweepPolicy.highlightRadius > 1,
-            "running highlight exits fully beyond the trailing edge before looping"
+            OverlayPalettePolicy.chromeHeight(items: 1, isMount: false, hasSearch: false)
+                > OverlayPalettePolicy.listHeight(items: 1, isMount: false),
+            "chrome includes caption padding around the command list"
+        )
+        expect(
+            OverlayPalettePolicy.needsScroll(items: OverlayPalettePolicy.commandVisibleLimit + 1, isMount: false),
+            "command lists longer than the visible window can scroll"
+        )
+        expect(
+            OverlayPalettePolicy.visibleRowCount(items: 20, isMount: false)
+                == OverlayPalettePolicy.commandVisibleLimit,
+            "command lists cap the visible window"
+        )
+
+        let idle = OverlayLayout(
+            totalHeight: 640,
+            transcriptHeight: 560,
+            pickerHeight: 0,
+            commandPaletteHeight: 0,
+            transcriptWidth: 760,
+            composerHeight: 46,
+            previewWidth: 0,
+            chromeVisible: false
+        )
+        var quoted = idle
+        quoted.composerHeight = 96
+        quoted.transcriptHeight = OverlayLayoutPolicy.fittedTranscriptHeight(
+            base: idle.transcriptHeight,
+            composerHeight: quoted.composerHeight,
+            restingComposerHeight: idle.composerHeight
+        )
+        quoted.totalHeight = quoted.transcriptHeight + 8 + quoted.composerHeight
+        expect(
+            quoted.transcriptHeight + quoted.composerHeight
+                == idle.transcriptHeight + idle.composerHeight,
+            "adding a quote keeps conversation height stable"
+        )
+        expect(
+            !OverlayRenderPolicy.shouldAnimatePanelFrame(previous: idle, next: quoted),
+            "adding a quote must not spring the whole overlay"
+        )
+        var stage = idle
+        stage.previewWidth = 560
+        expect(
+            OverlayRenderPolicy.shouldAnimatePanelFrame(previous: idle, next: stage),
+            "opening the extra pane still springs the panel"
         )
 
         print("PASS: overlay layout policy")

@@ -35,6 +35,12 @@ swiftc -parse-as-library Sources/Bubble/TranscriptInteractionPolicy.swift script
 swiftc -parse-as-library Sources/Bubble/OverlayComposer.swift scripts/check_composer.swift -o /tmp/bubble-check-composer
 /tmp/bubble-check-composer
 
+swiftc -parse-as-library Sources/Bubble/QuoteSelectionPolicy.swift Sources/Bubble/OverlayComposer.swift scripts/check_quote_selection.swift -o /tmp/bubble-check-quote-selection
+/tmp/bubble-check-quote-selection
+
+swiftc -parse-as-library Sources/Bubble/FileChangeSummaryPolicy.swift scripts/check_file_change_summary.swift -o /tmp/bubble-check-file-change-summary
+/tmp/bubble-check-file-change-summary
+
 swiftc -parse-as-library Sources/Bubble/PromptTriggerPolicy.swift scripts/check_prompt_palette.swift -o /tmp/bubble-check-prompt-palette
 /tmp/bubble-check-prompt-palette
 

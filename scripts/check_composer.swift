@@ -60,6 +60,43 @@ struct ComposerCheck {
             attachmentCount: 0
         )
         expect(wrappedHeight > idle, "wrapped CJK grows the composer \(wrappedHeight)")
+        let hello = OverlayComposer.composerHeight(
+            draft: "hello",
+            minHeight: 46,
+            avatarSize: 28,
+            workspaceChip: false,
+            chipHeight: 32,
+            attachmentCount: 0
+        )
+        let helloBang = OverlayComposer.composerHeight(
+            draft: "hello!",
+            minHeight: 46,
+            avatarSize: 28,
+            workspaceChip: false,
+            chipHeight: 32,
+            attachmentCount: 0
+        )
+        expect(hello == helloBang, "same-line typing must not resize composer chrome")
+        expect(
+            !OverlayComposer.chromeHeightNeedsUpdate(previous: hello, next: helloBang),
+            "same-line typing must not invalidate overlay layout"
+        )
+        expect(
+            OverlayComposer.chromeHeightNeedsUpdate(previous: idle, next: three),
+            "adding lines still resizes composer chrome"
+        )
+        expect(
+            OverlayComposer.attachmentChipMaxWidth(inputWidth: 520) == 496,
+            "quote chips stay inside the composer padding"
+        )
+        expect(
+            OverlayComposer.fieldWidth(inputWidth: 520, avatarSize: 28) == 424,
+            "the field leaves room for the avatar and send button"
+        )
+        expect(
+            OverlayComposer.trailingControlSize == 28,
+            "send button keeps a reserved column"
+        )
     }
 
     static func testLargePaste() {
@@ -94,10 +131,24 @@ struct ComposerCheck {
         expect(imageOnly.display.isEmpty, "image-only bubble uses the thumbnail, not a text label")
         expect(imageOnly.prompt.contains("[Image attached]"), "image-only prompt marks the attachment")
         let clip = String(repeating: "a", count: 400)
-        let pasted = OverlayComposer.sendPayload(draft: "看这段", clips: [clip], imageCount: 0)
+        let pasted = OverlayComposer.sendPayload(
+            draft: "看这段",
+            clips: [DraftClip(text: clip, kind: .paste)],
+            imageCount: 0
+        )
         expect(pasted.display.contains("看这段"), "caption stays in the user bubble")
         expect(pasted.display.contains("400 characters"), "long clip is summarized in the bubble")
         expect(pasted.prompt.contains(clip), "the model still receives the full clip")
         expect(!pasted.display.contains(clip), "the user bubble does not dump the whole clip")
+        let quote = OverlayComposer.promptFragment(
+            for: DraftClip(text: "Git checkout 快进到", kind: .quote)
+        )
+        expect(quote.contains("Quoted from the conversation:"), "quotes are labeled for the model")
+        expect(quote.contains("Git checkout 快进到"), "quotes keep the selected body")
+        expect(
+            OverlayComposer.clipLabel(DraftClip(text: "Git checkout 快进到", kind: .quote))
+                == "Quote · Git checkout 快进到",
+            "composer chip previews the quoted snippet"
+        )
     }
 }

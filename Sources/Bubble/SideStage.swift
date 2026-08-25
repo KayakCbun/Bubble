@@ -85,8 +85,8 @@ enum SideStagePresentationPolicy {
 }
 
 enum SideStageChromePolicy {
-    static let revealDuration: TimeInterval = 0.16
-    static let hideDuration: TimeInterval = 0.14
+    static let revealDuration: TimeInterval = 0.12
+    static let hideDuration: TimeInterval = 0.10
 
     /// The extra card fades on the next frame. Waiting for the panel spring to
     /// settle leaves an empty gap that reads as lag.

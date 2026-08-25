@@ -656,14 +656,14 @@ private extension Theme {
         .text {
             FontSize(OverlayMetrics.fontSize)
             FontWeight(.regular)
-            ForegroundColor(OverlayMetrics.ink)
+            ForegroundColor(OverlaySurface.conversationInk)
         }
         .code {
             FontFamilyVariant(.monospaced)
             FontSize(OverlayMetrics.chipSize)
             FontWeight(.regular)
-            ForegroundColor(OverlayMetrics.ink.opacity(0.82))
-            BackgroundColor(Color.primary.opacity(0.06))
+            ForegroundColor(OverlaySurface.conversationInk)
+            BackgroundColor(OverlaySurface.chipFill)
         }
         .heading1 { configuration in
             configuration.label
@@ -686,14 +686,14 @@ private extension Theme {
         .paragraph { configuration in
             configuration.label
                 .fixedSize(horizontal: false, vertical: true)
-                .relativeLineSpacing(.em(0.55))
-                .markdownMargin(top: 0, bottom: 16)
+                .relativeLineSpacing(.em(0.62))
+                .markdownMargin(top: 0, bottom: 18)
         }
         .listItem { configuration in
             configuration.label
                 .fixedSize(horizontal: false, vertical: true)
-                .relativeLineSpacing(.em(0.55))
-                .markdownMargin(top: 8, bottom: 0)
+                .relativeLineSpacing(.em(0.58))
+                .markdownMargin(top: 10, bottom: 0)
         }
         .codeBlock { configuration in
             CodeBlockView(language: configuration.language ?? "", source: configuration.content)
@@ -769,14 +769,14 @@ struct CodeBlockView: View {
                 }
             }
         }
-        .padding(12)
+        .padding(14)
         .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Color.primary.opacity(0.035))
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(OverlaySurface.cardFill)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(OverlaySurface.chipStroke, lineWidth: 0.5)
         )
     }
 

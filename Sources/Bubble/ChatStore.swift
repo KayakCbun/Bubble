@@ -139,9 +139,12 @@ final class ChatStore {
                 paletteSuppressed = false
                 slashHighlight = 0
             }
+            syncOverlayChrome()
         }
     }
-    var isBusy = false
+    var composerChromeHeight: CGFloat = OverlayMetrics.minHeight
+    var slashMenuPresented = false
+    var slashPaletteChromeHeight: CGFloat = 0
     var isStartingSession = false
     var isConnected = false
     var status: String = "starting"
@@ -153,7 +156,12 @@ final class ChatStore {
     var streamingThoughtId: UUID?
     var turnStartedAt: Date?
     var lastTurnDuration: TimeInterval = 0
-    var showAvatarPicker = false
+    var showAvatarPicker = false {
+        didSet { syncOverlayChrome() }
+    }
+    var isBusy = false {
+        didSet { syncOverlayChrome() }
+    }
     var selectedAvatarFile = AvatarSelection.file
     var transcriptWide = UserDefaults.standard.bool(forKey: "bubble.transcript.wide")
     var overlayPinned = UserDefaults.standard.bool(forKey: "bubble.overlay.pinned")
@@ -189,13 +197,19 @@ final class ChatStore {
     var onSideStageChromeDismissalRequested: (() -> Void)?
     var onSideStageChromeInvalidated: (() -> Void)?
     var workspaceState = WorkspaceStoreFile()
-    var draftClips: [DraftClip] = []
-    var draftImages: [DraftImage] = []
+    var draftClips: [DraftClip] = [] {
+        didSet { syncOverlayChrome() }
+    }
+    var draftImages: [DraftImage] = [] {
+        didSet { syncOverlayChrome() }
+    }
     var childBusy = false
     var streamUISuspended = true
     var transcriptRevision: UInt64 = 0
     var conversationTree: ConversationTreeSnapshot?
-    var branchDraft: ConversationBranchDraft?
+    var branchDraft: ConversationBranchDraft? {
+        didSet { syncOverlayChrome() }
+    }
     var isSwitchingBranch = false
     private var paletteSuppressed = false
     private var lastPaletteSignature = ""
@@ -1222,11 +1236,47 @@ final class ChatStore {
     }
 
     var slashMenuVisible: Bool {
-        PromptTriggerPolicy.hasActiveTrigger(in: draft)
+        slashMenuPresented
+    }
+
+    func syncOverlayChrome() {
+        let nextComposer = OverlayComposer.composerHeight(
+            draft: draft,
+            minHeight: OverlayMetrics.minHeight,
+            avatarSize: OverlayMetrics.avatarSize,
+            workspaceChip: activeWorkspaceBrief?.isActive == true,
+            chipHeight: OverlayMetrics.chipHeight,
+            attachmentCount: draftClips.count + draftImages.count + (branchDraft == nil ? 0 : 1),
+            fieldWidth: OverlayComposer.fieldWidth(
+                inputWidth: OverlayMetrics.inputWidth,
+                avatarSize: OverlayMetrics.avatarSize
+            ),
+            fontSize: OverlayMetrics.fontSize
+        )
+        if OverlayComposer.chromeHeightNeedsUpdate(previous: composerChromeHeight, next: nextComposer) {
+            composerChromeHeight = nextComposer
+        }
+        let visible = PromptTriggerPolicy.hasActiveTrigger(in: draft)
             && !paletteSuppressed
             && !showAvatarPicker
             && !isBusy
             && !visiblePaletteItems.isEmpty
+        if visible != slashMenuPresented {
+            slashMenuPresented = visible
+        }
+        let paletteHeight: CGFloat
+        if visible {
+            paletteHeight = OverlayPalettePolicy.chromeHeight(
+                items: visiblePaletteItems.count,
+                isMount: isMountPalette,
+                hasSearch: isAppPalette || isMountPalette
+            )
+        } else {
+            paletteHeight = 0
+        }
+        if abs(paletteHeight - slashPaletteChromeHeight) > 0.5 {
+            slashPaletteChromeHeight = paletteHeight
+        }
     }
 
     var isAppPalette: Bool {
@@ -1234,13 +1284,7 @@ final class ChatStore {
     }
 
     var slashPaletteHeight: CGFloat {
-        guard slashMenuVisible else { return 0 }
-        let rows = visiblePaletteItems.count
-        let shown = isMountPalette
-            ? min(rows, OverlayMetrics.mountPaletteVisibleRows)
-            : rows
-        let search = (isAppPalette || isMountPalette) ? 40 : 0
-        return CGFloat(shown) * OverlayMetrics.slashRowHeight + 38 + CGFloat(search)
+        slashPaletteChromeHeight
     }
 
     private var slashPaletteItems: [PaletteItem] {
@@ -1496,6 +1540,7 @@ final class ChatStore {
                 self.installedApps = apps
                 self.sessions = sessions
                 self.macEpoch += 1
+                self.syncOverlayChrome()
                 OverlayLog.write("catalog skills=\(skills.count) prompts=\(prompts.count) files=\(files.count) apps=\(apps.count) sessions=\(sessions.count)")
             }
         }
@@ -1635,11 +1680,12 @@ final class ChatStore {
             || !draftImages.isEmpty
     }
 
-    func attachDraftClip(_ text: String) {
+    func attachDraftClip(_ text: String, kind: DraftClip.Kind = .paste) {
         let body = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !body.isEmpty else { return }
+        if draftClips.contains(where: { $0.text == body && $0.kind == kind }) { return }
         if draftClips.count >= 8 { return }
-        draftClips.append(DraftClip(text: body))
+        draftClips.append(DraftClip(text: body, kind: kind))
         requestFocus()
     }
 
@@ -1773,10 +1819,9 @@ final class ChatStore {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         let composerClips = draftClips
         let composerImages = draftImages
-        let clips = composerClips.map(\.text)
         let imageData = composerImages.map(\.png)
         let branch = branchDraft
-        guard !text.isEmpty || !clips.isEmpty || !imageData.isEmpty else { return }
+        guard !text.isEmpty || !composerClips.isEmpty || !imageData.isEmpty else { return }
         guard branch == nil || !isBusy else {
             status = "finish the current turn before branching"
             return
@@ -1790,7 +1835,7 @@ final class ChatStore {
             openApp(app)
             return
         }
-        let payload = OverlayComposer.sendPayload(draft: text, clips: clips, imageCount: imageData.count)
+        let payload = OverlayComposer.sendPayload(draft: text, clips: composerClips, imageCount: imageData.count)
         let files = PiCatalog.attachments(in: payload.prompt, workspace: OverlayPaths.workspace)
         let mac = MacClipboard.expand(payload.prompt, force: forceClipboard)
         var attachments = files
@@ -3959,7 +4004,12 @@ final class ChatStore {
             brief.summary = WorkspaceRegistry.clip(error ?? childAssistant, WorkspaceRegistry.maxSummaryChars)
         } else {
             brief.summary = WorkspaceRegistry.clip(childAssistant, WorkspaceRegistry.maxSummaryChars)
-            brief.changedPaths = Array(Set(childChanged)).sorted()
+            brief.changedPaths = Array(
+                FileChangeSummaryPolicy.uniqueDisplayPaths(
+                    childChanged,
+                    workspaceRoot: brief.path
+                ).prefix(WorkspaceRegistry.maxChangedPaths)
+            )
             if let question = WorkspaceRegistry.inferWaiting(from: brief.summary) {
                 brief.status = .waiting
                 brief.question = question
@@ -4233,7 +4283,13 @@ final class ChatStore {
         let title = update.string("title") ?? update.string("kind") ?? "tool"
         let status = update.string("status") ?? "pending"
         let payload = extractToolPayload(update)
-        if let pathHint = filePathHint(title: title, input: payload.input) {
+        if let pathHint = FileChangeSummaryPolicy.pathHint(
+            kind: update.string("kind"),
+            title: title,
+            input: payload.input,
+            output: payload.output,
+            workspaceRoot: workspaceState.active?.path ?? items.last(where: { $0.kind == .workspaceRun })?.workspacePath
+        ) {
             childChanged.append(pathHint)
         }
         guard let index = items.lastIndex(where: { $0.kind == .workspaceRun }) else { return }
@@ -4263,13 +4319,4 @@ final class ChatStore {
         persist()
     }
 
-    private func filePathHint(title: String, input: String?) -> String? {
-        let candidates = [title, input ?? ""]
-        for text in candidates {
-            if let range = text.range(of: #"(/[^\s:]+|~/[^\s:]+)"#, options: .regularExpression) {
-                return String(text[range])
-            }
-        }
-        return nil
-    }
 }

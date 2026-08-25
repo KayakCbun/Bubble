@@ -41,6 +41,39 @@ struct OverlayLayout: Equatable {
     var chromeVisible: Bool = false
 }
 
+enum OverlayPalettePolicy {
+    static let rowHeight: CGFloat = 52
+    static let rowSpacing: CGFloat = 2
+    static let commandVisibleLimit = 7
+    static let mountVisibleLimit = 9
+    static let captionChrome: CGFloat = 24
+    static let searchChrome: CGFloat = 40
+    static let padding: CGFloat = 16
+
+    static func visibleRowCount(items: Int, isMount: Bool) -> Int {
+        let limit = isMount ? mountVisibleLimit : commandVisibleLimit
+        return min(max(items, 0), limit)
+    }
+
+    static func needsScroll(items: Int, isMount: Bool) -> Bool {
+        items > (isMount ? mountVisibleLimit : commandVisibleLimit)
+    }
+
+    static func listHeight(items: Int, isMount: Bool) -> CGFloat {
+        let rows = visibleRowCount(items: items, isMount: isMount)
+        guard rows > 0 else { return 0 }
+        return CGFloat(rows) * rowHeight + CGFloat(rows - 1) * rowSpacing
+    }
+
+    static func chromeHeight(items: Int, isMount: Bool, hasSearch: Bool) -> CGFloat {
+        guard items > 0 else { return 0 }
+        return listHeight(items: items, isMount: isMount)
+            + captionChrome
+            + (hasSearch ? searchChrome : 0)
+            + padding
+    }
+}
+
 enum OverlayLayoutPolicy {
     static func isTranscriptPresented(itemCount: Int, isStartingSession: Bool) -> Bool {
         itemCount > 0 || isStartingSession
@@ -48,6 +81,19 @@ enum OverlayLayoutPolicy {
 
     static func transcriptHeight(isPresented: Bool, maximum: CGFloat) -> CGFloat {
         isPresented ? maximum : 0
+    }
+
+    /// Quote and attachment chrome grow the composer into the transcript so the
+    /// NSPanel stays put. Springing the whole overlay relayouts every message.
+    static func fittedTranscriptHeight(
+        base: CGFloat,
+        composerHeight: CGFloat,
+        restingComposerHeight: CGFloat,
+        minimum: CGFloat = 160
+    ) -> CGFloat {
+        guard base > 1 else { return 0 }
+        let extra = max(0, composerHeight - restingComposerHeight)
+        return max(minimum, base - extra)
     }
 
     /// Extra width the markdown pane adds to the right of the conversation card.
@@ -157,12 +203,14 @@ enum RunningSweepPolicy {
 }
 
 enum OverlaySpring {
-    static let panelResponse: CGFloat = 0.32
-    static let panelDamping: CGFloat = 0.94
-    static let snappyResponse: CGFloat = 0.26
-    static let snappyDamping: CGFloat = 0.90
-    static let quickResponse: CGFloat = 0.18
-    static let quickDamping: CGFloat = 0.94
+    static let panelResponse: CGFloat = 0.22
+    static let panelDamping: CGFloat = 0.86
+    static let snappyResponse: CGFloat = 0.18
+    static let snappyDamping: CGFloat = 0.82
+    static let quickResponse: CGFloat = 0.14
+    static let quickDamping: CGFloat = 0.88
+    static let fadeResponse: CGFloat = 0.16
+    static let fadeDamping: CGFloat = 0.92
 
     static func step(
         value: inout CGFloat,

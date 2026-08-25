@@ -37,78 +37,104 @@ enum WorkspaceTranscriptChunker {
     }
 
     private static func buildChunks(_ text: String, target: Int) -> [String] {
-        guard text.utf8.count > target, hasParagraphLocalSemantics(text) else { return [text] }
-        let boundaries = paragraphBoundaries(in: text)
+        let bytes = Array(text.utf8)
+        guard bytes.count > target, hasParagraphLocalSemantics(bytes) else { return [text] }
+        let boundaries = paragraphBoundaryOffsets(in: bytes)
         guard !boundaries.isEmpty else { return [text] }
 
         var chunks: [String] = []
-        var start = text.startIndex
+        var start = 0
         var startOffset = 0
-        var lastBoundary = (index: start, offset: 0)
+        var lastBoundary = 0
         for boundary in boundaries {
-            if boundary.offset - startOffset > target, lastBoundary.index > start {
-                chunks.append(String(text[start..<lastBoundary.index]))
-                start = lastBoundary.index
-                startOffset = lastBoundary.offset
+            if boundary - startOffset > target, lastBoundary > start {
+                chunks.append(String(decoding: bytes[start..<lastBoundary], as: UTF8.self))
+                start = lastBoundary
+                startOffset = lastBoundary
             }
             lastBoundary = boundary
         }
-        if start < text.endIndex {
-            chunks.append(String(text[start..<text.endIndex]))
+        if start < bytes.count {
+            chunks.append(String(decoding: bytes[start..<bytes.count], as: UTF8.self))
         }
         return chunks.filter { !$0.isEmpty }
     }
 
     static func isParagraphLocal(_ text: String) -> Bool {
-        hasParagraphLocalSemantics(text)
+        hasParagraphLocalSemantics(Array(text.utf8))
     }
 
-    private static func hasParagraphLocalSemantics(_ text: String) -> Bool {
-        if MermaidTextDetector.firstRange(in: text) != nil { return false }
-        let lower = text.lowercased()
-        if lower.contains("```") || lower.contains("~~~") { return false }
-        let documentMarkers = [
-            "flowchart", "sequencediagram", "classdiagram", "statediagram",
-            "erdiagram", "gitgraph", "xychart", "<table", "<details", "<div", "<pre", "<script",
+    private static func hasParagraphLocalSemantics(_ bytes: [UInt8]) -> Bool {
+        let globalMarkers = [
+            "```", "~~~", "flowchart", "sequencediagram", "classdiagram",
+            "statediagram", "erdiagram", "gitgraph", "xychart", "<table",
+            "<details", "<div", "<pre", "<script", "mermaid graph",
         ]
-        if documentMarkers.contains(where: lower.contains) { return false }
-        for line in text.components(separatedBy: .newlines) {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            let loweredLine = trimmed.lowercased()
-            let mermaidRoots = ["graph ", "mermaid graph ", "journey", "gantt", "pie", "mindmap"]
-            if mermaidRoots.contains(where: loweredLine.hasPrefix) { return false }
-        }
-        guard text.contains("\n[") || text.hasPrefix("[")
-                || text.contains("\n|") || text.hasPrefix("|")
-                || text.contains("\n<") || text.hasPrefix("<") else {
-            return true
-        }
-        for line in text.components(separatedBy: .newlines) {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("|"), trimmed.contains("|") { return false }
-            if trimmed.hasPrefix("["), trimmed.contains("]:" ) { return false }
-            if trimmed.hasPrefix("<"), trimmed.hasSuffix(">") { return false }
+        if globalMarkers.contains(where: { containsASCII(bytes, $0) }) { return false }
+
+        var lineStart = 0
+        while lineStart < bytes.count {
+            var lineEnd = lineStart
+            while lineEnd < bytes.count, bytes[lineEnd] != 10 { lineEnd += 1 }
+            var start = lineStart
+            while start < lineEnd, bytes[start] == 32 || bytes[start] == 9 { start += 1 }
+            var end = lineEnd
+            while end > start, bytes[end - 1] == 32 || bytes[end - 1] == 9 || bytes[end - 1] == 13 {
+                end -= 1
+            }
+            if start < end {
+                let line = bytes[start..<end]
+                let roots = ["graph ", "journey", "gantt", "pie", "mindmap"]
+                if roots.contains(where: { hasASCIIPrefix(line, $0) }) { return false }
+                if line.first == 124, line.dropFirst().contains(124) { return false }
+                if line.first == 91, containsASCII(Array(line), "]:") { return false }
+                if line.first == 60, line.last == 62 { return false }
+            }
+            lineStart = lineEnd + 1
         }
         return true
     }
 
-    private static func paragraphBoundaries(in text: String) -> [(index: String.Index, offset: Int)] {
-        var boundaries: [(String.Index, Int)] = []
-        let bytes = text.utf8
-        var index = bytes.startIndex
-        var offset = 0
-        while index < bytes.endIndex {
-            let next = bytes.index(after: index)
-            if bytes[index] == 10, next < bytes.endIndex, bytes[next] == 10 {
-                index = bytes.index(after: next)
-                offset += 2
-                if let stringIndex = String.Index(index, within: text) {
-                    boundaries.append((stringIndex, offset))
-                }
-                continue
+    private static func containsASCII(_ bytes: [UInt8], _ pattern: String) -> Bool {
+        let needle = Array(pattern.utf8)
+        guard !needle.isEmpty, needle.count <= bytes.count else { return false }
+        for start in 0...(bytes.count - needle.count) {
+            var matches = true
+            for offset in needle.indices where asciiLower(bytes[start + offset]) != asciiLower(needle[offset]) {
+                matches = false
+                break
             }
-            index = next
-            offset += 1
+            if matches { return true }
+        }
+        return false
+    }
+
+    private static func hasASCIIPrefix(_ bytes: ArraySlice<UInt8>, _ prefix: String) -> Bool {
+        let needle = Array(prefix.utf8)
+        guard needle.count <= bytes.count else { return false }
+        for (offset, expected) in needle.enumerated() {
+            if asciiLower(bytes[bytes.index(bytes.startIndex, offsetBy: offset)]) != asciiLower(expected) {
+                return false
+            }
+        }
+        return true
+    }
+
+    private static func asciiLower(_ byte: UInt8) -> UInt8 {
+        byte >= 65 && byte <= 90 ? byte + 32 : byte
+    }
+
+    private static func paragraphBoundaryOffsets(in bytes: [UInt8]) -> [Int] {
+        var boundaries: [Int] = []
+        boundaries.reserveCapacity(max(1, bytes.count / targetBytes))
+        var index = 0
+        while index + 1 < bytes.count {
+            if bytes[index] == 10, bytes[index + 1] == 10 {
+                index += 2
+                boundaries.append(index)
+            } else {
+                index += 1
+            }
         }
         return boundaries
     }

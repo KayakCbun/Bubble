@@ -6,9 +6,9 @@ enum OverlayMetrics {
     static let inputWidth: CGFloat = 520
     static let transcriptWidthDefault: CGFloat = 760
     static let transcriptWidthWide: CGFloat = 1060
-    static let transcriptInset: CGFloat = 24
+    static let transcriptInset: CGFloat = 28
     static let cornerRadius: CGFloat = 22
-    static let transcriptCornerRadius: CGFloat = 18
+    static let transcriptCornerRadius: CGFloat = 20
     static let dockGap: CGFloat = 24
     static let minHeight: CGFloat = 46
     /// Padding around cards so the drop shadow is not clipped into a rectangle.
@@ -19,12 +19,12 @@ enum OverlayMetrics {
     static let pickerWidth: CGFloat = 40
     static let pickerLeading: CGFloat = 6
     static let pickerHeight: CGFloat = 346
-    static let fontSize: CGFloat = 13
-    static let heading1Size: CGFloat = 16
-    static let heading2Size: CGFloat = 14
-    static let heading3Size: CGFloat = 13
-    static let codeSize: CGFloat = 12
-    static let chipSize: CGFloat = 12
+    static let fontSize: CGFloat = 14
+    static let heading1Size: CGFloat = 17
+    static let heading2Size: CGFloat = 15
+    static let heading3Size: CGFloat = 14
+    static let codeSize: CGFloat = 12.5
+    static let chipSize: CGFloat = 12.5
     static var bodyFont: Font { .system(size: fontSize, weight: .regular) }
     static let slashRowHeight: CGFloat = 44
     static let paletteVisibleLimit = 7
@@ -62,20 +62,33 @@ enum OverlayMetrics {
     }
 }
 
+enum OverlaySurface {
+    static var userFill: Color { Color.primary.opacity(0.045) }
+    static var userQueuedFill: Color { Color.primary.opacity(0.03) }
+    static var chipFill: Color { Color.primary.opacity(0.04) }
+    static var chipStroke: Color { Color.primary.opacity(0.10) }
+    static var hairline: Color { Color.primary.opacity(0.10) }
+    static var cardFill: Color { Color.primary.opacity(0.035) }
+    static var cardStroke: Color { Color.primary.opacity(0.06) }
+    static var conversationInk: Color { Color.primary.opacity(0.88) }
+    static let userRadius: CGFloat = 22
+    static let chipRadius: CGFloat = 7
+    static let rowSpacing: CGFloat = 22
+}
+
 struct OverlayView: View {
     @Bindable var store: ChatStore
     var onEscape: () -> Void
     var onToggleWidth: () -> Void
 
     @FocusState private var focused: Bool
-    @State private var transcriptContentHeight: CGFloat = 0
+    @State private var transcriptPlanner = TranscriptRenderPlanner()
     @State private var expandedThoughts: Set<UUID> = []
     @State private var expandedToolGroups: Set<String> = []
     @State private var expandedTools: Set<UUID> = []
+    @State private var expandedFileChanges: Set<String> = []
     @State private var followLatest = true
     @State private var followQueued = false
-    @StateObject private var ime = IMEComposingMonitor()
-
     private var inputShape: RoundedRectangle {
         RoundedRectangle(cornerRadius: OverlayMetrics.cornerRadius, style: .continuous)
     }
@@ -85,9 +98,13 @@ struct OverlayView: View {
     }
 
     private var transcriptHeight: CGFloat {
-        OverlayLayoutPolicy.transcriptHeight(
-            isPresented: isTranscriptPresented,
-            maximum: OverlayMetrics.transcriptMaxHeight
+        OverlayLayoutPolicy.fittedTranscriptHeight(
+            base: OverlayLayoutPolicy.transcriptHeight(
+                isPresented: isTranscriptPresented,
+                maximum: OverlayMetrics.transcriptMaxHeight
+            ),
+            composerHeight: composerHeight,
+            restingComposerHeight: OverlayMetrics.minHeight
         )
     }
 
@@ -112,23 +129,11 @@ struct OverlayView: View {
     }
 
     private var slashPaletteHeight: CGFloat {
-        store.slashPaletteHeight
+        store.slashPaletteChromeHeight
     }
 
     private var composerHeight: CGFloat {
-        OverlayComposer.composerHeight(
-            draft: store.draft,
-            minHeight: OverlayMetrics.minHeight,
-            avatarSize: OverlayMetrics.avatarSize,
-            workspaceChip: store.activeWorkspaceBrief?.isActive == true,
-            chipHeight: OverlayMetrics.chipHeight,
-            attachmentCount: store.draftClips.count + store.draftImages.count + (store.branchDraft == nil ? 0 : 1),
-            fieldWidth: OverlayComposer.fieldWidth(
-                inputWidth: OverlayMetrics.inputWidth,
-                avatarSize: OverlayMetrics.avatarSize
-            ),
-            fontSize: OverlayMetrics.fontSize
-        )
+        store.composerChromeHeight
     }
 
     private var conversationHeight: CGFloat {
@@ -189,40 +194,33 @@ struct OverlayView: View {
                         .padding(.top, 6)
                     }
             }
-            VStack(spacing: 8) {
-                if let brief = store.activeWorkspaceBrief, brief.isActive {
-                    workspaceChip(brief)
+            ComposerBar(
+                store: store,
+                focused: $focused,
+                restoreFocus: restoreFocus,
+                stopComposer: stopComposer
+            )
+        }
+        .overlay(alignment: .bottom) {
+            Group {
+                if store.showAvatarPicker {
+                    pickerStrip
+                        .offset(y: -(composerHeight + OverlayMetrics.stackSpacing))
+                        .transition(.asymmetric(
+                            insertion: .move(edge: .bottom).combined(with: .opacity),
+                            removal: .opacity.combined(with: .offset(y: 8))
+                        ))
+                } else if store.slashMenuPresented {
+                    slashPalette
+                        .offset(y: -(composerHeight + OverlayMetrics.stackSpacing))
+                        .transition(.asymmetric(
+                            insertion: .move(edge: .bottom).combined(with: .opacity),
+                            removal: .opacity.combined(with: .offset(y: 6))
+                        ))
                 }
-                composerAttachments
-                inputRow
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .frame(width: OverlayMetrics.inputWidth, height: composerHeight)
-            .background(WindowDragArea())
-            .frostedGlass(in: inputShape)
-            .overlay(alignment: .bottom) {
-                Group {
-                    if store.showAvatarPicker {
-                        pickerStrip
-                            .offset(y: -(composerHeight + OverlayMetrics.stackSpacing))
-                            .transition(.asymmetric(
-                                insertion: .move(edge: .bottom).combined(with: .opacity),
-                                removal: .opacity.combined(with: .offset(y: 8))
-                            ))
-                    } else if store.slashMenuVisible {
-                        slashPalette
-                            .offset(y: -(composerHeight + OverlayMetrics.stackSpacing))
-                            .transition(.asymmetric(
-                                insertion: .move(edge: .bottom).combined(with: .opacity),
-                                removal: .opacity.combined(with: .offset(y: 6))
-                            ))
-                    }
-                }
-                .animation(OverlayMotion.snappy, value: store.showAvatarPicker)
-                .animation(OverlayMotion.quick, value: store.slashMenuVisible)
-            }
-            .frame(maxWidth: .infinity)
+            .animation(OverlayMotion.snappy, value: store.showAvatarPicker)
+            .animation(OverlayMotion.quick, value: store.slashMenuPresented)
         }
         .frame(
             maxWidth: .infinity,
@@ -250,7 +248,11 @@ struct OverlayView: View {
                     .allowsHitTesting(store.sideStageChromeVisible)
             }
         }
+        .animation(OverlayMotion.composer, value: composerHeight)
         .padding(OverlayMetrics.shadowInset)
+        .overlay {
+            QuoteChipLayer(store: store)
+        }
         .environment(\.openMarkdownPreview) { path in
             store.openMarkdownPreview(path)
         }
@@ -259,10 +261,6 @@ struct OverlayView: View {
         .containerBackground(.clear, for: .window)
         .onAppear {
             restoreFocus()
-            ime.start()
-        }
-        .onDisappear {
-            ime.stop()
         }
         .onChange(of: store.focusTick) { _, _ in
             restoreFocus()
@@ -273,24 +271,21 @@ struct OverlayView: View {
         .onChange(of: store.items.count) { _, _ in
             restoreFocus()
         }
-        .onChange(of: store.draft) { _, _ in
-            guard PromptTriggerPolicy.hasActiveTrigger(in: store.draft) else {
-                if store.slashHighlight != 0 { store.slashHighlight = 0 }
-                return
-            }
-            let count = store.visiblePaletteItems.count
-            if count == 0 {
-                store.slashHighlight = 0
-            } else if store.slashHighlight >= count {
-                store.slashHighlight = 0
-            }
-        }
+
         .onKeyPress(.escape) {
+            if QuoteSelectionMonitor.shared.snapshot != nil {
+                QuoteSelectionMonitor.shared.dismiss()
+                return .handled
+            }
             if store.handleSideStageEscape() {
                 return .handled
             }
             if ImageZoomController.shared.isVisible {
                 ImageZoomController.shared.close()
+                return .handled
+            }
+            if FileChangeDiffController.shared.isVisible {
+                FileChangeDiffController.shared.close()
                 return .handled
             }
             if MermaidZoomController.shared.isVisible {
@@ -366,7 +361,9 @@ struct OverlayView: View {
             .foregroundStyle(.secondary)
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
-            Divider().opacity(0.28)
+            Rectangle()
+                .fill(OverlaySurface.hairline)
+                .frame(height: 0.5)
             VStack(spacing: 12) {
                 Image(nsImage: NSApp.applicationIconImage)
                     .resizable()
@@ -389,7 +386,7 @@ struct OverlayView: View {
                 Image(systemName: "folder")
                     .font(.system(size: 12, weight: .semibold))
                 Text(stage.name)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.system(size: 13, weight: .medium))
                     .lineLimit(1)
                 if let item = store.items.first(where: { $0.id == stage.cardId }),
                    let status = item.workspaceStatus {
@@ -406,7 +403,9 @@ struct OverlayView: View {
             .foregroundStyle(.secondary)
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
-            Divider().opacity(0.28)
+            Rectangle()
+                .fill(OverlaySurface.hairline)
+                .frame(height: 0.5)
             workspaceTranscriptList
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -424,13 +423,15 @@ struct OverlayView: View {
         let live = store.childBusy && store.workspaceStage?.path == store.activeWorkspaceBrief?.path
         return ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 18) {
+                LazyVStack(alignment: .leading, spacing: OverlaySurface.rowSpacing) {
                     ForEach(rows) { row in
                         Group {
                             switch row {
                             case .transcript(let transcript):
                                 switch transcript {
                                 case .collapsedTools:
+                                    transcriptRow(transcript, interactive: false)
+                                case .fileChanges:
                                     transcriptRow(transcript, interactive: false)
                                 case .message, .tool:
                                     EquatableSection(value: rowRenderKey(transcript)) {
@@ -463,7 +464,7 @@ struct OverlayView: View {
                 .padding(.top, OverlayMetrics.transcriptInset)
                 .padding(.bottom, 0)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .foregroundStyle(OverlayMetrics.ink)
+                .foregroundStyle(OverlaySurface.conversationInk)
             }
             .scrollIndicators(.never)
             .scrollBounceBehavior(.basedOnSize)
@@ -498,7 +499,11 @@ struct OverlayView: View {
     }
 
     private func workspaceRows(from items: [ChatItem]) -> [WorkspaceTranscriptRow] {
-        groupedRows(from: items, collapsePrefix: "ws-pane").flatMap { row -> [WorkspaceTranscriptRow] in
+        groupedRows(
+            from: items,
+            collapsePrefix: "ws-pane",
+            workspaceRoot: store.workspaceStage?.path
+        ).flatMap { row -> [WorkspaceTranscriptRow] in
             guard case .message(let item) = row,
                   item.kind == .assistant,
                   !(store.childBusy && store.workspacePaneStreamingAssistantId == item.id) else {
@@ -545,6 +550,8 @@ struct OverlayView: View {
                 return "ws-\(item.id.uuidString)"
             case .collapsedTools(let id, _):
                 return "ws-\(id)"
+            case .fileChanges(let summary):
+                return "ws-\(summary.id)"
             }
         }
     }
@@ -584,18 +591,18 @@ struct OverlayView: View {
                         store.returnToWorkspaceStage()
                     }
                 }
-                Image(systemName: "doc.richtext.fill")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(Color(red: 0.25, green: 0.55, blue: 0.95))
+                MarkdownFileGlyph(pointSize: 14)
                 Text(document.title)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.system(size: 13, weight: .medium))
                     .lineLimit(1)
                 Spacer(minLength: 56)
             }
             .foregroundStyle(.secondary)
             .padding(.horizontal, store.canReturnToWorkspace ? 6 : 12)
             .padding(.vertical, 8)
-            Divider().opacity(0.28)
+            Rectangle()
+                .fill(OverlaySurface.hairline)
+                .frame(height: 0.5)
             if let error = document.error {
                 VStack(alignment: .leading, spacing: 8) {
                     Text(error)
@@ -641,23 +648,63 @@ struct OverlayView: View {
         }
     }
 
+    private var mainTranscriptRows: [MainTranscriptRenderRow] {
+        let baseRows = displayRows
+        let seeds = baseRows.map { row -> TranscriptRenderSeed in
+            let kind: TranscriptRenderSeed.Kind
+            let text: String
+            switch row {
+            case .message(let item) where item.kind == .assistant:
+                kind = .assistant
+                text = item.text
+            case .message(let item) where item.kind == .user:
+                kind = .user
+                text = item.text
+            default:
+                kind = .other
+                text = ""
+            }
+            return TranscriptRenderSeed(
+                id: row.id,
+                kind: kind,
+                text: text,
+                sourceIDs: row.sourceItemIDs
+            )
+        }
+        var streamingSeedIDs: Set<String> = []
+        if store.isBusy, let id = store.streamingAssistantId {
+            streamingSeedIDs.insert(id.uuidString)
+        }
+        let plan = transcriptPlanner.plan(
+            seeds: seeds,
+            branchSourceID: store.branchDraft?.sourceItemID.uuidString,
+            streamingSeedIDs: streamingSeedIDs
+        )
+        return plan.units.map { unit in
+            MainTranscriptRenderRow(unit: unit, source: baseRows[unit.seedIndex])
+        }
+    }
+
     private var transcriptList: some View {
-        ScrollViewReader { proxy in
+        let rows = mainTranscriptRows
+        let ticks = historyTicks
+        return ScrollViewReader { proxy in
             ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
+                LazyVStack(alignment: .leading, spacing: OverlaySurface.rowSpacing) {
                     if store.lastTurnDuration >= 1, !store.isBusy {
                         workedHeader(store.lastTurnDuration)
                     }
-                    ForEach(displayRows) { row in
-                        if isFirstRowAfterBranch(row) {
+                    ForEach(rows) { row in
+                        if row.startsAfterBranchPoint {
                             branchCutoverDivider
                         }
-                        EquatableSection(value: rowRenderKey(row)) {
-                            transcriptRow(row)
+                        EquatableSection(value: mainRowRenderKey(row)) {
+                            mainTranscriptRow(row)
                         }
                         .equatable()
                         .id(row.id)
-                        .opacity(isAfterBranchPoint(row) ? 0.34 : 1)
+                        .padding(.top, row.isContinuation ? -10 : 0)
+                        .opacity(row.isAfterBranchPoint ? 0.34 : 1)
                     }
                     if store.isBusy {
                         WorkingRow(startedAt: store.turnStartedAt ?? Date())
@@ -671,24 +718,26 @@ struct OverlayView: View {
                         .frame(height: OverlayMetrics.transcriptCornerRadius)
                         .id("transcript-end")
                 }
-                .padding(.leading, historyTicks.isEmpty ? OverlayMetrics.transcriptInset : HistoryLimits.gutter + 16)
+                .padding(.leading, ticks.isEmpty ? OverlayMetrics.transcriptInset : HistoryLimits.gutter + 16)
                 .padding(.trailing, OverlayMetrics.transcriptInset)
                 .padding(.top, OverlayMetrics.transcriptInset)
                 .padding(.bottom, 0)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .foregroundStyle(OverlayMetrics.ink)
-                .background {
-                    GeometryReader { proxy in
-                        Color.clear.preference(
-                            key: TranscriptContentHeightKey.self,
-                            value: proxy.size.height
-                        )
-                    }
-                }
+                .foregroundStyle(OverlaySurface.conversationInk)
             }
             .scrollIndicators(.never)
             .scrollBounceBehavior(.basedOnSize)
             .contentMargins(.bottom, 0, for: .scrollContent)
+            .background {
+                TranscriptScrollObserver { atEnd, userDriven in
+                    guard userDriven else { return }
+                    if atEnd {
+                        followLatest = true
+                    } else if followLatest {
+                        followLatest = false
+                    }
+                }
+            }
             .transaction { transaction in
                 if store.isBusy {
                     transaction.disablesAnimations = true
@@ -702,9 +751,9 @@ struct OverlayView: View {
                 }
             }
             .overlay(alignment: .leading) {
-                if !historyTicks.isEmpty {
+                if !ticks.isEmpty {
                     HistoryTickRail(
-                        ticks: historyTicks,
+                        ticks: ticks,
                         viewportHeight: transcriptHeight
                     ) { id in
                         followLatest = false
@@ -714,11 +763,6 @@ struct OverlayView: View {
                             }
                         }
                     }
-                }
-            }
-            .onPreferenceChange(TranscriptContentHeightKey.self) { height in
-                if abs(height - transcriptContentHeight) > 0.5 {
-                    transcriptContentHeight = height
                 }
             }
             .onAppear { requestFollowLatest(proxy) }
@@ -745,25 +789,12 @@ struct OverlayView: View {
             .onChange(of: store.isBusy) { _, _ in
                 requestFollowLatest(proxy)
             }
-            .onChange(of: transcriptContentHeight) { _, _ in
-                if TranscriptFollowPolicy.followsContentHeightChange(isBusy: store.isBusy) {
+            .onChange(of: composerHeight) { _, _ in
+                if followLatest {
                     requestFollowLatest(proxy)
                 }
             }
         }
-    }
-
-    private func isAfterBranchPoint(_ row: TranscriptRow) -> Bool {
-        guard let sourceID = store.branchDraft?.sourceItemID,
-              let sourceIndex = displayRows.firstIndex(where: { $0.contains(sourceID) }),
-              let rowIndex = displayRows.firstIndex(where: { $0.id == row.id }) else { return false }
-        return rowIndex > sourceIndex
-    }
-
-    private func isFirstRowAfterBranch(_ row: TranscriptRow) -> Bool {
-        guard isAfterBranchPoint(row),
-              let rowIndex = displayRows.firstIndex(where: { $0.id == row.id }) else { return false }
-        return rowIndex == 0 || !isAfterBranchPoint(displayRows[rowIndex - 1])
     }
 
     private var branchCutoverDivider: some View {
@@ -792,31 +823,7 @@ struct OverlayView: View {
             if store.isMountPalette {
                 mountSearchField
             }
-            ScrollViewReader { proxy in
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 2) {
-                        ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
-                            paletteRow(item, highlighted: index == store.slashHighlight)
-                                .id(index)
-                                .animation(OverlayMotion.quick, value: store.slashHighlight)
-                        }
-                    }
-                }
-                .scrollIndicators(items.count > OverlayMetrics.mountPaletteVisibleRows ? .visible : .hidden)
-                .frame(height: paletteListHeight(for: items.count))
-                .onChange(of: store.slashHighlight) { _, index in
-                    OverlayPulse.shared.onNextFrame {
-                        withAnimation(OverlayMotion.quick) {
-                            proxy.scrollTo(index, anchor: .center)
-                        }
-                    }
-                }
-                .onChange(of: items.count) { _, _ in
-                    OverlayPulse.shared.onNextFrame {
-                        proxy.scrollTo(store.slashHighlight, anchor: .center)
-                    }
-                }
-            }
+            paletteRows(items)
         }
         .padding(8)
         .frame(width: OverlayMetrics.inputWidth, alignment: .leading)
@@ -878,11 +885,41 @@ struct OverlayView: View {
         .padding(.bottom, 6)
     }
 
-    private func paletteListHeight(for count: Int) -> CGFloat {
-        let shown = store.isMountPalette
-            ? min(count, OverlayMetrics.mountPaletteVisibleRows)
-            : count
-        return CGFloat(max(shown, 1)) * OverlayMetrics.slashRowHeight
+    @ViewBuilder
+    private func paletteRows(_ items: [PaletteItem]) -> some View {
+        let isMount = store.isMountPalette
+        let needsScroll = OverlayPalettePolicy.needsScroll(items: items.count, isMount: isMount)
+        let listHeight = OverlayPalettePolicy.listHeight(items: items.count, isMount: isMount)
+        let rows = VStack(alignment: .leading, spacing: OverlayPalettePolicy.rowSpacing) {
+            ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                paletteRow(item, highlighted: index == store.slashHighlight)
+                    .id(index)
+                    .animation(OverlayMotion.quick, value: store.slashHighlight)
+            }
+        }
+        if needsScroll {
+            ScrollViewReader { proxy in
+                ScrollView {
+                    rows
+                }
+                .scrollIndicators(.visible)
+                .frame(height: listHeight)
+                .onChange(of: store.slashHighlight) { _, index in
+                    OverlayPulse.shared.onNextFrame {
+                        withAnimation(OverlayMotion.quick) {
+                            proxy.scrollTo(index, anchor: .center)
+                        }
+                    }
+                }
+                .onChange(of: items.count) { _, _ in
+                    OverlayPulse.shared.onNextFrame {
+                        proxy.scrollTo(store.slashHighlight, anchor: .center)
+                    }
+                }
+            }
+        } else {
+            rows
+        }
     }
 
     private var mountSearchBinding: Binding<String> {
@@ -1007,7 +1044,12 @@ struct OverlayView: View {
                 .padding(.leading, 12)
                 .padding(.trailing, showBadge ? 0 : 12)
                 .padding(.vertical, 8)
-                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                .frame(
+                    maxWidth: .infinity,
+                    minHeight: OverlayPalettePolicy.rowHeight,
+                    maxHeight: OverlayPalettePolicy.rowHeight,
+                    alignment: .leading
+                )
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -1028,7 +1070,7 @@ struct OverlayView: View {
         }
         .background(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(highlighted ? Color.primary.opacity(0.08) : Color.clear)
+                .fill(highlighted ? OverlaySurface.userFill : Color.clear)
         )
     }
 
@@ -1103,10 +1145,17 @@ struct OverlayView: View {
                     }
                     ForEach(store.draftClips) { clip in
                         draftClipChip(clip)
+                            .transition(.asymmetric(
+                                insertion: .opacity.combined(with: .move(edge: .bottom)),
+                                removal: .opacity
+                            ))
                     }
                 }
+                .animation(OverlayMotion.composer, value: store.draftClips.count)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .frame(height: OverlayComposer.attachmentRow)
+            .clipped()
         }
     }
 
@@ -1117,6 +1166,7 @@ struct OverlayView: View {
             Text("Branching from \(branch.title)")
                 .font(.system(size: 12, weight: .medium))
                 .lineLimit(1)
+                .truncationMode(.tail)
             Button {
                 store.cancelBranchDraft()
             } label: {
@@ -1167,11 +1217,14 @@ struct OverlayView: View {
 
     private func draftClipChip(_ clip: DraftClip) -> some View {
         HStack(spacing: 6) {
-            Image(systemName: "doc.on.clipboard")
+            Image(systemName: clip.kind == .quote ? "text.quote" : "doc.on.clipboard")
                 .font(.system(size: 11, weight: .semibold))
-            Text(OverlayComposer.clipLabel(clip.text))
+                .fixedSize()
+            Text(OverlayComposer.clipLabel(clip))
                 .font(.system(size: 12, weight: .medium))
                 .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
             Button {
                 store.removeDraftClip(clip.id)
             } label: {
@@ -1180,15 +1233,18 @@ struct OverlayView: View {
                     .foregroundStyle(.tertiary)
             }
             .buttonStyle(.plain)
-            .help("Remove pasted text")
+            .help(clip.kind == .quote ? "Remove quote" : "Remove pasted text")
+            .fixedSize()
         }
         .foregroundStyle(.secondary)
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
+        .frame(maxWidth: OverlayComposer.attachmentChipMaxWidth(inputWidth: OverlayMetrics.inputWidth))
         .background(
             Capsule(style: .continuous)
                 .fill(Color.primary.opacity(0.06))
         )
+        .clipShape(Capsule(style: .continuous))
     }
 
     private var inputRow: some View {
@@ -1243,11 +1299,12 @@ struct OverlayView: View {
                 }
             }
             .frame(
+                minWidth: 0,
+                maxWidth: .infinity,
                 minHeight: OverlayMetrics.avatarSize,
                 maxHeight: fieldHeight,
                 alignment: lineCount > 1 ? .topLeading : .center
             )
-            .fixedSize(horizontal: false, vertical: lineCount == 1)
 
             if MessageDeliveryPolicy.composerSends(
                 isBusy: store.isBusy,
@@ -1264,6 +1321,7 @@ struct OverlayView: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.primary)
+                .layoutPriority(1)
                 .help("Add to waiting messages")
                 .accessibilityLabel("Add message to waiting queue")
             } else if showComposerStop {
@@ -1277,6 +1335,7 @@ struct OverlayView: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
+                .layoutPriority(1)
                 .help(store.activeWorkspaceBrief?.isActive == true ? "Stop workspace run" : "Stop")
                 .accessibilityLabel(store.activeWorkspaceBrief?.isActive == true ? "Stop workspace run" : "Stop")
             } else if store.hasComposerPayload {
@@ -1291,6 +1350,7 @@ struct OverlayView: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.primary)
+                .layoutPriority(1)
             }
         }
     }
@@ -1299,7 +1359,11 @@ struct OverlayView: View {
         groupedRows(from: store.visibleItems, collapsePrefix: "collapsed")
     }
 
-    private func groupedRows(from items: [ChatItem], collapsePrefix: String) -> [TranscriptRow] {
+    private func groupedRows(
+        from items: [ChatItem],
+        collapsePrefix: String,
+        workspaceRoot: String? = nil
+    ) -> [TranscriptRow] {
         var rows: [TranscriptRow] = []
         var tools: [ChatItem] = []
         func flushTools() {
@@ -1323,7 +1387,95 @@ struct OverlayView: View {
             }
         }
         flushTools()
-        return rows
+        return insertFileChangeCards(into: rows, workspaceRoot: workspaceRoot)
+    }
+
+    private func insertFileChangeCards(
+        into rows: [TranscriptRow],
+        workspaceRoot: String? = nil
+    ) -> [TranscriptRow] {
+        var output: [TranscriptRow] = []
+        var turn: [TranscriptRow] = []
+        func flush() {
+            output.append(contentsOf: placeFileChanges(turn, workspaceRoot: workspaceRoot))
+            turn = []
+        }
+        for row in rows {
+            if case .message(let item) = row, item.kind == .user {
+                flush()
+            }
+            turn.append(row)
+        }
+        flush()
+        return output
+    }
+
+    private func placeFileChanges(
+        _ turn: [TranscriptRow],
+        workspaceRoot: String? = nil
+    ) -> [TranscriptRow] {
+        var mainTools: [(kind: String?, title: String, input: String?, output: String?)] = []
+        var workspaceTools: [(kind: String?, title: String, input: String?, output: String?)] = []
+        var discoveredRoot = workspaceRoot
+        var turnID = turn.first?.id ?? UUID().uuidString
+        for row in turn {
+            switch row {
+            case .message(let item):
+                if item.kind == .user { turnID = item.id.uuidString }
+                if item.kind == .workspaceRun {
+                    discoveredRoot = item.workspacePath ?? discoveredRoot
+                    for path in item.workspaceChangedPaths ?? [] {
+                        workspaceTools.append(("edit", "Edit \(path)", nil, nil))
+                    }
+                    for child in item.workspaceChildren ?? [] where child.kind == .tool {
+                        workspaceTools.append((child.toolKind, child.text, child.toolInput, child.toolOutput))
+                    }
+                }
+            case .tool(let item):
+                mainTools.append((item.toolKind, item.text, item.toolInput, item.toolOutput))
+            case .collapsedTools(_, let items):
+                for item in items {
+                    mainTools.append((item.toolKind, item.text, item.toolInput, item.toolOutput))
+                }
+            case .fileChanges:
+                break
+            }
+        }
+        if workspaceRoot != nil, workspaceTools.isEmpty {
+            workspaceTools = mainTools
+            mainTools = []
+        }
+        var result = turn
+        if let summary = FileChangeSummaryPolicy.summary(id: "files-\(turnID)", tools: mainTools) {
+            result = insertFileChangeSummary(summary, into: result)
+        }
+        if let summary = FileChangeSummaryPolicy.summary(
+            id: "files-\(turnID)-ws",
+            tools: workspaceTools,
+            workspaceRoot: discoveredRoot
+        ) {
+            result = insertFileChangeSummary(summary, into: result)
+        }
+        return result
+    }
+
+    private func insertFileChangeSummary(
+        _ summary: FileChangeSummary,
+        into turn: [TranscriptRow]
+    ) -> [TranscriptRow] {
+        if let index = turn.lastIndex(where: {
+            switch $0 {
+            case .message(let item):
+                return item.kind == .assistant || item.kind == .workspaceRun
+            default:
+                return false
+            }
+        }) {
+            var copy = turn
+            copy.insert(.fileChanges(summary), at: index + 1)
+            return copy
+        }
+        return turn + [.fileChanges(summary)]
     }
 
     private func rowRenderKey(_ row: TranscriptRow) -> RowRenderKey {
@@ -1343,6 +1495,14 @@ struct OverlayView: View {
             expansionKey = TranscriptExpansionPolicy.renderKey(
                 containerExpanded: expandedToolGroups.contains(id),
                 expandedChildIDs: items.filter { expandedTools.contains($0.id) }.map { $0.id.uuidString }
+            )
+        case .fileChanges(let summary):
+            expansionKey = TranscriptExpansionPolicy.renderKey(
+                containerExpanded: FileChangeCardPolicy.isExpanded(
+                    id: summary.id,
+                    expandedIDs: expandedFileChanges
+                ),
+                expandedChildIDs: []
             )
         }
         switch row {
@@ -1381,11 +1541,36 @@ struct OverlayView: View {
                 selected: false,
                 expansionKey: expansionKey
             )
+        case .fileChanges(let summary):
+            return RowRenderKey(
+                id: summary.id,
+                kind: .system,
+                text: "\(summary.files.count)+\(summary.additions ?? 0)-\(summary.deletions ?? 0)",
+                toolStatus: nil,
+                toolKind: nil,
+                toolInput: nil,
+                toolOutput: nil,
+                imageNames: nil,
+                workspaceStatus: nil,
+                workspaceSummary: nil,
+                live: false,
+                selected: false,
+                expansionKey: expansionKey
+            )
         }
     }
 
+    private func mainRowRenderKey(_ row: MainTranscriptRenderRow) -> MainTranscriptRenderKey {
+        MainTranscriptRenderKey(
+            id: row.id,
+            source: rowRenderKey(row.source),
+            text: row.text,
+            copyText: row.copyText
+        )
+    }
+
     private var showInputPlaceholder: Bool {
-        store.draft.isEmpty && !ime.composing
+        store.draft.isEmpty
     }
 
     private var showInputCaret: Bool {
@@ -1485,19 +1670,33 @@ struct OverlayView: View {
             toolRow(item)
         case .collapsedTools(let id, let items):
             collapsedTools(id: id, items: items)
+        case .fileChanges(let summary):
+            fileChangesCard(summary)
+        }
+    }
+
+    @ViewBuilder
+    private func mainTranscriptRow(_ row: MainTranscriptRenderRow) -> some View {
+        if row.isAssistantChunk, case .message(let item) = row.source {
+            assistantChunkRow(item: item, text: row.text, copyText: row.copyText)
+        } else {
+            transcriptRow(row.source)
         }
     }
 
     private func workedHeader(_ duration: TimeInterval) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 6) {
                 Text("Worked for \(formatDuration(duration))")
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.tertiary)
             }
             .font(.system(size: OverlayMetrics.fontSize, weight: .regular))
             .foregroundStyle(.secondary)
-            Divider().opacity(0.45)
+            Rectangle()
+                .fill(OverlaySurface.hairline)
+                .frame(height: 0.5)
         }
     }
 
@@ -1522,8 +1721,8 @@ struct OverlayView: View {
                 if !text.isEmpty {
                     Text(text)
                         .font(OverlayMetrics.bodyFont)
-                        .foregroundStyle(OverlayMetrics.ink)
-                        .lineSpacing(4)
+                        .foregroundStyle(OverlaySurface.conversationInk)
+                        .lineSpacing(5)
                         .multilineTextAlignment(.leading)
                         .textSelection(.enabled)
                 }
@@ -1559,11 +1758,11 @@ struct OverlayView: View {
                     }
                 }
             }
-            .padding(.horizontal, names.isEmpty ? 16 : 10)
-            .padding(.vertical, names.isEmpty ? 12 : 10)
+            .padding(.horizontal, names.isEmpty ? 16 : 12)
+            .padding(.vertical, names.isEmpty ? 11 : 10)
             .background(
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .fill(Color.primary.opacity(0.08))
+                RoundedRectangle(cornerRadius: OverlaySurface.userRadius, style: .continuous)
+                    .fill(OverlaySurface.userFill)
             )
         }
     }
@@ -1582,8 +1781,8 @@ struct OverlayView: View {
                 if !message.text.isEmpty {
                     Text(message.text)
                         .font(OverlayMetrics.bodyFont)
-                        .foregroundStyle(OverlayMetrics.ink)
-                        .lineSpacing(4)
+                        .foregroundStyle(OverlaySurface.conversationInk)
+                        .lineSpacing(5)
                         .multilineTextAlignment(.leading)
                 }
                 HStack(spacing: 10) {
@@ -1610,15 +1809,11 @@ struct OverlayView: View {
                     .accessibilityLabel("Change waiting message to steering")
                 }
             }
-            .padding(.horizontal, message.imageNames.isEmpty ? 16 : 10)
-            .padding(.vertical, message.imageNames.isEmpty ? 12 : 10)
+            .padding(.horizontal, message.imageNames.isEmpty ? 16 : 12)
+            .padding(.vertical, message.imageNames.isEmpty ? 11 : 10)
             .background(
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .fill(Color.primary.opacity(0.05))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .stroke(Color.primary.opacity(0.10), lineWidth: 1)
+                RoundedRectangle(cornerRadius: OverlaySurface.userRadius, style: .continuous)
+                    .fill(OverlaySurface.userQueuedFill)
             )
         }
     }
@@ -1700,6 +1895,47 @@ struct OverlayView: View {
         }
         .accessibilityAction(named: "Branch from here") {
             if interactive {
+                store.beginBranch(from: item)
+            }
+        }
+    }
+
+    private func assistantChunkRow(item: ChatItem, text: String, copyText: String?) -> some View {
+        let completeText = copyText?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let isTerminalChunk = completeText != nil
+        let showBranchControl = isTerminalChunk
+            && ConversationBranchControlsPolicy.showsAssistantBranchAction(
+                hasSourceEntry: item.sourceEntryId != nil,
+                isStreaming: false
+            )
+        return VStack(alignment: .leading, spacing: 8) {
+            MessageBody(text: text)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if let completeText, !completeText.isEmpty {
+                HStack(alignment: .center, spacing: 0) {
+                    AssistantCopyButton(text: completeText)
+                    if showBranchControl {
+                        AssistantActionButton(
+                            symbol: "arrow.triangle.branch",
+                            help: "Branch from here",
+                            accessibilityLabel: "Branch from here"
+                        ) {
+                            store.beginBranch(from: item)
+                        }
+                        .disabled(store.isBusy || store.childBusy || store.isSwitchingBranch || item.sourceBranchable == false)
+                    }
+                }
+                .fixedSize(horizontal: true, vertical: true)
+            }
+        }
+        .contextMenu {
+            if isTerminalChunk, item.sourceEntryId != nil, item.sourceBranchable != false {
+                Button("Branch from here") { store.beginBranch(from: item) }
+                    .disabled(store.isBusy || store.childBusy || store.isSwitchingBranch)
+            }
+        }
+        .accessibilityAction(named: "Branch from here") {
+            if isTerminalChunk {
                 store.beginBranch(from: item)
             }
         }
@@ -1862,17 +2098,17 @@ struct OverlayView: View {
                 .accessibilityLabel("Stop workspace run")
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
         .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Color.primary.opacity(selected ? 0.08 : 0.05))
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(selected ? OverlaySurface.userFill : OverlaySurface.cardFill)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .stroke(
-                    selected ? Color.accentColor.opacity(0.7) : Color.primary.opacity(0.08),
-                    lineWidth: selected ? 1.5 : 1
+                    selected ? Color.accentColor.opacity(0.45) : OverlaySurface.cardStroke,
+                    lineWidth: 0.5
                 )
         )
     }
@@ -2011,6 +2247,127 @@ struct OverlayView: View {
         .opacity(0.92)
     }
 
+    private func fileChangesCard(_ summary: FileChangeSummary) -> some View {
+        let expanded = FileChangeCardPolicy.isExpanded(
+            id: summary.id,
+            expandedIDs: expandedFileChanges
+        )
+        let plus = Color(red: 0.18, green: 0.62, blue: 0.32)
+        let minus = Color(red: 0.82, green: 0.22, blue: 0.25)
+        return VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Button {
+                    withAnimation(OverlayMotion.snappy) {
+                        if expandedFileChanges.contains(summary.id) {
+                            expandedFileChanges.remove(summary.id)
+                        } else {
+                            expandedFileChanges.insert(summary.id)
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 10, weight: .semibold))
+                            .frame(width: 10)
+                        Text("\(summary.files.count) changed file\(summary.files.count == 1 ? "" : "s")")
+                            .font(.system(size: 13, weight: .semibold))
+                        if summary.hasLineStats {
+                            lineStats(additions: summary.additions, deletions: summary.deletions, plus: plus, minus: minus)
+                        }
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                Spacer(minLength: 8)
+                Button {
+                    withAnimation(OverlayMotion.snappy) {
+                        if expandedFileChanges.contains(summary.id) {
+                            expandedFileChanges.remove(summary.id)
+                        } else {
+                            expandedFileChanges.insert(summary.id)
+                        }
+                    }
+                } label: {
+                    Text(expanded ? "Hide files" : "Show files")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                Button {
+                    FileChangeDiffController.shared.show(summary)
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "plus.rectangle.on.folder")
+                            .font(.system(size: 11, weight: .semibold))
+                        Text("Open diff")
+                            .font(.system(size: 12, weight: .medium))
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(
+                        Capsule(style: .continuous)
+                            .stroke(OverlaySurface.chipStroke, lineWidth: 0.5)
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+
+            if expanded {
+                Rectangle()
+                    .fill(OverlaySurface.hairline)
+                    .frame(height: 0.5)
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(summary.groups) { group in
+                        FileChangeFolderBlock(group: group, plus: plus, minus: minus) { file in
+                            openChangedFile(file, workspaceRoot: summary.workspaceRoot)
+                        }
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+            }
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(OverlaySurface.cardFill)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(OverlaySurface.cardStroke, lineWidth: 0.5)
+        )
+    }
+
+    @ViewBuilder
+    private func lineStats(additions: Int?, deletions: Int?, plus: Color, minus: Color) -> some View {
+        if let additions {
+            Text("+\(additions)")
+                .font(.system(size: 12, weight: .medium).monospacedDigit())
+                .foregroundStyle(plus)
+        }
+        if let deletions {
+            Text("-\(deletions)")
+                .font(.system(size: 12, weight: .medium).monospacedDigit())
+                .foregroundStyle(minus)
+        }
+    }
+
+    private func openChangedFile(_ file: FileChange, workspaceRoot: String? = nil) {
+        let url = URL(
+            fileURLWithPath: FileChangeSummaryPolicy.resolvedPath(
+                file.path,
+                workspaceRoot: workspaceRoot,
+                fallbackRoot: OverlayPaths.workspace.path
+            )
+        )
+        if MarkdownFiles.isMarkdown(path: url.path) {
+            store.openMarkdownPreview(url.path)
+            return
+        }
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
     private func formatDuration(_ interval: TimeInterval) -> String {
         let seconds = max(0, Int(interval))
         let minutes = seconds / 60
@@ -2019,6 +2376,149 @@ struct OverlayView: View {
             return "\(remain)s"
         }
         return "\(minutes)m \(remain)s"
+    }
+}
+
+private struct QuoteChipLayer: View {
+    @Bindable var store: ChatStore
+    @ObservedObject private var monitor = QuoteSelectionMonitor.shared
+
+    var body: some View {
+        GeometryReader { geo in
+            if let snapshot = monitor.snapshot {
+                let chip = CGSize(
+                    width: QuoteSelectionPolicy.chipWidth,
+                    height: QuoteSelectionPolicy.chipHeight
+                )
+                let center = QuoteSelectionPolicy.chipCenter(
+                    selection: snapshot.selection,
+                    chipSize: chip,
+                    container: CGRect(origin: .zero, size: geo.size)
+                )
+                QuoteToChatChip {
+                    withAnimation(OverlayMotion.composer) {
+                        store.attachDraftClip(snapshot.text, kind: .quote)
+                    }
+                    monitor.dismiss()
+                }
+                .position(center)
+            }
+        }
+        .allowsHitTesting(monitor.snapshot != nil)
+        .onAppear { monitor.start() }
+        .onDisappear { monitor.stop() }
+    }
+}
+
+private struct FileChangeFolderBlock: View {
+    let group: FileChangeGroup
+    let plus: Color
+    let minus: Color
+    var onOpenFile: (FileChange) -> Void
+    @State private var expanded = true
+
+    var body: some View {
+        let open = group.folder.isEmpty || expanded
+        return VStack(alignment: .leading, spacing: 2) {
+            if !group.folder.isEmpty {
+                Button {
+                    withAnimation(OverlayMotion.snappy) {
+                        expanded.toggle()
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: open ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 9, weight: .bold))
+                            .frame(width: 10)
+                        Image(systemName: "folder")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.tertiary)
+                        Text(group.folder)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                        Spacer(minLength: 8)
+                        if group.hasLineStats {
+                            FileChangeLineStats(
+                                additions: group.additions,
+                                deletions: group.deletions,
+                                plus: plus,
+                                minus: minus
+                            )
+                        }
+                    }
+                    .padding(.top, 4)
+                    .padding(.vertical, 4)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            if open {
+                ForEach(group.files) { file in
+                    FileChangeFileRow(file: file, plus: plus, minus: minus, onOpen: onOpenFile)
+                        .padding(.leading, group.folder.isEmpty ? 0 : 16)
+                }
+            }
+        }
+    }
+}
+
+private struct FileChangeFileRow: View {
+    let file: FileChange
+    let plus: Color
+    let minus: Color
+    var onOpen: (FileChange) -> Void
+
+    var body: some View {
+        let icon = PathChipStyle.fileIcon((file.path as NSString).pathExtension.lowercased())
+        Button {
+            onOpen(file)
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: icon.symbol)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(icon.color)
+                    .frame(width: 16)
+                Text(file.fileName)
+                    .font(.system(size: 13))
+                    .foregroundStyle(OverlaySurface.conversationInk)
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                if file.hasLineStats {
+                    FileChangeLineStats(
+                        additions: file.additions,
+                        deletions: file.deletions,
+                        plus: plus,
+                        minus: minus
+                    )
+                }
+            }
+            .padding(.vertical, 4)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Show \(file.fileName) in Finder")
+    }
+}
+
+private struct FileChangeLineStats: View {
+    let additions: Int?
+    let deletions: Int?
+    let plus: Color
+    let minus: Color
+
+    var body: some View {
+        if let additions {
+            Text("+\(additions)")
+                .font(.system(size: 12, weight: .medium).monospacedDigit())
+                .foregroundStyle(plus)
+        }
+        if let deletions {
+            Text("-\(deletions)")
+                .font(.system(size: 12, weight: .medium).monospacedDigit())
+                .foregroundStyle(minus)
+        }
     }
 }
 
@@ -2226,6 +2726,7 @@ private enum TranscriptRow: Identifiable {
     case message(ChatItem)
     case tool(ChatItem)
     case collapsedTools(id: String, items: [ChatItem])
+    case fileChanges(FileChangeSummary)
 
     var id: String {
         switch self {
@@ -2235,6 +2736,8 @@ private enum TranscriptRow: Identifiable {
             "tool-\(item.id.uuidString)"
         case .collapsedTools(let id, _):
             id
+        case .fileChanges(let summary):
+            summary.id
         }
     }
 
@@ -2244,6 +2747,8 @@ private enum TranscriptRow: Identifiable {
             item.id == itemID
         case .collapsedTools(_, let items):
             items.contains { $0.id == itemID }
+        case .fileChanges:
+            false
         }
     }
 }
@@ -2308,6 +2813,40 @@ private struct WorkingDots: View {
     }
 }
 
+private struct QuoteToChatChip: View {
+    var action: () -> Void
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        Button(action: action) {
+            Text("Add to chat")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(OverlaySurface.conversationInk)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+        }
+        .buttonStyle(.plain)
+        .background(
+            Capsule(style: .continuous)
+                .fill(colorScheme == .dark ? Color(red: 0.22, green: 0.22, blue: 0.23) : Color.white)
+                .shadow(
+                    color: Color.black.opacity(colorScheme == .dark ? 0.28 : 0.10),
+                    radius: 10,
+                    y: 4
+                )
+        )
+        .overlay(
+            Capsule(style: .continuous)
+                .stroke(
+                    colorScheme == .dark ? Color.white.opacity(0.10) : Color.black.opacity(0.06),
+                    lineWidth: 0.5
+                )
+        )
+        .help("Quote this selection in the composer")
+        .accessibilityLabel("Add to chat")
+    }
+}
+
 private struct FrostedGlass<S: Shape>: ViewModifier {
     var shape: S
     @Environment(\.colorScheme) private var colorScheme
@@ -2323,17 +2862,19 @@ private struct FrostedGlass<S: Shape>: ViewModifier {
                 shape
                     .fill(fill)
                     .shadow(
-                        color: Color.black.opacity(dark ? 0.32 : 0.055),
-                        radius: 18,
-                        y: 14
+                        color: Color.black.opacity(dark ? 0.28 : 0.032),
+                        radius: dark ? 18 : 26,
+                        y: dark ? 12 : 8
                     )
                     .allowsHitTesting(false)
             }
             .overlay {
-                if dark {
-                    shape.stroke(Color.white.opacity(0.08), lineWidth: 0.5)
-                        .allowsHitTesting(false)
-                }
+                shape
+                    .stroke(
+                        dark ? Color.white.opacity(0.08) : Color.black.opacity(0.045),
+                        lineWidth: 0.5
+                    )
+                    .allowsHitTesting(false)
             }
     }
 }
@@ -2487,6 +3028,371 @@ private final class PulsingCaretNSView: NSView {
 
     override var intrinsicContentSize: NSSize {
         NSSize(width: caretWidth, height: caretHeight)
+    }
+}
+
+private struct ComposerBar: View {
+    @Bindable var store: ChatStore
+    @FocusState.Binding var focused: Bool
+    @StateObject private var ime = IMEComposingMonitor()
+    var restoreFocus: () -> Void
+    var stopComposer: () -> Void
+
+    private var composerHeight: CGFloat { store.composerChromeHeight }
+
+    private var showInputPlaceholder: Bool {
+        store.draft.isEmpty && !ime.composing
+    }
+
+    private var showInputCaret: Bool {
+        focused && showInputPlaceholder
+    }
+
+    var body: some View {
+        VStack(spacing: 8) {
+            if let brief = store.activeWorkspaceBrief, brief.isActive {
+                workspaceChip(brief)
+            }
+            composerAttachments
+            inputRow
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .frame(width: OverlayMetrics.inputWidth, height: composerHeight)
+        .clipped()
+        .animation(OverlayMotion.composer, value: composerHeight)
+        .background(WindowDragArea())
+        .frostedGlass(in: RoundedRectangle(cornerRadius: OverlayMetrics.cornerRadius, style: .continuous))
+        .frame(maxWidth: .infinity)
+        .onChange(of: store.draft) { _, _ in
+            guard PromptTriggerPolicy.hasActiveTrigger(in: store.draft) else {
+                if store.slashHighlight != 0 { store.slashHighlight = 0 }
+                return
+            }
+            let count = store.visiblePaletteItems.count
+            if count == 0 {
+                store.slashHighlight = 0
+            } else if store.slashHighlight >= count {
+                store.slashHighlight = 0
+            }
+        }
+        .onChange(of: store.activeWorkspaceBrief?.isActive) { _, _ in
+            store.syncOverlayChrome()
+        }
+        .onAppear { ime.start() }
+        .onDisappear { ime.stop() }
+    }
+
+    private func workspaceChip(_ brief: WorkspaceBrief) -> some View {
+        Button {
+            store.openActiveWorkspaceStage()
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "folder")
+                    .font(.system(size: 11, weight: .semibold))
+                Text(brief.name)
+                    .font(.system(size: 12, weight: .medium))
+                    .lineLimit(1)
+                Text(brief.status.rawValue)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(brief.status == .running ? OverlayMetrics.ink : OverlayMetrics.tertiaryInk)
+                Spacer(minLength: 0)
+            }
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Show workspace session")
+        .accessibilityLabel("Show workspace session")
+    }
+
+    @ViewBuilder
+    private var composerAttachments: some View {
+        if store.branchDraft != nil || !store.draftClips.isEmpty || !store.draftImages.isEmpty {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    if let branch = store.branchDraft {
+                        branchDraftChip(branch)
+                    }
+                    ForEach(store.draftImages) { image in
+                        draftImageChip(image)
+                    }
+                    ForEach(store.draftClips) { clip in
+                        draftClipChip(clip)
+                            .transition(.asymmetric(
+                                insertion: .opacity.combined(with: .move(edge: .bottom)),
+                                removal: .opacity
+                            ))
+                    }
+                }
+                .animation(OverlayMotion.composer, value: store.draftClips.count)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(height: OverlayComposer.attachmentRow)
+            .clipped()
+        }
+    }
+
+    private func branchDraftChip(_ branch: ConversationBranchDraft) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "arrow.triangle.branch")
+                .font(.system(size: 11, weight: .semibold))
+            Text("Branching from \(branch.title)")
+                .font(.system(size: 12, weight: .medium))
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Button {
+                store.cancelBranchDraft()
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .buttonStyle(.plain)
+            .help("Cancel branch edit")
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .frame(maxWidth: OverlayComposer.attachmentChipMaxWidth(inputWidth: OverlayMetrics.inputWidth))
+        .background(Capsule().fill(Color.primary.opacity(0.06)))
+        .clipShape(Capsule())
+    }
+
+    private func draftImageChip(_ image: DraftImage) -> some View {
+        ZStack(alignment: .topTrailing) {
+            if let nsImage = NSImage(data: image.png) {
+                Image(nsImage: nsImage)
+                    .resizable()
+                    .interpolation(.high)
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: 36, height: 36)
+                    .clipped()
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            } else {
+                Image(systemName: "photo")
+                    .font(.system(size: 14, weight: .semibold))
+                    .frame(width: 36, height: 36)
+                    .foregroundStyle(.secondary)
+            }
+            Button {
+                store.removeDraftImage(image.id)
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.primary.opacity(0.85))
+                    .background(Circle().fill(Color(nsColor: .windowBackgroundColor)))
+            }
+            .buttonStyle(.plain)
+            .offset(x: 4, y: -4)
+            .help("Remove image")
+        }
+        .padding(.top, 4)
+        .padding(.trailing, 4)
+    }
+
+    private func draftClipChip(_ clip: DraftClip) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: clip.kind == .quote ? "text.quote" : "doc.on.clipboard")
+                .font(.system(size: 11, weight: .semibold))
+                .fixedSize()
+            Text(OverlayComposer.clipLabel(clip))
+                .font(.system(size: 12, weight: .medium))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+            Button {
+                store.removeDraftClip(clip.id)
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .buttonStyle(.plain)
+            .help(clip.kind == .quote ? "Remove quote" : "Remove pasted text")
+            .fixedSize()
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .frame(maxWidth: OverlayComposer.attachmentChipMaxWidth(inputWidth: OverlayMetrics.inputWidth))
+        .background(
+            Capsule(style: .continuous)
+                .fill(Color.primary.opacity(0.06))
+        )
+        .clipShape(Capsule(style: .continuous))
+    }
+
+    private var inputRow: some View {
+        let lineCount = OverlayComposer.visibleLineCount(
+            store.draft,
+            fieldWidth: OverlayComposer.fieldWidth(
+                inputWidth: OverlayMetrics.inputWidth,
+                avatarSize: OverlayMetrics.avatarSize
+            ),
+            fontSize: OverlayMetrics.fontSize
+        )
+        let fieldHeight = max(
+            OverlayMetrics.avatarSize,
+            CGFloat(lineCount) * OverlayComposer.lineHeight
+        )
+        return HStack(alignment: .bottom, spacing: 8) {
+            FxAvatarView(
+                file: store.selectedAvatarFile,
+                animation: store.isBusy ? "working" : "idle",
+                onTap: { store.toggleAvatarPicker() }
+            )
+            .frame(width: OverlayMetrics.avatarSize, height: OverlayMetrics.avatarSize)
+
+            ZStack(alignment: lineCount > 1 ? .topLeading : .leading) {
+                TextField("", text: $store.draft, axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .font(OverlayMetrics.bodyFont)
+                    .foregroundStyle(OverlayMetrics.ink)
+                    .focused($focused)
+                    .lineLimit(1...OverlayComposer.maxVisibleLines)
+                    .submitLabel(.send)
+                    .onSubmit {
+                        if store.isMountPalette, store.slashMenuVisible {
+                            store.toggleHighlightedMount()
+                        } else {
+                            store.send()
+                        }
+                        restoreFocus()
+                    }
+                    .background(ComposerTextWidthSync())
+                if showInputPlaceholder {
+                    HStack(spacing: 3) {
+                        if showInputCaret {
+                            InputCaret()
+                        }
+                        Text(store.draftImages.isEmpty && store.draftClips.isEmpty
+                             ? "Ask Bubble  /  @  $"
+                             : "Add a caption")
+                            .font(OverlayMetrics.bodyFont)
+                            .foregroundStyle(OverlayMetrics.tertiaryInk)
+                    }
+                    .allowsHitTesting(false)
+                }
+            }
+            .frame(
+                minWidth: 0,
+                maxWidth: .infinity,
+                minHeight: OverlayMetrics.avatarSize,
+                maxHeight: fieldHeight,
+                alignment: lineCount > 1 ? .topLeading : .center
+            )
+            .clipped()
+
+            composerTrailingControl
+        }
+    }
+
+    @ViewBuilder
+    private var composerTrailingControl: some View {
+        let size = OverlayComposer.trailingControlSize
+        if MessageDeliveryPolicy.composerSends(
+            isBusy: store.isBusy,
+            hasPayload: store.hasComposerPayload
+        ) {
+            Button {
+                store.send()
+                restoreFocus()
+            } label: {
+                Image(systemName: "arrow.up.circle.fill")
+                    .font(.system(size: 18, weight: .semibold))
+                    .frame(width: size, height: size)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.primary)
+            .help("Add to waiting messages")
+            .accessibilityLabel("Add message to waiting queue")
+        } else if store.isBusy || store.activeWorkspaceBrief?.isActive == true {
+            Button {
+                stopComposer()
+            } label: {
+                Image(systemName: "stop.circle.fill")
+                    .font(.system(size: 18, weight: .semibold))
+                    .frame(width: size, height: size)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help(store.activeWorkspaceBrief?.isActive == true ? "Stop workspace run" : "Stop")
+            .accessibilityLabel(store.activeWorkspaceBrief?.isActive == true ? "Stop workspace run" : "Stop")
+        } else if store.hasComposerPayload {
+            Button {
+                store.send()
+                restoreFocus()
+            } label: {
+                Image(systemName: "arrow.up.circle.fill")
+                    .font(.system(size: 18, weight: .semibold))
+                    .frame(width: size, height: size)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.primary)
+        } else {
+            Color.clear
+                .frame(width: size, height: size)
+        }
+    }
+}
+
+private struct ComposerTextWidthSync: NSViewRepresentable {
+    func makeNSView(context: Context) -> ComposerWidthProbe {
+        ComposerWidthProbe()
+    }
+
+    func updateNSView(_ view: ComposerWidthProbe, context: Context) {
+        view.sync()
+    }
+}
+
+private final class ComposerWidthProbe: NSView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func layout() {
+        super.layout()
+        sync()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        sync()
+    }
+
+    func sync() {
+        DispatchQueue.main.async { [weak self] in
+            self?.apply()
+        }
+    }
+
+    private func apply() {
+        guard let host = superview else { return }
+        let views = textViews(in: host)
+        for textView in views where textView.isEditable {
+            textView.textContainer?.widthTracksTextView = true
+            textView.textContainer?.lineFragmentPadding = 0
+            textView.textContainerInset = NSSize(width: 0, height: 1)
+            let width = max(1, textView.bounds.width)
+            if let container = textView.textContainer, abs(container.size.width - width) > 0.5 {
+                container.size = NSSize(width: width, height: 10_000)
+            }
+        }
+    }
+
+    private func textViews(in view: NSView) -> [NSTextView] {
+        var found: [NSTextView] = []
+        if let textView = view as? NSTextView {
+            found.append(textView)
+        }
+        for child in view.subviews {
+            found.append(contentsOf: textViews(in: child))
+        }
+        return found
     }
 }
 

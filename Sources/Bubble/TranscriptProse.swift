@@ -4,6 +4,79 @@ import SwiftUI
 struct PathChipIcon: Equatable {
     var symbol: String
     var color: Color
+    var markdown: Bool = false
+}
+
+struct MarkdownFileGlyph: View {
+    var pointSize: CGFloat = 12
+
+    static let fill = Color(red: 0.22, green: 0.52, blue: 0.96)
+
+    var body: some View {
+        let width = pointSize * 0.90
+        let height = pointSize
+        ZStack {
+            MarkdownPageShape()
+                .fill(Self.fill)
+            MarkdownPageShape.fold()
+                .fill(Color.white.opacity(0.28))
+            Text("MD")
+                .font(.system(size: max(5.5, pointSize * 0.36), weight: .bold, design: .rounded))
+                .foregroundStyle(Color.white)
+                .tracking(-0.3)
+                .offset(y: pointSize * 0.08)
+        }
+        .frame(width: width, height: height)
+        .accessibilityHidden(true)
+    }
+}
+
+private struct MarkdownPageShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        Self.page(in: rect)
+    }
+
+    static func fold() -> some Shape {
+        MarkdownPageFold()
+    }
+
+    static func page(in rect: CGRect) -> Path {
+        let fold = min(rect.width, rect.height) * 0.30
+        let radius = min(1.8, rect.width * 0.16)
+        var path = Path()
+        path.move(to: CGPoint(x: rect.minX + radius, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX - fold, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.minY + fold))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY - radius))
+        path.addQuadCurve(
+            to: CGPoint(x: rect.maxX - radius, y: rect.maxY),
+            control: CGPoint(x: rect.maxX, y: rect.maxY)
+        )
+        path.addLine(to: CGPoint(x: rect.minX + radius, y: rect.maxY))
+        path.addQuadCurve(
+            to: CGPoint(x: rect.minX, y: rect.maxY - radius),
+            control: CGPoint(x: rect.minX, y: rect.maxY)
+        )
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.minY + radius))
+        path.addQuadCurve(
+            to: CGPoint(x: rect.minX + radius, y: rect.minY),
+            control: CGPoint(x: rect.minX, y: rect.minY)
+        )
+        path.closeSubpath()
+        return path
+    }
+}
+
+private struct MarkdownPageFold: Shape {
+    func path(in rect: CGRect) -> Path {
+        let fold = min(rect.width, rect.height) * 0.30
+        var path = Path()
+        path.move(to: CGPoint(x: rect.maxX - fold, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.minY + fold))
+        path.addLine(to: CGPoint(x: rect.maxX - fold, y: rect.minY + fold))
+        path.closeSubpath()
+        return path
+    }
 }
 
 enum PathChipStyle {
@@ -43,8 +116,14 @@ enum PathChipStyle {
 
     static func fileIcon(_ ext: String) -> PathChipIcon {
         switch ext {
-        case "md", "markdown", "txt", "rtf":
-            return PathChipIcon(symbol: "doc.richtext.fill", color: Color(red: 0.25, green: 0.55, blue: 0.95))
+        case "md", "markdown":
+            return PathChipIcon(
+                symbol: "doc",
+                color: MarkdownFileGlyph.fill,
+                markdown: true
+            )
+        case "txt", "rtf":
+            return PathChipIcon(symbol: "doc.text", color: Color(red: 0.42, green: 0.48, blue: 0.58))
         case "swift":
             return PathChipIcon(symbol: "swift", color: Color(red: 0.95, green: 0.45, blue: 0.18))
         case "json", "yml", "yaml", "toml", "xml", "plist":
@@ -569,7 +648,7 @@ struct ProseDocument: View {
                     case .text(let text):
                         Text(inlineMarkdown(text))
                             .font(font)
-                            .foregroundStyle(OverlayMetrics.ink)
+                            .foregroundStyle(OverlaySurface.conversationInk)
                             .lineLimit(1)
                             .fixedSize(horizontal: true, vertical: true)
                             .textSelection(.enabled)
@@ -577,7 +656,7 @@ struct ProseDocument: View {
                         Text(inlineMarkdown(text))
                             .font(font)
                             .fontWeight(.semibold)
-                            .foregroundStyle(OverlayMetrics.ink)
+                            .foregroundStyle(OverlaySurface.conversationInk)
                             .lineLimit(1)
                             .fixedSize(horizontal: true, vertical: true)
                             .textSelection(.enabled)
@@ -708,28 +787,35 @@ struct InlineChip: View {
     @State private var hovering = false
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: 6, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: OverlaySurface.chipRadius, style: .continuous)
         let icon = PathChipStyle.icon(for: kind)
         let label = HStack(spacing: 4) {
             if let icon {
-                Image(systemName: icon.symbol)
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(icon.color)
+                if icon.markdown {
+                    MarkdownFileGlyph(pointSize: 11)
+                } else {
+                    Image(systemName: icon.symbol)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(icon.color)
+                }
             }
             Text(displayText)
                 .font(.system(size: OverlayMetrics.chipSize, weight: .regular, design: kind.isMonospaced ? .monospaced : .default))
-                .foregroundStyle(kind == .url ? Color(red: 0.16, green: 0.42, blue: 0.90) : OverlayMetrics.ink.opacity(hovering && isActionable ? 0.95 : 0.82))
+                .foregroundStyle(kind == .url ? Color(red: 0.16, green: 0.42, blue: 0.90) : OverlaySurface.conversationInk)
                 .lineLimit(1)
                 .truncationMode(.middle)
         }
-        .padding(.leading, icon == nil ? 6 : 5)
-        .padding(.trailing, 6)
-        .padding(.vertical, 2)
+        .padding(.leading, icon == nil ? 7 : 5)
+        .padding(.trailing, 7)
+        .padding(.vertical, 3)
         .background(
-            shape.fill(Color.primary.opacity(hovering && isActionable ? 0.12 : 0.06))
+            shape.fill(hovering && isActionable ? OverlaySurface.userFill : OverlaySurface.chipFill)
         )
         .overlay {
-            shape.stroke(Color.primary.opacity(hovering && isActionable ? 0.22 : 0), lineWidth: 1)
+            shape.stroke(
+                hovering && isActionable ? OverlaySurface.chipStroke.opacity(1.4) : OverlaySurface.chipStroke,
+                lineWidth: 0.5
+            )
         }
         .contentShape(shape)
         .textSelection(.disabled)

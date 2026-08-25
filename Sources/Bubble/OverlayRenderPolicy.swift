@@ -38,7 +38,21 @@ enum OverlayRenderPolicy {
         previousPreviewWidth: CGFloat,
         nextPreviewWidth: CGFloat
     ) -> Bool {
-        true
+        abs(previousPreviewWidth - nextPreviewWidth) >= 1
+    }
+
+    /// Side-stage width and the first transcript reveal own the display-link
+    /// animator. Composer chrome (quotes, attachments) must not, or SwiftUI
+    /// relayouts the whole transcript on every spring tick.
+    static func shouldAnimatePanelFrame(previous: OverlayLayout?, next: OverlayLayout) -> Bool {
+        guard let previous else { return false }
+        if shouldAnimateSideStageResize(
+            previousPreviewWidth: previous.previewWidth,
+            nextPreviewWidth: next.previewWidth
+        ) {
+            return true
+        }
+        return (previous.transcriptHeight > 1) != (next.transcriptHeight > 1)
     }
 
     /// Batch ordinary chrome layout on the next display pulse. Side-stage width

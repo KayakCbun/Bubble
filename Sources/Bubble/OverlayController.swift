@@ -172,7 +172,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         rememberRestPosition(panel.frame)
         if appearing {
             var start = panel.frame
-            start.origin.y -= 10
+            start.origin.y -= 16
             CATransaction.begin()
             CATransaction.setDisableActions(true)
             panel.alphaValue = 0
@@ -191,6 +191,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         if appearing || panel.alphaValue < 0.99 {
             let dest = targetPanelFrame ?? panel.frame
             isUpdatingFrame = true
+            store.setStreamUISuspended(true)
             if appearing {
                 frameAnimator.syncFromPanel()
             }
@@ -202,7 +203,9 @@ final class OverlayController: NSObject, NSWindowDelegate {
             store.setStreamUISuspended(false)
         }
         store.requestFocus()
-        store.refreshCatalog()
+        OverlayPulse.shared.onNextFrame { [weak self] in
+            self?.store.refreshCatalog()
+        }
         Task { @MainActor in
             await connectIfNeeded()
         }
@@ -237,7 +240,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         isUpdatingFrame = true
         panel.ignoresMouseEvents = true
         var dest = panel.frame
-        dest.origin.y -= 8
+        dest.origin.y -= 14
         frameAnimator.syncFromPanel()
         frameAnimator.onSettled = { [weak self] in
             guard let self, self.hideGeneration == generation, self.isHiding else { return }
@@ -417,9 +420,9 @@ final class OverlayController: NSObject, NSWindowDelegate {
             previewWidth: layout.previewWidth,
             chromeVisible: layout.chromeVisible
         )
-        let animateFrame = panel.isVisible && OverlayRenderPolicy.shouldAnimateSideStageResize(
-            previousPreviewWidth: lastAppliedLayout?.previewWidth ?? 0,
-            nextPreviewWidth: layout.previewWidth
+        let animateFrame = panel.isVisible && OverlayRenderPolicy.shouldAnimatePanelFrame(
+            previous: lastAppliedLayout,
+            next: applied
         )
         let needsMask = OverlayRenderPolicy.maskNeedsApply(previous: lastAppliedLayout, next: applied)
         if destChanged, !animateFrame, needsMask {
@@ -454,16 +457,9 @@ final class OverlayController: NSObject, NSWindowDelegate {
                 ? 0
                 : max(0, contentHeight - OverlayMetrics.minHeight - OverlayMetrics.stackSpacing),
             pickerHeight: store.showAvatarPicker ? OverlayMetrics.pickerHeight : 0,
-            commandPaletteHeight: store.slashPaletteHeight,
+            commandPaletteHeight: store.slashPaletteChromeHeight,
             transcriptWidth: transcriptWidth,
-            composerHeight: OverlayComposer.composerHeight(
-                draft: store.draft,
-                minHeight: OverlayMetrics.minHeight,
-                avatarSize: OverlayMetrics.avatarSize,
-                workspaceChip: store.activeWorkspaceBrief?.isActive == true,
-                chipHeight: OverlayMetrics.chipHeight,
-                attachmentCount: store.draftClips.count + store.draftImages.count
-            ),
+            composerHeight: store.composerChromeHeight,
             previewWidth: previewWidth,
             chromeVisible: store.sideStageChromeVisible
         ))
@@ -766,7 +762,9 @@ final class OverlayController: NSObject, NSWindowDelegate {
 
     private func hideIfClickOutside() {
         guard panel.isVisible, !isHiding, !store.overlayPinned else { return }
-        if MermaidZoomController.shared.containsMouse() || ImageZoomController.shared.containsMouse() {
+        if MermaidZoomController.shared.containsMouse()
+            || ImageZoomController.shared.containsMouse()
+            || FileChangeDiffController.shared.containsMouse() {
             return
         }
         let click = NSEvent.mouseLocation
@@ -820,6 +818,10 @@ final class OverlayController: NSObject, NSWindowDelegate {
     private func handleEscape() {
         if ImageZoomController.shared.isVisible {
             ImageZoomController.shared.close()
+            return
+        }
+        if FileChangeDiffController.shared.isVisible {
+            FileChangeDiffController.shared.close()
             return
         }
         if store.handleSideStageEscape() {
