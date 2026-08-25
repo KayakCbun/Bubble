@@ -3,7 +3,7 @@ import BubbleMounts
 import Foundation
 import Observation
 
-struct ChatItem: Identifiable, Codable, Equatable {
+struct ChatItem: Identifiable, Codable, Equatable, @unchecked Sendable {
     enum Kind: String, Codable {
         case user
         case assistant
@@ -114,7 +114,7 @@ struct ConversationBranchDraft: Equatable {
     var suspendedImages: [DraftImage]
 }
 
-private struct TranscriptEnvelope: Codable {
+private struct TranscriptEnvelope: Codable, @unchecked Sendable {
     var version: Int = 1
     var sessionId: String
     var selectedLeafId: String?
@@ -1049,6 +1049,11 @@ final class ChatStore {
         qos: .userInitiated,
         autoreleaseFrequency: .workItem
     )
+    private static let transcriptPersistQueue = DispatchQueue(
+        label: "local.bubble.transcript-persist",
+        qos: .utility,
+        autoreleaseFrequency: .workItem
+    )
     private var persistWork: DispatchWorkItem?
     private var richTranscriptRows: [String: ChatItem] = [:]
     private var mountSkillRefreshGeneration = 0
@@ -1113,6 +1118,8 @@ final class ChatStore {
         closeSideStage(animated: false)
         WorkspaceRegistry.interruptActive(in: &workspaceState)
         persistWorkspaceState()
+        writeTranscript()
+        Self.transcriptPersistQueue.sync {}
         control.stop()
     }
 
@@ -3296,24 +3303,27 @@ final class ChatStore {
             }
             return true
         }
-        do {
-            guard let sessionID = client.sessionId ?? PiSessions.currentId() else { return }
-            let envelope = TranscriptEnvelope(
-                sessionId: sessionID,
-                selectedLeafId: Self.savedConversationLeaves()[sessionID],
-                items: Array(stored),
-                richItems: Array(richTranscriptRows.values.suffix(TranscriptVirtualizationLimits.retainedItems))
-            )
-            let data = try JSONEncoder().encode(envelope)
-            let sessionURL = Self.transcriptURL(sessionID: sessionID)
-            try FileManager.default.createDirectory(
-                at: sessionURL.deletingLastPathComponent(),
-                withIntermediateDirectories: true
-            )
-            try data.write(to: sessionURL, options: .atomic)
-            try data.write(to: OverlayPaths.transcriptFile, options: .atomic)
-        } catch {
-            OverlayLog.write("transcript save failed: \(error.localizedDescription)")
+        guard let sessionID = client.sessionId ?? PiSessions.currentId() else { return }
+        let envelope = TranscriptEnvelope(
+            sessionId: sessionID,
+            selectedLeafId: Self.savedConversationLeaves()[sessionID],
+            items: Array(stored),
+            richItems: Array(richTranscriptRows.values.suffix(TranscriptVirtualizationLimits.retainedItems))
+        )
+        let sessionURL = Self.transcriptURL(sessionID: sessionID)
+        let transcriptURL = OverlayPaths.transcriptFile
+        Self.transcriptPersistQueue.async {
+            do {
+                let data = try JSONEncoder().encode(envelope)
+                try FileManager.default.createDirectory(
+                    at: sessionURL.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
+                )
+                try data.write(to: sessionURL, options: .atomic)
+                try data.write(to: transcriptURL, options: .atomic)
+            } catch {
+                OverlayLog.write("transcript save failed: \(error.localizedDescription)")
+            }
         }
     }
 

@@ -63,14 +63,34 @@ private enum TranscriptInteractionCheck {
         )
         var follow = TranscriptFollowState()
         expect(follow.followsLatest, "a transcript starts pinned to the live edge")
+        expect(!follow.wouldChange(atEnd: true), "repeated end notifications stay off the render hot path")
         follow.userNavigated(atEnd: false)
         expect(!follow.followsLatest, "an upward user scroll immediately disables live follow")
+        expect(!follow.wouldChange(atEnd: false), "repeated free-scroll notifications stay off the render hot path")
         expect(!follow.shouldFollowRevision(isBusy: true), "streaming cannot yank a history reader back to the end")
         follow.userNavigated(atEnd: true)
         expect(follow.followsLatest, "returning to the end re-arms live follow")
         follow.userNavigated(atEnd: false)
         follow.resumeAtEnd()
         expect(follow.followsLatest, "sending a new user turn deliberately resumes live follow")
+        expect(
+            TranscriptViewportAnchorPolicy.visibleOrigin(
+                anchorPosition: 480,
+                anchorOffset: -20,
+                visibleHeight: 300,
+                documentIsFlipped: true
+            ) == 500,
+            "a row growing above the viewport preserves the visible row offset"
+        )
+        expect(
+            TranscriptViewportAnchorPolicy.visibleOrigin(
+                anchorPosition: 480,
+                anchorOffset: 20,
+                visibleHeight: 300,
+                documentIsFlipped: false
+            ) == 160,
+            "non-flipped scroll documents preserve the same anchor offset"
+        )
         let collapsed = TranscriptExpansionPolicy.renderKey(
             containerExpanded: false,
             expandedChildIDs: []

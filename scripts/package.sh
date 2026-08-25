@@ -15,6 +15,8 @@ swiftc -O -parse-as-library \
   Sources/Bubble/MarkdownFiles.swift \
   Sources/Bubble/OverlayLayoutPolicy.swift \
   Sources/Bubble/OverlaySurface.swift \
+  Sources/Bubble/PierreFileIconCatalog.swift \
+  Sources/Bubble/PierreFileIcon.swift \
   Sources/Bubble/WorkspaceTranscriptRenderPlan.swift \
   Sources/Bubble/TranscriptProse.swift \
   scripts/check_workspace_render_perf.swift \
@@ -48,6 +50,9 @@ swiftc -parse-as-library Sources/Bubble/QuoteSelectionPolicy.swift Sources/Bubbl
 
 swiftc -parse-as-library Sources/Bubble/FileChangeSummaryPolicy.swift scripts/check_file_change_summary.swift -o /tmp/bubble-check-file-change-summary
 /tmp/bubble-check-file-change-summary
+
+swiftc -parse-as-library Sources/Bubble/PierreFileIconCatalog.swift scripts/check_pierre_file_icons.swift -o /tmp/bubble-check-pierre-file-icons
+/tmp/bubble-check-pierre-file-icons
 
 swiftc -parse-as-library Sources/Bubble/PromptTriggerPolicy.swift scripts/check_prompt_palette.swift -o /tmp/bubble-check-prompt-palette
 /tmp/bubble-check-prompt-palette
@@ -96,6 +101,10 @@ cp "$ROOT/Resources/Info.plist" "$APP/Contents/Info.plist"
 mkdir -p "$RES/Avatar" "$RES/Mermaid"
 cp -R "$ROOT/Resources/Avatar/." "$RES/Avatar/"
 cp -R "$ROOT/Resources/Mermaid/." "$RES/Mermaid/"
+if [[ -d "$ROOT/Resources/FileIcons" ]]; then
+  mkdir -p "$RES/FileIcons"
+  cp -R "$ROOT/Resources/FileIcons/." "$RES/FileIcons/"
+fi
 
 ICON_SRC="$ROOT/Resources/AppIcon.png"
 if [[ -f "$ICON_SRC" ]]; then

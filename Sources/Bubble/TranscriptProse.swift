@@ -790,14 +790,12 @@ struct InlineChip: View {
         let shape = RoundedRectangle(cornerRadius: OverlaySurface.chipRadius, style: .continuous)
         let icon = PathChipStyle.icon(for: kind)
         let label = HStack(spacing: 4) {
-            if let icon {
-                if icon.markdown {
-                    MarkdownFileGlyph(pointSize: 11)
-                } else {
-                    Image(systemName: icon.symbol)
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(icon.color)
-                }
+            if kind.isFilePath {
+                PierreFileIcon(path: displayText, size: 11)
+            } else if let icon {
+                Image(systemName: icon.symbol)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(icon.color)
             }
             Text(displayText)
                 .font(.system(size: OverlayMetrics.chipSize, weight: .regular, design: kind.isMonospaced ? .monospaced : .default))

@@ -42,6 +42,10 @@ struct TranscriptFollowState: Equatable {
 
     var followsLatest: Bool { mode == .followingEnd }
 
+    func wouldChange(atEnd: Bool) -> Bool {
+        followsLatest != atEnd
+    }
+
     mutating func userNavigated(atEnd: Bool) {
         mode = atEnd ? .followingEnd : .freeScrolling
     }
@@ -52,6 +56,18 @@ struct TranscriptFollowState: Equatable {
 
     func shouldFollowRevision(isBusy: Bool) -> Bool {
         followsLatest && TranscriptFollowPolicy.followsRevisionChange(isBusy: isBusy)
+    }
+}
+
+enum TranscriptViewportAnchorPolicy {
+    static func visibleOrigin(
+        anchorPosition: CGFloat,
+        anchorOffset: CGFloat,
+        visibleHeight: CGFloat,
+        documentIsFlipped: Bool
+    ) -> CGFloat {
+        let desiredEdge = anchorPosition - anchorOffset
+        return documentIsFlipped ? desiredEdge : desiredEdge - visibleHeight
     }
 }
 

@@ -40,8 +40,8 @@ private enum TranscriptRenderPlanCheck {
             + Double(cold.components.attoseconds) / 1_000_000_000_000_000
 
         expect(plan.units.count > seeds.count * 3, "long assistant replies must split into virtual render units")
-        expect(plan.units.last?.id == "assistant-599", "the terminal chunk keeps the source row id for stable scrolling")
-        expect(plan.units.dropLast().contains(where: { $0.id.hasPrefix("assistant-599-chunk-") }), "non-terminal chunks get stable derived ids")
+        expect(plan.units.contains(where: { $0.id == "assistant-599" }), "the first chunk keeps the source row id for stable scrolling")
+        expect(plan.units.last?.id.hasPrefix("assistant-599-chunk-") == true, "continuation chunks get stable derived ids")
 
         let cutover = plan.units.firstIndex(where: { $0.startsAfterBranchPoint })
         expect(cutover != nil, "the plan precomputes one branch cutover")
@@ -55,8 +55,20 @@ private enum TranscriptRenderPlanCheck {
             branchSourceID: nil,
             streamingSeedIDs: ["assistant-599"]
         )
-        expect(streaming.units.count == 2, "a streaming answer stays one stable tail unit")
-        expect(streaming.units.last?.text == longAnswer, "the live unit carries the complete current text")
+        expect(streaming.units.count > 2, "a long streaming answer splits into stable render units")
+        expect(streaming.units.last?.copyText == longAnswer, "the live tail keeps the complete text for copy and branch controls")
+        let streamingIDs = streaming.units.map(\.id)
+        var grownSeeds = Array(seeds.suffix(2))
+        grownSeeds[grownSeeds.count - 1].text += "\n\nA newly streamed tail paragraph."
+        let grownStreaming = TranscriptRenderPlan.build(
+            seeds: grownSeeds,
+            branchSourceID: nil,
+            streamingSeedIDs: ["assistant-599"]
+        )
+        expect(
+            Array(grownStreaming.units.map(\.id).prefix(streamingIDs.count)) == streamingIDs,
+            "stream growth preserves every existing chunk identity"
+        )
 
         let unicode = Array(repeating: "中文段落 🫧 keeps its UTF-8 boundary intact.", count: 180)
             .joined(separator: "\n\n")

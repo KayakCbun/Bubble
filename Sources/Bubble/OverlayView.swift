@@ -625,9 +625,10 @@ struct OverlayView: View {
     }
 
     private var historyTicks: [HistoryTick] {
-        HistoryPreview.ticks(from: store.visibleItems).map { tick in
+        let itemsByID = Dictionary(uniqueKeysWithValues: store.items.map { ($0.id, $0) })
+        return HistoryPreview.ticks(from: store.visibleItems).map { tick in
             var tick = tick
-            if let item = store.items.first(where: { $0.id == tick.id }) {
+            if let item = itemsByID[tick.id] {
                 tick.branchCount = max(1, store.variants(for: item).count)
             }
             return tick
@@ -689,6 +690,7 @@ struct OverlayView: View {
                         }
                         .equatable()
                         .id(row.id)
+                        .background { TranscriptRowAnchor(id: row.id) }
                         .padding(.top, row.isContinuation ? -10 : 0)
                         .opacity(row.isAfterBranchPoint ? 0.34 : 1)
                     }
@@ -710,16 +712,18 @@ struct OverlayView: View {
                 .padding(.bottom, 0)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .foregroundStyle(OverlaySurface.conversationInk)
+                .background {
+                    TranscriptScrollObserver(
+                        maintainsVisibleContent: !followState.followsLatest
+                    ) { atEnd, userDriven in
+                        guard userDriven, followState.wouldChange(atEnd: atEnd) else { return }
+                        followState.userNavigated(atEnd: atEnd)
+                    }
+                }
             }
             .scrollIndicators(.never)
             .scrollBounceBehavior(.basedOnSize)
             .contentMargins(.bottom, 0, for: .scrollContent)
-            .background {
-                TranscriptScrollObserver { atEnd, userDriven in
-                    guard userDriven else { return }
-                    followState.userNavigated(atEnd: atEnd)
-                }
-            }
             .transaction { transaction in
                 if store.isBusy {
                     transaction.disablesAnimations = true
@@ -2453,15 +2457,11 @@ private struct FileChangeFileRow: View {
     var onOpen: (FileChange) -> Void
 
     var body: some View {
-        let icon = PathChipStyle.fileIcon((file.path as NSString).pathExtension.lowercased())
         Button {
             onOpen(file)
         } label: {
             HStack(spacing: 8) {
-                Image(systemName: icon.symbol)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(icon.color)
-                    .frame(width: 16)
+                PierreFileIcon(path: file.path, size: 16)
                 Text(file.fileName)
                     .font(.system(size: 13))
                     .foregroundStyle(OverlaySurface.conversationInk)
@@ -3431,110 +3431,5 @@ struct HeightPreferenceKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = nextValue()
-    }
-}
-
-private struct TranscriptScrollObserver: NSViewRepresentable {
-    var onChange: (_ atEnd: Bool, _ userDriven: Bool) -> Void
-
-    func makeNSView(context: Context) -> TranscriptScrollProbe {
-        let view = TranscriptScrollProbe()
-        view.onChange = onChange
-        return view
-    }
-
-    func updateNSView(_ view: TranscriptScrollProbe, context: Context) {
-        view.onChange = onChange
-        view.attachWhenReady()
-    }
-}
-
-private final class TranscriptScrollProbe: NSView {
-    var onChange: ((_ atEnd: Bool, _ userDriven: Bool) -> Void)?
-
-    private weak var observedScrollView: NSScrollView?
-    private var boundsObserver: NSObjectProtocol?
-    private var eventMonitor: Any?
-    private var userEventDeadline: TimeInterval = 0
-
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
-
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        attachWhenReady()
-    }
-
-    override func viewDidMoveToSuperview() {
-        super.viewDidMoveToSuperview()
-        attachWhenReady()
-    }
-
-    deinit {
-        detach()
-    }
-
-    func attachWhenReady() {
-        DispatchQueue.main.async { [weak self] in
-            guard let self,
-                  let scrollView = self.enclosingScrollView else { return }
-            if self.observedScrollView === scrollView { return }
-            self.detach()
-            self.observedScrollView = scrollView
-            scrollView.contentView.postsBoundsChangedNotifications = true
-            self.boundsObserver = NotificationCenter.default.addObserver(
-                forName: NSView.boundsDidChangeNotification,
-                object: scrollView.contentView,
-                queue: .main
-            ) { [weak self] _ in
-                self?.reportPosition()
-            }
-            self.eventMonitor = NSEvent.addLocalMonitorForEvents(
-                matching: [.scrollWheel, .leftMouseDragged, .keyDown]
-            ) { [weak self] event in
-                self?.recordUserEvent(event)
-                return event
-            }
-            self.reportPosition()
-        }
-    }
-
-    private func detach() {
-        if let boundsObserver {
-            NotificationCenter.default.removeObserver(boundsObserver)
-            self.boundsObserver = nil
-        }
-        if let eventMonitor {
-            NSEvent.removeMonitor(eventMonitor)
-            self.eventMonitor = nil
-        }
-        observedScrollView = nil
-    }
-
-    private func recordUserEvent(_ event: NSEvent) {
-        guard let scrollView = observedScrollView,
-              event.window === scrollView.window else { return }
-        let frameInWindow = scrollView.convert(scrollView.bounds, to: nil)
-        guard frameInWindow.contains(event.locationInWindow) else { return }
-        if event.type == .keyDown {
-            let navigationKeys: Set<UInt16> = [115, 116, 121, 125, 126]
-            guard navigationKeys.contains(event.keyCode) else { return }
-        }
-        userEventDeadline = ProcessInfo.processInfo.systemUptime + 0.35
-        DispatchQueue.main.async { [weak self] in self?.reportPosition() }
-    }
-
-    private func reportPosition() {
-        guard let scrollView = observedScrollView,
-              let document = scrollView.documentView else { return }
-        let visible = scrollView.contentView.bounds
-        let distanceToEnd: CGFloat
-        if document.isFlipped {
-            distanceToEnd = document.bounds.maxY - visible.maxY
-        } else {
-            distanceToEnd = visible.minY - document.bounds.minY
-        }
-        let atEnd = distanceToEnd <= 36
-        let userDriven = ProcessInfo.processInfo.systemUptime <= userEventDeadline
-        onChange?(atEnd, userDriven)
     }
 }

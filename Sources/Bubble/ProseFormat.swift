@@ -12,6 +12,11 @@ enum PathChipKind: Equatable {
         case .url: return false
         }
     }
+
+    var isFilePath: Bool {
+        if case .file = self { return true }
+        return false
+    }
 }
 
 enum InlineRun: Equatable {

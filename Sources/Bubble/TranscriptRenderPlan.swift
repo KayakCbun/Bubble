@@ -90,13 +90,16 @@ struct TranscriptRenderPlan: Equatable, Sendable {
         for seed: TranscriptRenderSeed,
         streaming: Bool
     ) -> [TranscriptRenderTemplate] {
-        let chunks = seed.kind == .assistant && !streaming
+        // Paragraph-local assistant prose is safe to split while it streams.
+        // Existing chunk identities stay put as the tail grows, so SwiftUI only
+        // has to remeasure the live tail instead of one ever-growing row.
+        let chunks = seed.kind == .assistant
             ? WorkspaceTranscriptChunker.chunks(seed.text, identity: seed.id)
             : [seed.text]
         return chunks.enumerated().map { chunkIndex, text in
             let isLast = chunkIndex == chunks.count - 1
             return TranscriptRenderTemplate(
-                id: isLast ? seed.id : "\(seed.id)-chunk-\(chunkIndex)",
+                id: chunkIndex == 0 ? seed.id : "\(seed.id)-chunk-\(chunkIndex)",
                 text: text,
                 copyText: chunks.count > 1 && isLast ? seed.text : nil,
                 isContinuation: chunkIndex > 0
