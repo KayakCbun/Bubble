@@ -56,7 +56,7 @@ enum OverlayMetrics {
 
     static var transcriptMaxHeight: CGFloat {
         let visible = NSScreen.main?.visibleFrame.height ?? 800
-        return max(560, (visible * 0.70).rounded())
+        return OverlayLayoutPolicy.preferredTranscriptHeight(visibleHeight: visible)
     }
     static var maxHeight: CGFloat {
         transcriptMaxHeight + stackSpacing + pickerHeight + stackSpacing + OverlayComposer.ceilingHeight
@@ -734,7 +734,7 @@ struct OverlayView: View {
             .scrollBounceBehavior(.basedOnSize)
             .contentMargins(.bottom, 0, for: .scrollContent)
             .transaction { transaction in
-                if store.isBusy {
+                if store.isBusy, followState.followingTurnTargetID == nil {
                     transaction.disablesAnimations = true
                 }
             }
@@ -784,15 +784,16 @@ struct OverlayView: View {
                 }
             }
             .onChange(of: store.items.count) { _, _ in
-                if store.items.last?.kind == .user {
-                    followState.resumeAtEnd()
+                if let item = store.items.last, item.kind == .user {
+                    followState.beginFollowingTurn(targetID: item.id.uuidString)
                 }
-                requestFollowLatest(proxy)
+                requestCurrentFollowTarget(proxy)
             }
             .onChange(of: store.transcriptRevision) { _, _ in
-                if followState.shouldFollowRevision(isBusy: store.isBusy) {
-                    requestFollowLatest(proxy)
-                }
+                requestCurrentFollowTarget(
+                    proxy,
+                    allowsLatest: followState.shouldFollowRevision(isBusy: store.isBusy)
+                )
             }
             .onChange(of: store.branchDraft?.sourceItemID) { _, sourceID in
                 guard let sourceID else { return }
@@ -804,7 +805,7 @@ struct OverlayView: View {
                 }
             }
             .onChange(of: store.isBusy) { _, _ in
-                requestFollowLatest(proxy)
+                requestCurrentFollowTarget(proxy)
             }
             .onChange(of: composerHeight) { _, _ in
                 if followState.followsLatest {
@@ -1746,6 +1747,33 @@ struct OverlayView: View {
             withTransaction(transaction) {
                 proxy.scrollTo("transcript-end", anchor: .bottom)
             }
+        }
+    }
+
+    private func requestFollowTurn(_ proxy: ScrollViewProxy) {
+        guard let targetID = followState.followingTurnTargetID, !followQueued else { return }
+        followQueued = true
+        NotificationCenter.default.post(name: .transcriptProgrammaticScrollStarted, object: nil)
+        OverlayPulse.shared.onNextFrame {
+            followQueued = false
+            guard followState.followingTurnTargetID == targetID else { return }
+            withAnimation(OverlayMotion.scroll) {
+                proxy.scrollTo(
+                    targetID,
+                    anchor: UnitPoint(x: 0.5, y: TranscriptTurnAlignmentPolicy.viewportAnchorY)
+                )
+            }
+        }
+    }
+
+    private func requestCurrentFollowTarget(
+        _ proxy: ScrollViewProxy,
+        allowsLatest: Bool = true
+    ) {
+        if followState.followingTurnTargetID != nil {
+            requestFollowTurn(proxy)
+        } else if allowsLatest {
+            requestFollowLatest(proxy)
         }
     }
 

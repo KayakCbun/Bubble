@@ -120,9 +120,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
             }
             return event
         }
-        Task { @MainActor in
-            await connectIfNeeded()
-        }
+        connectAllIfNeeded()
     }
 
     func stop() {
@@ -275,7 +273,9 @@ final class OverlayController: NSObject, NSWindowDelegate {
     }
 
     private func installView() {
-        configureRuntime(store)
+        for runtime in sessions.allRuntimes {
+            configureRuntime(runtime)
+        }
         sessions.onRuntimeCreated = { [weak self] runtime in
             self?.configureRuntime(runtime)
         }
@@ -353,6 +353,31 @@ final class OverlayController: NSObject, NSWindowDelegate {
         }
         runtime.onSideStageChromeInvalidated = { [weak self] in
             self?.invalidateSideStageChrome()
+        }
+        runtime.onResumeDestinationRequested = { [weak self, weak runtime] sessionID in
+            guard let self, let runtime else { return }
+            self.presentResumeDestination(sessionID, from: runtime)
+        }
+    }
+
+    private func presentResumeDestination(_ sessionID: String, from runtime: ChatStore) {
+        let alert = NSAlert()
+        alert.messageText = "Resume session"
+        alert.informativeText = "Replace the current session, or open this conversation in a side session?"
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Open Side Session")
+        alert.addButton(withTitle: "Replace Current")
+        alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: panel) { [weak self, weak runtime] response in
+            guard let self, let runtime else { return }
+            switch response {
+            case .alertFirstButtonReturn:
+                self.sessions.createSideSession(resuming: sessionID)
+            case .alertSecondButtonReturn:
+                runtime.resumeReplacingCurrent(sessionID)
+            default:
+                runtime.requestFocus()
+            }
         }
     }
 
@@ -897,8 +922,17 @@ final class OverlayController: NSObject, NSWindowDelegate {
         }
     }
 
-    private func connectIfNeeded() async {
-        let runtime = store
+    private func connectAllIfNeeded() {
+        for runtime in sessions.allRuntimes {
+            Task { @MainActor [weak self, weak runtime] in
+                guard let self, let runtime else { return }
+                await self.connectIfNeeded(runtime)
+            }
+        }
+    }
+
+    private func connectIfNeeded(_ runtime: ChatStore? = nil) async {
+        let runtime = runtime ?? store
         if runtime.isConnected || connectingRuntimeIDs.contains(runtime.runtimeID) { return }
         connectingRuntimeIDs.insert(runtime.runtimeID)
         await runtime.connect()

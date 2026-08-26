@@ -77,6 +77,10 @@ enum OverlayPalettePolicy {
 }
 
 enum OverlayLayoutPolicy {
+    static func preferredTranscriptHeight(visibleHeight: CGFloat) -> CGFloat {
+        max(620, (visibleHeight * 0.76).rounded())
+    }
+
     static func isTranscriptPresented(
         itemCount: Int,
         isStartingSession: Bool,

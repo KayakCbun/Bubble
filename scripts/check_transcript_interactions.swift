@@ -204,6 +204,12 @@ private enum TranscriptInteractionCheck {
         follow.resumeAtEnd()
         expect(follow.followsLatest, "sending a new user turn deliberately resumes live follow")
         expect(!follow.showsScrollToEnd, "resuming the live edge dismisses the jump chip")
+        follow.beginFollowingTurn(targetID: "user-turn")
+        expect(follow.followingTurnTargetID == "user-turn", "a sent user turn becomes the viewport anchor")
+        expect(!follow.followsLatest, "a sent user turn is aligned near the top instead of following the bottom")
+        expect(!follow.viewportChanged(atEnd: false, userDriven: false), "programmatic turn alignment keeps its anchor")
+        expect(follow.viewportChanged(atEnd: false, userDriven: true), "manual scrolling releases the sent-turn anchor")
+        expect(TranscriptTurnAlignmentPolicy.viewportAnchorY == 0.08, "sent messages keep breathing room above them")
         expect(
             TranscriptViewportAnchorPolicy.visibleOrigin(
                 anchorPosition: 480,

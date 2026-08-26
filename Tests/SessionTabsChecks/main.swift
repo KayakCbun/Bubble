@@ -79,6 +79,39 @@ do {
         ) == 1,
         "a physical click on the second visible tab must resolve to the side session"
     )
+
+    let restoredPrimary = UUID()
+    let restoredSide = UUID()
+    let savedTabs = SessionTabsSnapshot(
+        entries: [
+            PersistedSessionTab(runtimeID: restoredPrimary, sessionID: "main-session", role: .main),
+            PersistedSessionTab(runtimeID: restoredSide, sessionID: "side-session", role: .side),
+        ],
+        selectedRuntimeID: restoredSide
+    )
+    let encoded = try JSONEncoder().encode(savedTabs)
+    let decoded = try JSONDecoder().decode(SessionTabsSnapshot.self, from: encoded)
+    expect(decoded == savedTabs, "parallel session tabs must survive a persistence round trip")
+    let restoredState = try SessionTabsState(snapshot: decoded)
+    expect(restoredState.tabs.map(\.id) == [restoredPrimary, restoredSide], "restart must restore every session tab")
+    expect(restoredState.selectedID == restoredSide, "restart must restore the selected session tab")
+    let temporaryTabsFile = FileManager.default.temporaryDirectory
+        .appendingPathComponent("bubble-session-tabs-\(UUID().uuidString).json")
+    defer { try? FileManager.default.removeItem(at: temporaryTabsFile) }
+    try SessionTabsPersistence.save(savedTabs, to: temporaryTabsFile)
+    expect(
+        SessionTabsPersistence.load(from: temporaryTabsFile) == savedTabs,
+        "restart must restore parallel session tabs from the durable file"
+    )
+
+    expect(
+        ResumeDestinationPolicy.requiresChoice(sessionID: "another", currentSessionID: "current"),
+        "resuming another saved session must ask where to open it"
+    )
+    expect(
+        !ResumeDestinationPolicy.requiresChoice(sessionID: "current", currentSessionID: "current"),
+        "resuming the already open session must not ask a meaningless destination question"
+    )
 } catch {
     fputs("FAIL: unexpected error: \(error)\n", stderr)
     exit(1)

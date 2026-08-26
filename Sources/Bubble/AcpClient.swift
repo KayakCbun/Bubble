@@ -24,8 +24,9 @@ final class AcpClient: @unchecked Sendable {
     private var inFlightPrompt: [String: RPCID] = [:]
     private let controlFile: URL
 
-    init(controlFile: URL = OverlayPaths.controlFile) {
+    init(controlFile: URL = OverlayPaths.controlFile, initialSessionID: String? = nil) {
         self.controlFile = controlFile
+        sessionId = initialSessionID
     }
 
     private(set) var sessionId: String?
@@ -111,11 +112,20 @@ final class AcpClient: @unchecked Sendable {
     }
 
     func connectAndResume() async throws -> String {
+        let preferredSessionID = sessionId
         if !isRunning() {
             try start()
         }
         try await initialize()
-        let id = try await ensureSession()
+        let id: String
+        if let preferredSessionID,
+           try await attach(preferredSessionID, cwd: OverlayPaths.workspace) {
+            sessionId = preferredSessionID
+            persistSessionId(preferredSessionID)
+            id = preferredSessionID
+        } else {
+            id = try await ensureSession()
+        }
         try? await applyBubblePreferences()
         return id
     }

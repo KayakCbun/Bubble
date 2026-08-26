@@ -10,6 +10,10 @@ func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
 @main
 struct OverlayLayoutCheck {
     static func main() {
+        expect(
+            OverlayLayoutPolicy.preferredTranscriptHeight(visibleHeight: 900) == 684,
+            "a 14-inch display should use more of the available vertical space"
+        )
         expect(OverlayLayoutPolicy.transcriptHeight(isPresented: false, maximum: 640) == 0,
                "a hidden transcript must not reserve height")
         expect(OverlayLayoutPolicy.transcriptHeight(isPresented: true, maximum: 640) == 640,

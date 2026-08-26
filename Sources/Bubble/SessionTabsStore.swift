@@ -12,11 +12,30 @@ final class SessionTabsStore {
     var onRuntimeCreated: ((ChatStore) -> Void)?
 
     init() {
-        let id = UUID()
-        let primary = ChatStore(runtimeID: id, runtimeRole: .main)
-        state = SessionTabsState(primaryID: id)
-        runtimes = [id: primary]
-        bind(primary, id: id)
+        if let snapshot = Self.loadSessionTabs(),
+           let restoredState = try? SessionTabsState(snapshot: snapshot) {
+            state = restoredState
+            var restored: [UUID: ChatStore] = [:]
+            for entry in snapshot.entries {
+                let role: SessionRuntimeRole = entry.role == .main ? .main : .side
+                restored[entry.runtimeID] = ChatStore(
+                    runtimeID: entry.runtimeID,
+                    runtimeRole: role,
+                    initialSessionID: entry.sessionID
+                )
+            }
+            runtimes = restored
+        } else {
+            let id = UUID()
+            let primary = ChatStore(runtimeID: id, runtimeRole: .main)
+            state = SessionTabsState(primaryID: id)
+            runtimes = [id: primary]
+        }
+        for tab in state.tabs {
+            if let runtime = runtimes[tab.id] {
+                bind(runtime, id: tab.id)
+            }
+        }
     }
 
     var activeStore: ChatStore {
@@ -30,8 +49,14 @@ final class SessionTabsStore {
     var showsTabs: Bool { state.showsTabs }
     var presentedSelectedID: UUID { state.presentedSelectedID }
     var isSwitchingSession: Bool { state.isSwitching }
+    var allRuntimes: [ChatStore] { state.tabs.compactMap { runtimes[$0.id] } }
 
-    func createSideSession() {
+    func createSideSession(resuming sessionID: String? = nil) {
+        if let sessionID,
+           let existing = runtimes.first(where: { $0.value.currentSessionID == sessionID }) {
+            select(existing.key)
+            return
+        }
         let id = UUID()
         let previous = activeStore
         do {
@@ -44,7 +69,11 @@ final class SessionTabsStore {
             return
         }
 
-        let runtime = ChatStore(runtimeID: id, runtimeRole: .side)
+        let runtime = ChatStore(
+            runtimeID: id,
+            runtimeRole: .side,
+            initialSessionID: sessionID
+        )
         runtime.isStartingSession = true
         runtimes[id] = runtime
         bind(runtime, id: id)
@@ -58,8 +87,10 @@ final class SessionTabsStore {
             await runtime.connect()
             runtime.isStartingSession = false
             guard self.runtimes[id] === runtime else { return }
+            self.persistSessionTabs()
             if runtime.isConnected, runtime.items.isEmpty {
-                runtime.presentSessionMessage("Bubble is ready.")
+                let message = sessionID.map { "Resumed session \($0)." } ?? "Bubble is ready."
+                runtime.presentSessionMessage(message)
             }
         }
     }
@@ -105,6 +136,7 @@ final class SessionTabsStore {
         let previous = activeStore
         guard let id = state.commitRequestedSelection(),
               let next = runtimes[id] else { return }
+        persistSessionTabs()
         if !waitForLayout {
             state.finishSelection(id)
         }
@@ -135,6 +167,7 @@ final class SessionTabsStore {
     }
 
     func prepareToQuit() {
+        persistSessionTabs()
         for runtime in runtimes.values {
             runtime.shutdown()
         }
@@ -144,11 +177,41 @@ final class SessionTabsStore {
         runtime.onCreateSideSession = { [weak self] in
             self?.createSideSession()
         }
+        runtime.onSessionIdentityChanged = { [weak self] in
+            self?.persistSessionTabs()
+        }
         runtime.onActivityChanged = { [weak self] busy in
             try? self?.state.setBusy(busy, for: id)
         }
         runtime.onTranscriptUpdated = { [weak self] in
             try? self?.state.markUpdated(id)
         }
+    }
+
+    private func persistSessionTabs() {
+        let entries = state.tabs.compactMap { tab -> PersistedSessionTab? in
+            guard let runtime = runtimes[tab.id],
+                  let sessionID = runtime.currentSessionID ?? (tab.ordinal == 1 ? PiSessions.currentId() : nil),
+                  !sessionID.isEmpty else { return nil }
+            return PersistedSessionTab(
+                runtimeID: tab.id,
+                sessionID: sessionID,
+                role: runtime.sessionTabRole
+            )
+        }
+        guard entries.count == state.tabs.count else { return }
+        let snapshot = SessionTabsSnapshot(
+            entries: entries,
+            selectedRuntimeID: state.selectedID
+        )
+        do {
+            try SessionTabsPersistence.save(snapshot, to: OverlayPaths.sessionTabsFile)
+        } catch {
+            OverlayLog.write("session tabs save failed: \(error.localizedDescription)")
+        }
+    }
+
+    private static func loadSessionTabs() -> SessionTabsSnapshot? {
+        SessionTabsPersistence.load(from: OverlayPaths.sessionTabsFile)
     }
 }

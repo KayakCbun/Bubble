@@ -7,6 +7,51 @@ public enum SessionTabsError: Error, Equatable, Sendable {
     case unknownSession
 }
 
+public enum SessionTabRuntimeRole: String, Codable, Equatable, Sendable {
+    case main
+    case side
+}
+
+public struct PersistedSessionTab: Codable, Equatable, Sendable {
+    public var runtimeID: UUID
+    public var sessionID: String
+    public var role: SessionTabRuntimeRole
+
+    public init(runtimeID: UUID, sessionID: String, role: SessionTabRuntimeRole) {
+        self.runtimeID = runtimeID
+        self.sessionID = sessionID
+        self.role = role
+    }
+}
+
+public struct SessionTabsSnapshot: Codable, Equatable, Sendable {
+    public var entries: [PersistedSessionTab]
+    public var selectedRuntimeID: UUID
+
+    public init(entries: [PersistedSessionTab], selectedRuntimeID: UUID) {
+        self.entries = entries
+        self.selectedRuntimeID = selectedRuntimeID
+    }
+}
+
+public enum SessionTabsPersistence {
+    public static func save(_ snapshot: SessionTabsSnapshot, to url: URL) throws {
+        let data = try JSONEncoder().encode(snapshot)
+        try data.write(to: url, options: .atomic)
+    }
+
+    public static func load(from url: URL) -> SessionTabsSnapshot? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(SessionTabsSnapshot.self, from: data)
+    }
+}
+
+public enum ResumeDestinationPolicy {
+    public static func requiresChoice(sessionID: String, currentSessionID: String?) -> Bool {
+        !sessionID.isEmpty && sessionID != currentSessionID
+    }
+}
+
 public struct SessionTabState: Identifiable, Equatable, Sendable {
     public let id: UUID
     public let ordinal: Int
@@ -48,6 +93,27 @@ public struct SessionTabsState: Equatable, Sendable {
         self.maximum = maximum
         tabs = [SessionTabState(id: primaryID, ordinal: 1)]
         selectedID = primaryID
+        selectionPhase = .idle
+    }
+
+    public init(
+        snapshot: SessionTabsSnapshot,
+        maximum: Int = SessionTabsState.defaultMaximum
+    ) throws {
+        guard maximum > 0,
+              !snapshot.entries.isEmpty,
+              snapshot.entries.count <= maximum,
+              snapshot.entries.first?.role == .main,
+              snapshot.entries.dropFirst().allSatisfy({ $0.role == .side }),
+              Set(snapshot.entries.map(\.runtimeID)).count == snapshot.entries.count,
+              snapshot.entries.contains(where: { $0.runtimeID == snapshot.selectedRuntimeID }) else {
+            throw SessionTabsError.unknownSession
+        }
+        self.maximum = maximum
+        tabs = snapshot.entries.enumerated().map { index, entry in
+            SessionTabState(id: entry.runtimeID, ordinal: index + 1)
+        }
+        selectedID = snapshot.selectedRuntimeID
         selectionPhase = .idle
     }
 

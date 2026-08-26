@@ -1,5 +1,6 @@
 import AppKit
 import BubbleMounts
+import BubbleSessions
 import Foundation
 import Observation
 
@@ -219,6 +220,8 @@ final class ChatStore {
     var slashHighlight = 0
     var onHideOverlay: (() -> Void)?
     var onCreateSideSession: (() -> Void)?
+    var onResumeDestinationRequested: ((String) -> Void)?
+    var onSessionIdentityChanged: (() -> Void)?
     var onActivityChanged: ((Bool) -> Void)?
     var onTranscriptUpdated: (() -> Void)?
     var onWorkspacePanePresentationRequested: (() -> Void)?
@@ -1129,16 +1132,19 @@ final class ChatStore {
     private static let workspacePaneLoadingText = "Loading workspace session…"
     private static let workspacePaneRunCacheLimit = 24
 
-    init(runtimeID: UUID = UUID(), runtimeRole: SessionRuntimeRole = .main) {
+    init(
+        runtimeID: UUID = UUID(),
+        runtimeRole: SessionRuntimeRole = .main,
+        initialSessionID: String? = nil
+    ) {
         self.runtimeID = runtimeID
         self.runtimeRole = runtimeRole
         let controlFile = runtimeRole.controlFile(runtimeID: runtimeID)
-        client = AcpClient(controlFile: controlFile)
+        client = AcpClient(controlFile: controlFile, initialSessionID: initialSessionID)
         control = WorkspaceControlServer(controlFile: controlFile)
         OverlayPaths.bootstrap()
-        let restored = runtimeRole.restoresSavedTranscript
-            ? Self.loadTranscript()
-            : (items: [], richItems: [])
+        let restored = initialSessionID.map(Self.loadTranscript(sessionID:))
+            ?? (runtimeRole.restoresSavedTranscript ? Self.loadTranscript() : (items: [], richItems: []))
         items = restored.items.filter {
             !StartupTranscriptPolicy.isSetupCard($0.text, isSystem: $0.kind == .system)
         }
@@ -1222,6 +1228,9 @@ final class ChatStore {
             }
         }
     }
+
+    var currentSessionID: String? { client.sessionId }
+    var sessionTabRole: SessionTabRuntimeRole { runtimeRole == .main ? .main : .side }
 
     var visibleWorkspacePaneItems: [ChatItem] {
         workspacePaneItems.filter { item in
@@ -1743,6 +1752,7 @@ final class ChatStore {
             }
             isConnected = true
             status = "ready"
+            onSessionIdentityChanged?()
             removeSetupCards(persistNow: true)
             syncSessionConfig()
             refreshCatalog()
@@ -2629,6 +2639,24 @@ final class ChatStore {
             requestFocus()
             return
         }
+        if !ResumeDestinationPolicy.requiresChoice(
+            sessionID: id,
+            currentSessionID: currentSessionID
+        ) {
+            items.append(ChatItem(kind: .system, text: "Session \(id) is already open here."))
+            persist(immediate: true)
+            requestFocus()
+            return
+        }
+        if let onResumeDestinationRequested {
+            onResumeDestinationRequested(id)
+            requestFocus()
+            return
+        }
+        resumeReplacingCurrent(id)
+    }
+
+    func resumeReplacingCurrent(_ id: String) {
         writeTranscript()
         let previousItems = items
         let previousRichRows = richTranscriptRows
@@ -2644,6 +2672,7 @@ final class ChatStore {
                     await connect()
                 }
                 _ = try await client.switchToSession(id, persistAsMain: runtimeRole.persistsAsMain)
+                onSessionIdentityChanged?()
                 let restored = Self.loadTranscript(sessionID: id)
                 items = restored.items
                 richTranscriptRows = [:]
@@ -2751,6 +2780,7 @@ final class ChatStore {
                     await connect()
                 }
                 _ = try await client.startFreshSession(persistAsMain: runtimeRole.persistsAsMain)
+                onSessionIdentityChanged?()
                 try resetWorkspaceSessionsForFreshMainSession()
                 isConnected = true
                 status = "ready"

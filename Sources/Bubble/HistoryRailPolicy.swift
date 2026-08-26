@@ -38,6 +38,17 @@ struct HistoryRailLayout: Equatable {
 }
 
 enum HistoryRailPolicy {
+    static func hoveredIndex(
+        at point: CGPoint,
+        layout: HistoryRailLayout,
+        gutter: CGFloat
+    ) -> Int? {
+        guard point.x >= 5, point.x <= gutter,
+              let index = layout.index(at: point.y) else { return nil }
+        let tolerance = max(2, min(4, layout.step * 0.45))
+        return abs(point.y - layout.y(for: index)) <= tolerance ? index : nil
+    }
+
     static func visibleTurnIndexes(
         turnStarts: [CGFloat],
         documentMaxY: CGFloat,

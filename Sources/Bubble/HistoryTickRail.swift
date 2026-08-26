@@ -126,7 +126,7 @@ struct HistoryTickRail: View {
             .onContinuousHover { phase in
                 switch phase {
                 case .active(let location):
-                    updateHover(at: location.y, layout: layout)
+                    updateHover(at: location, layout: layout)
                 case .ended:
                     setHovered(nil)
                 }
@@ -169,9 +169,10 @@ struct HistoryTickRail: View {
                     )
                     .transition(.opacity.combined(with: .scale(scale: 0.97, anchor: .leading)))
                     .zIndex(2)
+                    .allowsHitTesting(false)
             }
         }
-        .frame(height: height, alignment: .leading)
+        .frame(width: HistoryLimits.gutter, height: height, alignment: .topLeading)
         .animation(OverlayMotion.quick, value: hoveredIndex)
         .onReceive(NotificationCenter.default.publisher(for: .transcriptViewportChanged)) { note in
             guard let ids = note.userInfo?[TranscriptViewportUserInfoKey.visibleRowIDs] as? [String] else { return }
@@ -210,13 +211,6 @@ struct HistoryTickRail: View {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .stroke(Color.primary.opacity(0.08), lineWidth: 1)
         )
-        .onHover { inside in
-            if inside, let index = ticks.firstIndex(where: { $0.id == tick.id }) {
-                setHovered(index)
-            } else {
-                setHovered(nil)
-            }
-        }
     }
 
     private var cardFill: Color {
@@ -232,8 +226,16 @@ struct HistoryTickRail: View {
         return "Turn \(index + 1) of \(ticks.count): \(ticks[index].title)"
     }
 
-    private func updateHover(at y: CGFloat, layout: HistoryRailLayout) {
-        guard let index = layout.index(at: y), index != hoveredIndex else { return }
+    private func updateHover(at point: CGPoint, layout: HistoryRailLayout) {
+        guard let index = HistoryRailPolicy.hoveredIndex(
+            at: point,
+            layout: layout,
+            gutter: HistoryLimits.gutter
+        ) else {
+            setHovered(nil)
+            return
+        }
+        guard index != hoveredIndex else { return }
         setHovered(index)
     }
 
