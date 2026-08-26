@@ -36,11 +36,13 @@ struct TranscriptFollowState: Equatable {
     private enum Mode: Equatable {
         case followingEnd
         case freeScrolling
+        case returningToEnd
     }
 
     private var mode: Mode = .followingEnd
 
-    var followsLatest: Bool { mode == .followingEnd }
+    var followsLatest: Bool { mode != .freeScrolling }
+    var showsScrollToEnd: Bool { mode == .freeScrolling }
 
     func wouldChange(atEnd: Bool) -> Bool {
         followsLatest != atEnd
@@ -52,6 +54,29 @@ struct TranscriptFollowState: Equatable {
 
     mutating func resumeAtEnd() {
         mode = .followingEnd
+    }
+
+    mutating func beginScrollToEnd() {
+        mode = .returningToEnd
+    }
+
+    /// Programmatic scroll animation can overlap AppKit's short user-event
+    /// window. Ignore those stale intermediate positions until the viewport
+    /// actually reaches the end.
+    @discardableResult
+    mutating func viewportChanged(atEnd: Bool, userDriven: Bool) -> Bool {
+        if mode == .returningToEnd {
+            if atEnd {
+                mode = .followingEnd
+                return true
+            }
+            guard userDriven else { return false }
+            mode = .freeScrolling
+            return true
+        }
+        guard userDriven, wouldChange(atEnd: atEnd) else { return false }
+        userNavigated(atEnd: atEnd)
+        return true
     }
 
     func shouldFollowRevision(isBusy: Bool) -> Bool {

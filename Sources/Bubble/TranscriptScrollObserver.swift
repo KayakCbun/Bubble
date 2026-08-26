@@ -45,6 +45,9 @@ final class TranscriptRowAnchorView: NSView {
 extension Notification.Name {
     static let transcriptRowAnchorChanged = Notification.Name("BubbleTranscriptRowAnchorChanged")
     static let transcriptViewportChanged = Notification.Name("BubbleTranscriptViewportChanged")
+    static let transcriptProgrammaticScrollStarted = Notification.Name(
+        "BubbleTranscriptProgrammaticScrollStarted"
+    )
 }
 
 enum TranscriptViewportUserInfoKey {
@@ -99,9 +102,11 @@ final class TranscriptScrollProbe: NSView {
     private var boundsObserver: NSObjectProtocol?
     private var documentFrameObserver: NSObjectProtocol?
     private var rowAnchorObserver: NSObjectProtocol?
+    private var programmaticScrollObserver: NSObjectProtocol?
     private var eventMonitor: Any?
     private var userEventDeadline: TimeInterval = 0
     private var userEventGeneration = 0
+    private var suppressingPriorScrollSequence = false
     private var visibleAnchor: (id: String, offset: CGFloat)?
     private var correctingAnchor = false
     private let diagnosticsMode = ProcessInfo.processInfo.environment["BUBBLE_SCROLL_DIAGNOSTICS"]
@@ -185,6 +190,16 @@ final class TranscriptScrollProbe: NSView {
                 guard let anchor = notification.object as? TranscriptRowAnchorView else { return }
                 self?.updateRegistration(for: anchor)
             }
+            self.programmaticScrollObserver = NotificationCenter.default.addObserver(
+                forName: .transcriptProgrammaticScrollStarted,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                guard let self else { return }
+                self.userEventDeadline = 0
+                self.userEventGeneration += 1
+                self.suppressingPriorScrollSequence = true
+            }
             self.eventMonitor = NSEvent.addLocalMonitorForEvents(
                 matching: [.scrollWheel, .leftMouseDragged, .keyDown]
             ) { [weak self] event in
@@ -220,6 +235,10 @@ final class TranscriptScrollProbe: NSView {
             NotificationCenter.default.removeObserver(rowAnchorObserver)
             self.rowAnchorObserver = nil
         }
+        if let programmaticScrollObserver {
+            NotificationCenter.default.removeObserver(programmaticScrollObserver)
+            self.programmaticScrollObserver = nil
+        }
         if let eventMonitor {
             NSEvent.removeMonitor(eventMonitor)
             self.eventMonitor = nil
@@ -242,6 +261,9 @@ final class TranscriptScrollProbe: NSView {
     private func recordUserEvent(_ event: NSEvent) {
         guard let scrollView = observedScrollView,
               event.window === scrollView.window else { return }
+        if suppressesPriorScrollEvent(event) {
+            return
+        }
         if event.type == .keyDown {
             guard Self.navigationKeyCodes.contains(event.keyCode),
                   let responder = scrollView.window?.firstResponder as? NSView,
@@ -256,6 +278,25 @@ final class TranscriptScrollProbe: NSView {
             OverlayLog.write("transcript physical scroll observed")
         }
         DispatchQueue.main.async { [weak self] in self?.reportPosition() }
+    }
+
+    /// Clicking the chip can happen before a trackpad gesture has emitted its
+    /// final changed/ended and momentum events. Those belong to the gesture
+    /// that preceded the click; only a new began phase (or a discrete wheel,
+    /// key, or drag event) is allowed to interrupt the return animation.
+    private func suppressesPriorScrollEvent(_ event: NSEvent) -> Bool {
+        guard suppressingPriorScrollSequence else { return false }
+        guard event.type == .scrollWheel else {
+            suppressingPriorScrollSequence = false
+            return false
+        }
+        let beginsNewGesture = event.phase.contains(.began) || event.phase.contains(.mayBegin)
+        let isDiscreteWheel = event.phase.isEmpty && event.momentumPhase.isEmpty
+        if beginsNewGesture || isDiscreteWheel {
+            suppressingPriorScrollSequence = false
+            return false
+        }
+        return true
     }
 
     private func boundsChanged() {

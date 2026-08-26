@@ -730,8 +730,10 @@ struct OverlayView: View {
                     TranscriptScrollObserver(
                         maintainsVisibleContent: !followState.followsLatest
                     ) { atEnd, userDriven in
-                        guard userDriven, followState.wouldChange(atEnd: atEnd) else { return }
-                        followState.userNavigated(atEnd: atEnd)
+                        var next = followState
+                        if next.viewportChanged(atEnd: atEnd, userDriven: userDriven) {
+                            followState = next
+                        }
                     }
                 }
             }
@@ -765,6 +767,37 @@ struct OverlayView: View {
                     }
                 }
             }
+            .overlay(alignment: .bottom) {
+                if followState.showsScrollToEnd {
+                    Button {
+                        scrollToTranscriptEnd(proxy)
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 11, weight: .semibold))
+                            Text("Scroll to end")
+                                .font(.system(size: 13.5, weight: .medium))
+                        }
+                        .foregroundStyle(.primary)
+                        .padding(.horizontal, 15)
+                        .padding(.vertical, 9)
+                        .background(
+                            Capsule(style: .continuous)
+                                .fill(OverlaySurface.userCardFill)
+                                .shadow(color: .black.opacity(0.14), radius: 7, y: 3)
+                        )
+                        .overlay(
+                            Capsule(style: .continuous)
+                                .stroke(Color.primary.opacity(0.10), lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Scroll to end")
+                    .padding(.bottom, 12)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+            }
+            .animation(OverlayMotion.quick, value: followState.showsScrollToEnd)
             .onAppear { requestFollowLatest(proxy) }
             .onChange(of: store.items.count) { _, _ in
                 if store.items.last?.kind == .user {
@@ -1656,6 +1689,16 @@ struct OverlayView: View {
             var transaction = Transaction()
             transaction.disablesAnimations = true
             withTransaction(transaction) {
+                proxy.scrollTo("transcript-end", anchor: .bottom)
+            }
+        }
+    }
+
+    private func scrollToTranscriptEnd(_ proxy: ScrollViewProxy) {
+        followState.beginScrollToEnd()
+        NotificationCenter.default.post(name: .transcriptProgrammaticScrollStarted, object: nil)
+        OverlayPulse.shared.onNextFrame {
+            withAnimation(OverlayMotion.scroll) {
                 proxy.scrollTo("transcript-end", anchor: .bottom)
             }
         }

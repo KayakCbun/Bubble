@@ -63,16 +63,38 @@ private enum TranscriptInteractionCheck {
         )
         var follow = TranscriptFollowState()
         expect(follow.followsLatest, "a transcript starts pinned to the live edge")
+        expect(!follow.showsScrollToEnd, "the jump chip stays hidden while already at the end")
         expect(!follow.wouldChange(atEnd: true), "repeated end notifications stay off the render hot path")
         follow.userNavigated(atEnd: false)
         expect(!follow.followsLatest, "an upward user scroll immediately disables live follow")
+        expect(follow.showsScrollToEnd, "leaving the end reveals a direct jump back to the live edge")
         expect(!follow.wouldChange(atEnd: false), "repeated free-scroll notifications stay off the render hot path")
         expect(!follow.shouldFollowRevision(isBusy: true), "streaming cannot yank a history reader back to the end")
+        follow.beginScrollToEnd()
+        expect(follow.followsLatest, "a requested end jump immediately re-arms live following")
+        expect(!follow.showsScrollToEnd, "a requested end jump dismisses the chip")
+        expect(
+            !follow.viewportChanged(atEnd: false, userDriven: false),
+            "programmatic intermediate positions cannot cancel an in-flight end jump"
+        )
+        expect(follow.followsLatest, "an intermediate animated position stays committed to the end jump")
+        expect(
+            follow.viewportChanged(atEnd: true, userDriven: false),
+            "observing the real end confirms a programmatic jump without requiring a user event"
+        )
+        follow.userNavigated(atEnd: false)
+        follow.beginScrollToEnd()
+        expect(
+            follow.viewportChanged(atEnd: false, userDriven: true),
+            "a fresh user gesture can interrupt an in-flight end jump"
+        )
+        expect(follow.showsScrollToEnd, "interrupting the end jump restores the chip")
         follow.userNavigated(atEnd: true)
         expect(follow.followsLatest, "returning to the end re-arms live follow")
         follow.userNavigated(atEnd: false)
         follow.resumeAtEnd()
         expect(follow.followsLatest, "sending a new user turn deliberately resumes live follow")
+        expect(!follow.showsScrollToEnd, "resuming the live edge dismisses the jump chip")
         expect(
             TranscriptViewportAnchorPolicy.visibleOrigin(
                 anchorPosition: 480,
