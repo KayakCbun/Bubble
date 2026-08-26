@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import MarkdownUI
+import LaTeXSwiftUI
 import BeautifulMermaid
 import BubbleDiagramSupport
 import WebKit
@@ -55,6 +56,24 @@ struct MessageBody: View {
                 )
             case .mermaid(let source):
                 MermaidView(source: MessagePart.normalizeMermaid(source), streaming: streaming)
+            case .math(let expression):
+                if let native = MarkdownMath.nativeExpression(expression) {
+                    Text(native)
+                        .font(.system(size: OverlayMetrics.fontSize + 2, design: .serif))
+                        .foregroundStyle(OverlaySurface.conversationInk)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.vertical, 4)
+                        .accessibilityLabel(expression)
+                } else {
+                    LaTeX("$$\(MarkdownMath.typesetExpression(expression))$$")
+                        .renderingStyle(.redactedOriginal)
+                        .font(.system(size: OverlayMetrics.fontSize + 2, design: .serif))
+                        .foregroundStyle(OverlaySurface.conversationInk)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.vertical, 4)
+                        .accessibilityLabel(expression)
+                }
             }
         }
     }
@@ -64,6 +83,7 @@ enum MessagePart {
     case markdown(String)
     case code(language: String, body: String)
     case mermaid(String)
+    case math(String)
 
     static func displayParts(_ text: String) -> [MessagePart] {
         MessagePartCache.shared.parts(for: text) {
@@ -73,9 +93,10 @@ enum MessagePart {
 
     static func prewarmDisplay(_ text: String) {
         for part in displayParts(text) {
-            guard case .markdown(let markdown) = part,
-                  !PathChipStyle.needsClassicMarkdown(markdown) else { continue }
-            _ = ProseParser.blocks(in: markdown)
+            if case .markdown(let markdown) = part,
+               !PathChipStyle.needsClassicMarkdown(markdown) {
+                _ = ProseParser.blocks(in: markdown)
+            }
         }
     }
 
@@ -83,11 +104,18 @@ enum MessagePart {
         var parts: [MessagePart] = []
         for part in split(text) {
             switch part {
-            case .mermaid, .code:
+            case .mermaid, .code, .math:
                 parts.append(part)
             case .markdown(let markdown):
                 let normalized = normalizeMarkdown(markdown)
-                parts.append(contentsOf: splitTables(normalized))
+                for mathPart in MarkdownMath.splitBlocks(normalized) {
+                    switch mathPart {
+                    case .text(let text):
+                        parts.append(contentsOf: splitTables(text))
+                    case .display(let expression):
+                        parts.append(.math(expression))
+                    }
+                }
             }
         }
         return parts.isEmpty ? [.markdown(text)] : parts

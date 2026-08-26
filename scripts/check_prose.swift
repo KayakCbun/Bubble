@@ -23,6 +23,8 @@ struct ProseCheck {
         testWallReflow()
         testChecklistReflow()
         testCodeSpanProtected()
+        testStandardMarkdownHeadingsStayOnOneLine()
+        testDisplayMathDelimiters()
         testEmphasisBoundaryWhitespace()
         testBoldNumberedTitles()
         testKinsokuWrap()
@@ -131,6 +133,65 @@ struct ProseCheck {
         let text = ProseReflow.reflow("前面`<at id=工号>## 不是标题</at>`后面。## 问题现象后面是一段足够长的正文内容")
         expectContains(text, "`<at id=工号>## 不是标题</at>`", "hashes inside code stay put")
         expectContains(text, "\n## 问题现象\n", "real heading still splits")
+    }
+
+    static func testStandardMarkdownHeadingsStayOnOneLine() {
+        let headings = [
+            "## 1. Agent 的瓶颈不是\u{201c}知不知道\u{201d}，而是\u{201c}做不做得对\u{201d}",
+            "## 4. Gemini 的优势可能没有对准 Agent 所需的能力分布",
+            "## 6. Agent 表现是模型和 Harness 的乘积",
+        ]
+        let source = headings.joined(separator: "\n\n")
+        let rendered = ProseReflow.reflow(source)
+        for heading in headings {
+            expectContains(rendered, heading, "standard Markdown heading stays intact")
+        }
+        expect(!rendered.contains("## 4. Gemini 的优势可能没有对准 Agen\n"), "heading cannot split inside Agent")
+        expect(!rendered.contains("## 6. Agent 表现是模型和 Harness\n"), "heading cannot move its suffix into a paragraph")
+    }
+
+    static func testDisplayMathDelimiters() {
+        expect(
+            MarkdownMath.blockExpression(from: "\\[\n0.95^{20} \\approx 36\\%\n\\]") == "0.95^{20} \\approx 36\\%",
+            "backslash-bracket display math is recognized and stripped"
+        )
+        expect(
+            MarkdownMath.blockExpression(from: "$$Agent = model \\times tools$$") == "Agent = model \\times tools",
+            "double-dollar display math is recognized and stripped"
+        )
+        expect(MarkdownMath.blockExpression(from: "[plain text]") == nil, "plain brackets are not math")
+        let document = """
+        模型每一步有 95% 的成功率：
+
+        \\[
+        0.95^{20} \\approx 36\\%
+        \\]
+
+        世界知识提升的是局部判断上限。
+        """
+        expect(
+            MarkdownMath.splitBlocks(document) == [
+                .text("模型每一步有 95% 的成功率："),
+                .display("0.95^{20} \\approx 36\\%"),
+                .text("世界知识提升的是局部判断上限。"),
+            ],
+            "display math is isolated from the surrounding Markdown"
+        )
+        expect(
+            MarkdownMath.typesetExpression("Agent 表现 = 模型策略 \\times 工具设计")
+                == "Agent \\text{表现} = \\text{模型策略} \\times \\text{工具设计}",
+            "CJK labels are placed in LaTeX text mode"
+        )
+        expect(
+            MarkdownMath.nativeExpression("0.95^{20} \\approx 36\\%") == "0.95²⁰ ≈ 36%",
+            "simple numeric display math gets a readable native representation"
+        )
+        expect(
+            MarkdownMath.nativeExpression("Agent 表现 = 模型策略 \\times 工具设计")
+                == "Agent 表现 = 模型策略 × 工具设计",
+            "mixed CJK equations stay in native text with rendered operators"
+        )
+        expect(MarkdownMath.nativeExpression("\\frac{1}{2}") == nil, "complex LaTeX stays on the MathJax path")
     }
 
     static func testEmphasisBoundaryWhitespace() {
