@@ -153,6 +153,7 @@ struct OverlayView: View {
 
     private var layout: OverlayLayout {
         OverlayLayout(
+            sessionID: store.runtimeID,
             totalHeight: totalHeight,
             transcriptHeight: transcriptHeight,
             pickerHeight: pickerHeight,
@@ -3745,6 +3746,7 @@ private final class ComposerWidthProbe: NSView {
 
 struct OverlayLayoutKey: PreferenceKey {
     static var defaultValue = OverlayLayout(
+        sessionID: nil,
         totalHeight: 0,
         transcriptHeight: 0,
         pickerHeight: 0,

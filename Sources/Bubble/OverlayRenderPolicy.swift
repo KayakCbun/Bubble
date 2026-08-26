@@ -19,6 +19,13 @@ enum OverlayRenderPolicy {
         previous != next
     }
 
+    static func acceptsSessionLayout(
+        layoutSessionID: UUID?,
+        selectedSessionID: UUID
+    ) -> Bool {
+        layoutSessionID == selectedSessionID
+    }
+
     /// Token flushes must not hit disk; the turn-end persist is the durable write.
     static func shouldPersistStreamChunk(isBusy: Bool, childBusy: Bool) -> Bool {
         !isBusy && !childBusy

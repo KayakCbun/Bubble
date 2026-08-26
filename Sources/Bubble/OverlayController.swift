@@ -350,6 +350,12 @@ final class OverlayController: NSObject, NSWindowDelegate {
     }
 
     private func scheduleApply(_ layout: OverlayLayout) {
+        guard OverlayRenderPolicy.acceptsSessionLayout(
+            layoutSessionID: layout.sessionID,
+            selectedSessionID: store.runtimeID
+        ) else {
+            return
+        }
         guard OverlayRenderPolicy.layoutNeedsApply(previous: lastAppliedLayout, next: layout) else {
             return
         }
@@ -384,7 +390,12 @@ final class OverlayController: NSObject, NSWindowDelegate {
     }
 
     private func apply(_ layout: OverlayLayout) {
-        guard !isHiding, layout.totalHeight > 1 else { return }
+        guard !isHiding,
+              layout.totalHeight > 1,
+              OverlayRenderPolicy.acceptsSessionLayout(
+                  layoutSessionID: layout.sessionID,
+                  selectedSessionID: store.runtimeID
+              ) else { return }
         let height = max(OverlayMetrics.minHeight, min(layout.totalHeight.rounded(), OverlayMetrics.maxHeight))
         let hasTranscript = layout.transcriptHeight > 1
             || !store.visibleItems.isEmpty
@@ -425,6 +436,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
                 || abs(panel.frame.origin.x - frame.origin.x) > 0.5
         )
         let applied = OverlayLayout(
+            sessionID: layout.sessionID,
             totalHeight: height,
             transcriptHeight: layout.transcriptHeight,
             pickerHeight: layout.pickerHeight,
@@ -467,6 +479,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
             visibleWidth: store.visibleScreenWidth
         )
         apply(OverlayLayout(
+            sessionID: store.runtimeID,
             totalHeight: contentHeight,
             transcriptHeight: (store.visibleItems.isEmpty && !store.isStartingSession && !store.sideStagePresented && !sessions.showsTabs)
                 ? 0

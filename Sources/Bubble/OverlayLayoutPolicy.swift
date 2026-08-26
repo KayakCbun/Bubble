@@ -31,6 +31,7 @@ struct OverlayCardHitRegion {
 }
 
 struct OverlayLayout: Equatable {
+    var sessionID: UUID? = nil
     var totalHeight: CGFloat
     var transcriptHeight: CGFloat
     var pickerHeight: CGFloat

@@ -87,6 +87,16 @@ struct OverlayLayoutCheck {
         tabbed.sessionTabCount = 2
         expect(OverlayRenderPolicy.layoutNeedsApply(previous: chrome, next: tabbed),
                "showing session tabs must refresh the physical hit mask")
+        let previousSession = UUID()
+        let selectedSession = UUID()
+        expect(!OverlayRenderPolicy.acceptsSessionLayout(
+            layoutSessionID: previousSession,
+            selectedSessionID: selectedSession
+        ), "a late layout from the previous session must not resize the selected session")
+        expect(OverlayRenderPolicy.acceptsSessionLayout(
+            layoutSessionID: selectedSession,
+            selectedSessionID: selectedSession
+        ), "the selected session must be allowed to resize its panel")
         expect(!OverlayRenderPolicy.shouldPersistStreamChunk(isBusy: true, childBusy: false),
                "a live main turn must not write transcript.json on every token")
         expect(!OverlayRenderPolicy.shouldPersistStreamChunk(isBusy: false, childBusy: true),
