@@ -51,11 +51,12 @@ final class SessionTabsStore {
     var isSwitchingSession: Bool { state.isSwitching }
     var allRuntimes: [ChatStore] { state.tabs.compactMap { runtimes[$0.id] } }
 
-    func createSideSession(resuming sessionID: String? = nil) {
+    @discardableResult
+    func createSideSession(resuming sessionID: String? = nil) -> Int? {
         if let sessionID,
            let existing = runtimes.first(where: { $0.value.currentSessionID == sessionID }) {
             select(existing.key)
-            return
+            return state.tabs.first(where: { $0.id == existing.key })?.ordinal
         }
         let id = UUID()
         let previous = activeStore
@@ -63,10 +64,10 @@ final class SessionTabsStore {
             try state.createSideSession(id: id)
         } catch SessionTabsError.limitReached(let maximum) {
             activeStore.presentSessionMessage("Bubble supports up to \(maximum) parallel sessions.")
-            return
+            return nil
         } catch {
             activeStore.presentSessionMessage("Could not create a side session.")
-            return
+            return nil
         }
 
         let runtime = ChatStore(
@@ -93,6 +94,7 @@ final class SessionTabsStore {
                 runtime.presentSessionMessage(message)
             }
         }
+        return state.tabs.first(where: { $0.id == id })?.ordinal
     }
 
     func select(_ id: UUID) {
@@ -176,6 +178,9 @@ final class SessionTabsStore {
     private func bind(_ runtime: ChatStore, id: UUID) {
         runtime.onCreateSideSession = { [weak self] in
             self?.createSideSession()
+        }
+        runtime.onResumeInSideSession = { [weak self] sessionID in
+            self?.createSideSession(resuming: sessionID)
         }
         runtime.onSessionIdentityChanged = { [weak self] in
             self?.persistSessionTabs()

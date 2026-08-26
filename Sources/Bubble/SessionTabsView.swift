@@ -12,14 +12,10 @@ struct SessionOverlayView: View {
             store: sessions.activeStore,
             onEscape: onEscape,
             onToggleWidth: onToggleWidth,
-            sessionTabCount: sessions.showsTabs ? sessions.tabs.count : 0
+            sessionTabCount: sessions.showsTabs ? sessions.tabs.count : 0,
+            sessionSwitchLoading: sessions.isSwitchingSession
         )
         .id(sessions.state.selectedID)
-        .overlay {
-            if sessions.isSwitchingSession {
-                SessionSwitchLoadingMask()
-            }
-        }
         .overlay(alignment: .topLeading) {
             if sessions.showsTabs {
                 VStack(alignment: .trailing, spacing: SessionTabLayoutMetrics.bubble.spacing) {
@@ -41,29 +37,6 @@ struct SessionOverlayView: View {
             }
         }
         .animation(OverlayMotion.quick, value: sessions.showsTabs)
-    }
-}
-
-private struct SessionSwitchLoadingMask: View {
-    var body: some View {
-        ZStack {
-            RoundedRectangle(
-                cornerRadius: OverlayMetrics.transcriptCornerRadius,
-                style: .continuous
-            )
-            .fill(.regularMaterial)
-
-            VStack(spacing: 8) {
-                ProgressView()
-                    .controlSize(.small)
-                Text("Loading session…")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .padding(OverlayMetrics.shadowInset)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Loading session")
     }
 }
 

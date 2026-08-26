@@ -52,6 +52,49 @@ public enum ResumeDestinationPolicy {
     }
 }
 
+public struct ResumeDestinationPrompt: Equatable, Sendable {
+    public let sessionID: String
+
+    public init(sessionID: String) {
+        self.sessionID = sessionID
+    }
+}
+
+public enum ResumeDestinationChoice: Equatable, Sendable {
+    case side
+    case replaceCurrent
+    case cancel
+}
+
+public enum ResumeDestinationResolution: Equatable, Sendable {
+    case side(sessionID: String)
+    case replaceCurrent(sessionID: String)
+    case cancelled
+}
+
+public struct ResumeDestinationState: Equatable, Sendable {
+    public private(set) var prompt: ResumeDestinationPrompt?
+
+    public init() {}
+
+    public mutating func request(sessionID: String) {
+        prompt = ResumeDestinationPrompt(sessionID: sessionID)
+    }
+
+    public mutating func resolve(_ choice: ResumeDestinationChoice) -> ResumeDestinationResolution? {
+        guard let prompt else { return nil }
+        self.prompt = nil
+        switch choice {
+        case .side:
+            return .side(sessionID: prompt.sessionID)
+        case .replaceCurrent:
+            return .replaceCurrent(sessionID: prompt.sessionID)
+        case .cancel:
+            return .cancelled
+        }
+    }
+}
+
 public struct SessionTabState: Identifiable, Equatable, Sendable {
     public let id: UUID
     public let ordinal: Int

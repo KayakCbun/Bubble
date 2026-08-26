@@ -112,6 +112,29 @@ do {
         !ResumeDestinationPolicy.requiresChoice(sessionID: "current", currentSessionID: "current"),
         "resuming the already open session must not ask a meaningless destination question"
     )
+
+    var resumePrompt = ResumeDestinationState()
+    resumePrompt.request(sessionID: "saved-session")
+    expect(
+        resumePrompt.prompt == ResumeDestinationPrompt(sessionID: "saved-session"),
+        "resume must expose a transient in-conversation destination prompt"
+    )
+    expect(
+        resumePrompt.resolve(.side) == .side(sessionID: "saved-session"),
+        "choosing side resume must retain the requested session id"
+    )
+    expect(resumePrompt.prompt == nil, "choosing a destination must dismiss the prompt")
+
+    resumePrompt.request(sessionID: "replacement")
+    expect(
+        resumePrompt.resolve(.replaceCurrent) == .replaceCurrent(sessionID: "replacement"),
+        "choosing replace must retain the requested session id"
+    )
+    expect(resumePrompt.prompt == nil, "replace must not leave prompt UI behind")
+
+    resumePrompt.request(sessionID: "cancelled")
+    expect(resumePrompt.resolve(.cancel) == .cancelled, "cancel must resolve without a destination")
+    expect(resumePrompt.prompt == nil, "cancel must remove the prompt without residue")
 } catch {
     fputs("FAIL: unexpected error: \(error)\n", stderr)
     exit(1)

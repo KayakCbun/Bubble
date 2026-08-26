@@ -218,9 +218,10 @@ final class ChatStore {
     var installedApps: [MacApp] = []
     var macEpoch = 0
     var slashHighlight = 0
+    var resumeDestination = ResumeDestinationState()
     var onHideOverlay: (() -> Void)?
     var onCreateSideSession: (() -> Void)?
-    var onResumeDestinationRequested: ((String) -> Void)?
+    var onResumeInSideSession: ((String) -> Int?)?
     var onSessionIdentityChanged: (() -> Void)?
     var onActivityChanged: ((Bool) -> Void)?
     var onTranscriptUpdated: (() -> Void)?
@@ -2648,12 +2649,22 @@ final class ChatStore {
             requestFocus()
             return
         }
-        if let onResumeDestinationRequested {
-            onResumeDestinationRequested(id)
+        resumeDestination.request(sessionID: id)
+        requestFocus()
+    }
+
+    func resolveResumeDestination(_ choice: ResumeDestinationChoice) {
+        guard let resolution = resumeDestination.resolve(choice) else { return }
+        switch resolution {
+        case .side(let sessionID):
+            if let ordinal = onResumeInSideSession?(sessionID) {
+                presentSessionMessage("Opened session \(sessionID) in Side Session \(ordinal).")
+            }
+        case .replaceCurrent(let sessionID):
+            resumeReplacingCurrent(sessionID)
+        case .cancelled:
             requestFocus()
-            return
         }
-        resumeReplacingCurrent(id)
     }
 
     func resumeReplacingCurrent(_ id: String) {

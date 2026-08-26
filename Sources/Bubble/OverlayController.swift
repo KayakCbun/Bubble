@@ -354,31 +354,6 @@ final class OverlayController: NSObject, NSWindowDelegate {
         runtime.onSideStageChromeInvalidated = { [weak self] in
             self?.invalidateSideStageChrome()
         }
-        runtime.onResumeDestinationRequested = { [weak self, weak runtime] sessionID in
-            guard let self, let runtime else { return }
-            self.presentResumeDestination(sessionID, from: runtime)
-        }
-    }
-
-    private func presentResumeDestination(_ sessionID: String, from runtime: ChatStore) {
-        let alert = NSAlert()
-        alert.messageText = "Resume session"
-        alert.informativeText = "Replace the current session, or open this conversation in a side session?"
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "Open Side Session")
-        alert.addButton(withTitle: "Replace Current")
-        alert.addButton(withTitle: "Cancel")
-        alert.beginSheetModal(for: panel) { [weak self, weak runtime] response in
-            guard let self, let runtime else { return }
-            switch response {
-            case .alertFirstButtonReturn:
-                self.sessions.createSideSession(resuming: sessionID)
-            case .alertSecondButtonReturn:
-                runtime.resumeReplacingCurrent(sessionID)
-            default:
-                runtime.requestFocus()
-            }
-        }
     }
 
     private func scheduleApply(_ layout: OverlayLayout) {
