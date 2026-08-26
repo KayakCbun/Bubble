@@ -40,9 +40,21 @@ enum TranscriptTextSelectionPolicy {
     static func isEnabled(
         isHovering: Bool,
         primaryButtonPressed: Bool,
-        pointerMoved: Bool = true
+        pointerMoved: Bool = true,
+        hasSettledSelection: Bool = false
     ) -> Bool {
-        (isHovering && pointerMoved) || primaryButtonPressed
+        (isHovering && pointerMoved) || primaryButtonPressed || hasSettledSelection
+    }
+}
+
+enum TranscriptStackPolicy {
+    /// Small and medium transcripts are cheaper and substantially more stable
+    /// when AppKit receives one settled document height. Reserve SwiftUI's lazy
+    /// prefetch machinery for conversations large enough to need virtualization.
+    static let lazyRowThreshold = 180
+
+    static func usesLazyStack(rowCount: Int, sourceItemCount: Int) -> Bool {
+        rowCount > lazyRowThreshold || sourceItemCount > lazyRowThreshold
     }
 }
 

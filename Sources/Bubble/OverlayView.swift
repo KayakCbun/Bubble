@@ -683,62 +683,42 @@ struct OverlayView: View {
         }
     }
 
+    @ViewBuilder
     private var transcriptList: some View {
         let rows = mainTranscriptRows
         let ticks = historyTicks
-        return ScrollViewReader { proxy in
+        if TranscriptStackPolicy.usesLazyStack(
+            rowCount: rows.count,
+            sourceItemCount: store.visibleItems.count
+        ) {
+            transcriptScroll(rows: rows, ticks: ticks) {
+                transcriptStackStyle(
+                    LazyVStack(alignment: .leading, spacing: OverlaySurface.rowSpacing) {
+                        transcriptStackContent(rows)
+                    },
+                    hasHistoryTicks: !ticks.isEmpty
+                )
+            }
+        } else {
+            transcriptScroll(rows: rows, ticks: ticks) {
+                transcriptStackStyle(
+                    VStack(alignment: .leading, spacing: OverlaySurface.rowSpacing) {
+                        transcriptStackContent(rows)
+                    },
+                    hasHistoryTicks: !ticks.isEmpty
+                )
+            }
+        }
+    }
+
+    private func transcriptScroll<Content: View>(
+        rows: [MainTranscriptRenderRow],
+        ticks: [HistoryTick],
+        @ViewBuilder content: @escaping () -> Content
+    ) -> some View {
+        ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: OverlaySurface.rowSpacing) {
-                    if store.lastTurnDuration >= 1, !store.isBusy {
-                        workedHeader(store.lastTurnDuration)
-                    }
-                    ForEach(rows) { row in
-                        if row.startsAfterBranchPoint {
-                            branchCutoverDivider
-                        }
-                        HoverSelectableTranscriptRow {
-                            EquatableSection(value: mainRowRenderKey(row)) {
-                                mainTranscriptRow(row)
-                            }
-                            .equatable()
-                        }
-                        .id(row.id)
-                        .background {
-                            if row.id == row.historyTickID {
-                                TranscriptRowAnchor(id: row.id, historyTickID: row.historyTickID)
-                            }
-                        }
-                        .padding(.top, row.isContinuation ? -10 : 0)
-                        .opacity(row.isAfterBranchPoint ? 0.34 : 1)
-                    }
-                    if store.isBusy {
-                        WorkingRow(startedAt: store.turnStartedAt ?? Date())
-                            .id("working")
-                    }
-                    ForEach(store.queuedMessages) { message in
-                        queuedUserBubble(message)
-                            .id("waiting-\(message.id.uuidString)")
-                    }
-                    Color.clear
-                        .frame(height: OverlayMetrics.transcriptCornerRadius)
-                        .id("transcript-end")
-                }
-                .padding(.leading, ticks.isEmpty ? OverlayMetrics.transcriptInset : HistoryLimits.gutter + 16)
-                .padding(.trailing, OverlayMetrics.transcriptInset)
-                .padding(.top, OverlayMetrics.transcriptInset)
-                .padding(.bottom, 0)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .foregroundStyle(OverlaySurface.conversationInk)
-                .background {
-                    TranscriptScrollObserver(
-                        maintainsVisibleContent: followState.maintainsVisibleContent
-                    ) { atEnd, userDriven in
-                        var next = followState
-                        if next.viewportChanged(atEnd: atEnd, userDriven: userDriven) {
-                            followState = next
-                        }
-                    }
-                }
+                content()
             }
             .scrollIndicators(.never)
             .scrollBounceBehavior(.basedOnSize)
@@ -822,6 +802,69 @@ struct OverlayView: View {
                 }
             }
         }
+    }
+
+    private func transcriptStackStyle<Content: View>(
+        _ content: Content,
+        hasHistoryTicks: Bool
+    ) -> some View {
+        content
+            .padding(
+                .leading,
+                hasHistoryTicks ? HistoryLimits.gutter + 16 : OverlayMetrics.transcriptInset
+            )
+            .padding(.trailing, OverlayMetrics.transcriptInset)
+            .padding(.top, OverlayMetrics.transcriptInset)
+            .padding(.bottom, 0)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .foregroundStyle(OverlaySurface.conversationInk)
+            .background {
+                TranscriptScrollObserver(
+                    maintainsVisibleContent: followState.maintainsVisibleContent
+                ) { atEnd, userDriven in
+                    var next = followState
+                    if next.viewportChanged(atEnd: atEnd, userDriven: userDriven) {
+                        followState = next
+                    }
+                }
+            }
+    }
+
+    @ViewBuilder
+    private func transcriptStackContent(_ rows: [MainTranscriptRenderRow]) -> some View {
+        if store.lastTurnDuration >= 1, !store.isBusy {
+            workedHeader(store.lastTurnDuration)
+        }
+        ForEach(rows) { row in
+            if row.startsAfterBranchPoint {
+                branchCutoverDivider
+            }
+            HoverSelectableTranscriptRow {
+                EquatableSection(value: mainRowRenderKey(row)) {
+                    mainTranscriptRow(row)
+                }
+                .equatable()
+            }
+            .id(row.id)
+            .background {
+                if row.id == row.historyTickID {
+                    TranscriptRowAnchor(id: row.id, historyTickID: row.historyTickID)
+                }
+            }
+            .padding(.top, row.isContinuation ? -10 : 0)
+            .opacity(row.isAfterBranchPoint ? 0.34 : 1)
+        }
+        if store.isBusy {
+            WorkingRow(startedAt: store.turnStartedAt ?? Date())
+                .id("working")
+        }
+        ForEach(store.queuedMessages) { message in
+            queuedUserBubble(message)
+                .id("waiting-\(message.id.uuidString)")
+        }
+        Color.clear
+            .frame(height: OverlayMetrics.transcriptCornerRadius)
+            .id("transcript-end")
     }
 
     private var branchCutoverDivider: some View {
@@ -2891,24 +2934,28 @@ private struct HoverSelectableTranscriptRow<Content: View>: View {
                 guard !hovering else { return }
                 releaseGeneration += 1
                 let primaryButtonPressed = NSEvent.pressedMouseButtons & 1 != 0
+                let hasSettledSelection = QuoteSelectionMonitor.shared.snapshot != nil
                 selectionEnabled = TranscriptTextSelectionPolicy.isEnabled(
                     isHovering: false,
                     primaryButtonPressed: primaryButtonPressed,
-                    pointerMoved: false
+                    pointerMoved: false,
+                    hasSettledSelection: hasSettledSelection
                 )
-                if primaryButtonPressed {
-                    disarmAfterSelectionDrag(generation: releaseGeneration)
+                if primaryButtonPressed || hasSettledSelection {
+                    disarmAfterSelectionUse(generation: releaseGeneration)
                 }
             }
     }
 
-    private func disarmAfterSelectionDrag(generation: Int) {
+    private func disarmAfterSelectionUse(generation: Int) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
             guard generation == releaseGeneration else { return }
-            if NSEvent.pressedMouseButtons & 1 == 0 {
+            let primaryButtonPressed = NSEvent.pressedMouseButtons & 1 != 0
+            let hasSettledSelection = QuoteSelectionMonitor.shared.snapshot != nil
+            if !primaryButtonPressed && !hasSettledSelection {
                 selectionEnabled = false
             } else {
-                disarmAfterSelectionDrag(generation: generation)
+                disarmAfterSelectionUse(generation: generation)
             }
         }
     }

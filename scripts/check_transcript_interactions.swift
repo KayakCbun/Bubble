@@ -90,6 +90,23 @@ private enum TranscriptInteractionCheck {
             "selection remains enabled while a drag leaves its source row"
         )
         expect(
+            TranscriptTextSelectionPolicy.isEnabled(
+                isHovering: false,
+                primaryButtonPressed: false,
+                pointerMoved: false,
+                hasSettledSelection: true
+            ),
+            "a settled quote selection must survive while the pointer moves from text to Add to chat"
+        )
+        expect(
+            !TranscriptStackPolicy.usesLazyStack(rowCount: 97, sourceItemCount: 97),
+            "ordinary mixed transcripts avoid SwiftUI lazy-prefetch stalls"
+        )
+        expect(
+            TranscriptStackPolicy.usesLazyStack(rowCount: 120, sourceItemCount: 1_520),
+            "very large transcripts retain row virtualization"
+        )
+        expect(
             !TranscriptFollowPolicy.followsRevisionChange(isBusy: false),
             "idle transcript metadata writes must not yank the main conversation to the bottom"
         )

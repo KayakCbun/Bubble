@@ -12,8 +12,8 @@ SCROLL_STEP="${BUBBLE_BENCHMARK_SCROLL_STEP:-32}"
 MAX_JUMP_BLANK_SAMPLES="${BUBBLE_BENCHMARK_MAX_JUMP_BLANK_SAMPLES:-6}"
 MAX_JUMP_BLANK_STREAK="${BUBBLE_BENCHMARK_MAX_JUMP_BLANK_STREAK:-1}"
 
-if [[ "$MODE" != "display" && "$MODE" != "mount-audit" && "$MODE" != "history-navigation-audit" ]]; then
-  echo "FAIL: BUBBLE_BENCHMARK_MODE must be display, mount-audit, or history-navigation-audit" >&2
+if [[ "$MODE" != "display" && "$MODE" != "wheel" && "$MODE" != "mount-audit" && "$MODE" != "history-navigation-audit" ]]; then
+  echo "FAIL: BUBBLE_BENCHMARK_MODE must be display, wheel, mount-audit, or history-navigation-audit" >&2
   exit 2
 fi
 
@@ -50,6 +50,9 @@ LOG_FILE="$BENCH_HOME/.bubble/overlay.log"
 STDERR_FILE="$BENCH_HOME/bubble.stderr.log"
 diagnostics_mode="drive"
 benchmark_pattern="transcript scroll benchmark"
+if [[ "$MODE" == "wheel" ]]; then
+  diagnostics_mode="wheel"
+fi
 if [[ "$MODE" == "mount-audit" ]]; then
   diagnostics_mode="mount-audit"
   benchmark_pattern="transcript mount audit"
@@ -114,7 +117,7 @@ fi
 
 peak_anchors="$(sed -E 's/.* peakAnchors=([0-9]+).*/\1/' <<<"$benchmark_line")"
 
-if [[ "$MODE" == "display" ]]; then
+if [[ "$MODE" == "display" || "$MODE" == "wheel" ]]; then
   p95="$(sed -E 's/.* p95=([0-9.]+)ms.*/\1/' <<<"$benchmark_line")"
   p99="$(sed -E 's/.* p99=([0-9.]+)ms.*/\1/' <<<"$benchmark_line")"
   if ! awk -v actual="$p95" -v limit="$MAX_P95_MS" 'BEGIN { exit !(actual <= limit) }'; then

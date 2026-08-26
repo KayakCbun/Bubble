@@ -138,6 +138,7 @@ final class TranscriptScrollProbe: NSView {
     private var viewportReportQueued = false
     private var diagnosticFramesRemaining = 0
     private var diagnosticDirection: CGFloat = -1
+    private var diagnosticWheelBeginsGesture = true
     private var diagnosticLastTick: TimeInterval?
     private var diagnosticFrameIntervals: [TimeInterval] = []
     private var diagnosticPeakAnchorCount = 0
@@ -247,7 +248,7 @@ final class TranscriptScrollProbe: NSView {
             if self.diagnosticsEnabled {
                 OverlayLog.write("transcript scroll observer attached")
             }
-            if self.diagnosticsMode == "drive" {
+            if self.diagnosticsMode == "drive" || self.diagnosticsMode == "wheel" {
                 self.startDiagnosticDrive()
             } else if self.diagnosticsMode == "mount-audit" {
                 self.startMountAudit()
@@ -680,6 +681,7 @@ final class TranscriptScrollProbe: NSView {
     private func beginDiagnosticDrive(in window: NSWindow) {
         maintainsVisibleContent = true
         diagnosticFramesRemaining = 720
+        diagnosticWheelBeginsGesture = true
         diagnosticFrameIntervals.removeAll(keepingCapacity: true)
         diagnosticLastTick = nil
         diagnosticPeakAnchorCount = anchorIndex.count
@@ -856,13 +858,36 @@ final class TranscriptScrollProbe: NSView {
         var nextY = visible.minY + diagnosticDirection * diagnosticScrollStep
         if nextY <= minimumY || nextY >= maximumY {
             diagnosticDirection *= -1
+            diagnosticWheelBeginsGesture = true
             nextY = min(
                 maximumY,
                 max(minimumY, visible.minY + diagnosticDirection * diagnosticScrollStep)
             )
         }
-        scrollView.contentView.scroll(to: NSPoint(x: visible.minX, y: nextY))
-        scrollView.reflectScrolledClipView(scrollView.contentView)
+        if diagnosticsMode == "wheel",
+           let cgEvent = CGEvent(
+               scrollWheelEvent2Source: nil,
+               units: .pixel,
+               wheelCount: 1,
+               wheel1: Int32(-diagnosticDirection * diagnosticScrollStep),
+               wheel2: 0,
+               wheel3: 0
+           ) {
+            cgEvent.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
+            cgEvent.setIntegerValueField(
+                .scrollWheelEventScrollPhase,
+                value: Int64(
+                    (diagnosticWheelBeginsGesture ? CGScrollPhase.began : .changed).rawValue
+                )
+            )
+            diagnosticWheelBeginsGesture = false
+            guard let event = NSEvent(cgEvent: cgEvent) else { return }
+            deferAnchorMaintenanceUntilUserSettles()
+            scrollView.scrollWheel(with: event)
+        } else {
+            scrollView.contentView.scroll(to: NSPoint(x: visible.minX, y: nextY))
+            scrollView.reflectScrolledClipView(scrollView.contentView)
+        }
         diagnosticFramesRemaining -= 1
 
         if diagnosticFramesRemaining == 0 {
