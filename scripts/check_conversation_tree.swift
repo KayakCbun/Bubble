@@ -132,7 +132,8 @@ guard let customImageSnapshot = ConversationTreeSnapshot(response: customImageRe
 require(customImageRecord.kind == .assistant, "displayed Pi custom content projects as an assistant row")
 require(customImageRecord.text == "Generated preview", "custom image captions survive history restore")
 require(customImageRecord.images.first?.mimeType == "image/png", "custom image MIME survives history restore")
-require(customImageRecord.images.first?.data == "aW1hZ2U=", "custom image data survives history restore")
+require(customImageRecord.images.first?.data == Data(base64Encoded: "aW1hZ2U="), "custom image data survives history restore")
+require(customImageRecord.imageOffsets == ["Generated preview".count], "custom image ordering survives history restore")
 
 let oldBranch = snapshot.selecting(leafID: "a2a")
 require(oldBranch.activePath.map(\.id) == ["model", "u1", "a1", "u2a", "a2a"], "selecting an older leaf is deterministic")

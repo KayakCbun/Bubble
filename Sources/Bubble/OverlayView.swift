@@ -492,6 +492,7 @@ struct OverlayView: View {
         ).flatMap { row -> [WorkspaceTranscriptRow] in
             guard case .message(let item) = row,
                   item.kind == .assistant,
+                  (item.imageNames ?? []).isEmpty,
                   !(store.childBusy && store.workspacePaneStreamingAssistantId == item.id) else {
                 return [.transcript(row)]
             }
@@ -658,7 +659,11 @@ struct OverlayView: View {
                 id: row.id,
                 kind: kind,
                 text: text,
-                sourceIDs: row.sourceItemIDs
+                sourceIDs: row.sourceItemIDs,
+                hasMedia: {
+                    if case .message(let item) = row { return !(item.imageNames ?? []).isEmpty }
+                    return false
+                }()
             )
         }
         var streamingSeedIDs: Set<String> = []
@@ -1450,7 +1455,12 @@ struct OverlayView: View {
         }
         for item in items {
             if item.kind == .tool {
-                tools.append(item)
+                if (item.imageNames ?? []).isEmpty {
+                    tools.append(item)
+                } else {
+                    flushTools()
+                    rows.append(.tool(item))
+                }
             } else {
                 flushTools()
                 rows.append(.message(item))
@@ -1586,6 +1596,7 @@ struct OverlayView: View {
                 toolInput: item.toolInput,
                 toolOutput: item.toolOutput,
                 imageNames: item.imageNames,
+                imagePlacements: item.assistantImagePlacements,
                 workspaceStatus: item.workspaceStatus,
                 workspaceSummary: item.workspaceSummary,
                 live: store.streamingAssistantId == item.id
@@ -1605,6 +1616,7 @@ struct OverlayView: View {
                 toolInput: nil,
                 toolOutput: nil,
                 imageNames: nil,
+                imagePlacements: nil,
                 workspaceStatus: nil,
                 workspaceSummary: nil,
                 live: false,
@@ -1621,6 +1633,7 @@ struct OverlayView: View {
                 toolInput: nil,
                 toolOutput: nil,
                 imageNames: nil,
+                imagePlacements: nil,
                 workspaceStatus: nil,
                 workspaceSummary: nil,
                 live: false,
@@ -2000,17 +2013,9 @@ struct OverlayView: View {
             isStreaming: live
         )
         return VStack(alignment: .leading, spacing: 8) {
-            if let names = item.imageNames, !names.isEmpty {
-                assistantImageGrid(names)
-            }
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                if !text.isEmpty {
-                    MessageBody(text: item.text, streaming: live)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    if live {
-                        StreamingCaret()
-                    }
-                }
+            assistantOrderedContent(item, live: live)
+            if live {
+                StreamingCaret()
             }
             if !live, !text.isEmpty {
                 HStack(alignment: .center, spacing: 0) {
@@ -2040,6 +2045,27 @@ struct OverlayView: View {
                 store.beginBranch(from: item)
             }
         }
+    }
+
+    @ViewBuilder
+    private func assistantOrderedContent(_ item: ChatItem, live: Bool) -> some View {
+        let blocks = AssistantMessagePresentation.blocks(
+            text: item.text,
+            imageNames: item.imageNames,
+            placements: item.assistantImagePlacements
+        )
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+                switch block {
+                case .text(let text):
+                    MessageBody(text: text, streaming: live)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                case .image(let name):
+                    transcriptImageThumb(name)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func assistantChunkRow(item: ChatItem, text: String, copyText: String?, live: Bool) -> some View {
@@ -2340,6 +2366,11 @@ struct OverlayView: View {
             }
             .buttonStyle(.plain)
 
+            if let names = item.imageNames, !names.isEmpty {
+                assistantImageGrid(names)
+                    .padding(.leading, 14)
+            }
+
             if open {
                 HStack(alignment: .top, spacing: 10) {
                     Capsule()
@@ -2377,7 +2408,7 @@ struct OverlayView: View {
                     .bubbleTextSelection()
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
-            if input.isEmpty && output.isEmpty {
+            if input.isEmpty && output.isEmpty && (item.imageNames ?? []).isEmpty {
                 Text("No input/output captured for this tool call.")
                     .font(.system(size: 12, weight: .regular))
                     .foregroundStyle(.tertiary)
@@ -2871,6 +2902,7 @@ private struct RowRenderKey: Equatable {
     var toolInput: String?
     var toolOutput: String?
     var imageNames: [String]?
+    var imagePlacements: [AssistantImagePlacement]?
     var workspaceStatus: String?
     var workspaceSummary: String?
     var live: Bool

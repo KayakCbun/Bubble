@@ -34,5 +34,28 @@ private enum AssistantMessageImageCheck {
             !AssistantMessagePresentation.hasContent(text: "  \n", imageNames: []),
             "a genuinely empty assistant message remains hidden"
         )
+
+        let toolImages = AssistantMessageContent.images(in: [
+            "content": [
+                ["type": "text", "text": "Read image file"],
+                ["type": "image", "mimeType": "image/png", "data": png],
+            ],
+        ])
+        require(toolImages.count == 1, "Pi tool-result images are discovered from structured output")
+        require(toolImages.first?.data == Data(base64Encoded: png), "tool-result image data is decoded")
+        require(
+            AssistantMessageContent.texts(in: ["content": [["type": "text", "text": "Read image file"], content]]) == ["Read image file"],
+            "tool-result text remains visible beside extracted images"
+        )
+
+        let ordered = AssistantMessagePresentation.blocks(
+            text: "beforeafter",
+            imageNames: ["generated.png"],
+            placements: [AssistantImagePlacement(name: "generated.png", textOffset: 6)]
+        )
+        require(
+            ordered == [.text("before"), .image("generated.png"), .text("after")],
+            "interleaved assistant text and images preserve content-block order"
+        )
     }
 }

@@ -1,10 +1,5 @@
 import Foundation
 
-struct ConversationImageContent: Equatable, Sendable {
-    var mimeType: String
-    var data: String
-}
-
 struct ConversationEntry: Equatable, Sendable {
     var id: String
     var parentID: String?
@@ -16,7 +11,8 @@ struct ConversationEntry: Equatable, Sendable {
     var toolCallID: String?
     var isError: Bool
     var hasStructuredContent: Bool
-    var images: [ConversationImageContent] = []
+    var images: [AssistantMessageImage] = []
+    var imageOffsets: [Int] = []
     var order: Int
 
     var isUserMessage: Bool { type == "message" && role == "user" }
@@ -46,7 +42,8 @@ struct ConversationTranscriptRecord: Equatable, Sendable {
     var toolCallID: String?
     var isError: Bool
     var branchable: Bool
-    var images: [ConversationImageContent] = []
+    var images: [AssistantMessageImage] = []
+    var imageOffsets: [Int] = []
 }
 
 struct ConversationTreeSnapshot: Equatable, Sendable {
@@ -241,6 +238,7 @@ struct ConversationTreeSnapshot: Equatable, Sendable {
         let message = object["message"] as? [String: Any] ?? [:]
         let isDisplayedCustomMessage = type == "custom_message" && bool(object["display"])
         let content = isDisplayedCustomMessage ? object["content"] : message["content"]
+        let imageProjection = imageContent(content)
         return ConversationEntry(
             id: id,
             parentID: string(object["parentId"]),
@@ -252,7 +250,8 @@ struct ConversationTreeSnapshot: Equatable, Sendable {
             toolCallID: string(message["toolCallId"]),
             isError: bool(message["isError"]),
             hasStructuredContent: hasStructuredContent(content),
-            images: imageContent(content),
+            images: imageProjection.images,
+            imageOffsets: imageProjection.offsets,
             order: order
         )
     }
@@ -282,16 +281,26 @@ struct ConversationTreeSnapshot: Equatable, Sendable {
         }
     }
 
-    private static func imageContent(_ content: Any?) -> [ConversationImageContent] {
-        guard let blocks = content as? [Any] else { return [] }
-        return blocks.compactMap { block in
-            guard let item = block as? [String: Any],
-                  string(item["type"]) == "image",
-                  let mimeType = string(item["mimeType"]),
-                  mimeType.lowercased().hasPrefix("image/"),
-                  let data = string(item["data"]) else { return nil }
-            return ConversationImageContent(mimeType: mimeType, data: data)
+    private static func imageContent(
+        _ content: Any?
+    ) -> (images: [AssistantMessageImage], offsets: [Int]) {
+        guard let blocks = content as? [Any] else { return ([], []) }
+        var textOffset = 0
+        var images: [AssistantMessageImage] = []
+        var offsets: [Int] = []
+        for block in blocks {
+            guard let item = block as? [String: Any], let type = string(item["type"]) else { continue }
+            if type == "text" {
+                textOffset += string(item["text"])?.count ?? 0
+            } else if type == "image",
+                      let mimeType = string(item["mimeType"]),
+                      let encoded = string(item["data"]),
+                      let image = AssistantMessageImage.decode(mimeType: mimeType, encoded: encoded) {
+                images.append(image)
+                offsets.append(textOffset)
+            }
         }
+        return (images, offsets)
     }
 
     static func displayUserText(_ text: String) -> String {
@@ -332,7 +341,8 @@ struct ConversationTreeSnapshot: Equatable, Sendable {
             toolCallID: entry.toolCallID,
             isError: entry.isError,
             branchable: branchable,
-            images: entry.images
+            images: entry.images,
+            imageOffsets: entry.imageOffsets
         )
     }
 

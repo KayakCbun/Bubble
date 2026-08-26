@@ -74,7 +74,7 @@ swiftc -parse-as-library Sources/Bubble/MarkdownFiles.swift scripts/check_markdo
 swiftc -parse-as-library Sources/Bubble/CommandTapPolicy.swift scripts/check_command_tap.swift -o /tmp/bubble-check-tap
 /tmp/bubble-check-tap
 
-swiftc -parse-as-library Sources/Bubble/ConversationTree.swift scripts/check_conversation_tree.swift -o /tmp/bubble-check-conversation-tree
+swiftc -parse-as-library Sources/Bubble/AssistantMessageContent.swift Sources/Bubble/ConversationTree.swift scripts/check_conversation_tree.swift -o /tmp/bubble-check-conversation-tree
 /tmp/bubble-check-conversation-tree
 
 swiftc -parse-as-library Sources/Bubble/BubblePiAcpPatch.swift scripts/check_pi_acp_patch.swift -o /tmp/bubble-check-pi-acp-patch

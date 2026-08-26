@@ -32,12 +32,14 @@ struct TranscriptRenderSeed: Equatable, Sendable {
     var kind: Kind
     var text: String
     var sourceIDs: Set<String>
+    var hasMedia: Bool
 
-    init(id: String, kind: Kind, text: String, sourceIDs: Set<String> = []) {
+    init(id: String, kind: Kind, text: String, sourceIDs: Set<String> = [], hasMedia: Bool = false) {
         self.id = id
         self.kind = kind
         self.text = text
         self.sourceIDs = sourceIDs
+        self.hasMedia = hasMedia
     }
 }
 
@@ -114,7 +116,7 @@ struct TranscriptRenderPlan: Equatable, Sendable {
         // Paragraph-local assistant prose is safe to split while it streams.
         // Existing chunk identities stay put as the tail grows, so SwiftUI only
         // has to remeasure the live tail instead of one ever-growing row.
-        let chunks = seed.kind == .assistant
+        let chunks = seed.kind == .assistant && !seed.hasMedia
             ? WorkspaceTranscriptChunker.chunks(seed.text, identity: seed.id)
             : [seed.text]
         return chunks.enumerated().map { chunkIndex, text in

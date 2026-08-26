@@ -128,18 +128,30 @@ function bubbleDisplayContentBlocks(content) {
       case "message_end": {
         const message = ev.message;
         if (message?.role !== "custom" || message.display !== true) break;
-        for (const content of bubbleDisplayContentBlocks(message.content)) {
-          this.emit({ sessionUpdate: "agent_message_chunk", content });
+        const blocks = bubbleDisplayContentBlocks(message.content);
+        for (const [index, content] of blocks.entries()) {
+          this.emit({
+            sessionUpdate: "agent_message_chunk",
+            content,
+            bubbleCustomMessageStart: index === 0,
+            bubbleCustomMessageEnd: index === blocks.length - 1
+          });
         }
         break;
       }
 """#
         let replayBridge = #"""
       if (role === "custom" && m?.display === true) {
-        for (const content of bubbleDisplayContentBlocks(m?.content)) {
+        const blocks = bubbleDisplayContentBlocks(m?.content);
+        for (const [index, content] of blocks.entries()) {
           await this.conn.sessionUpdate({
             sessionId: session.sessionId,
-            update: { sessionUpdate: "agent_message_chunk", content }
+            update: {
+              sessionUpdate: "agent_message_chunk",
+              content,
+              bubbleCustomMessageStart: index === 0,
+              bubbleCustomMessageEnd: index === blocks.length - 1
+            }
           });
         }
       }
