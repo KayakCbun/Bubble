@@ -38,6 +38,28 @@ struct HistoryRailLayout: Equatable {
 }
 
 enum HistoryRailPolicy {
+    static func visibleTurnIndexes(
+        turnStarts: [CGFloat],
+        documentMaxY: CGFloat,
+        viewportMinY: CGFloat,
+        viewportMaxY: CGFloat
+    ) -> IndexSet {
+        var result = IndexSet()
+        for index in turnStarts.indices {
+            let start = turnStarts[index]
+            let end = index + 1 < turnStarts.count ? turnStarts[index + 1] : documentMaxY
+            if intersectsViewport(
+                rowMinY: start,
+                rowMaxY: max(start, end),
+                viewportMinY: viewportMinY,
+                viewportMaxY: viewportMaxY
+            ) {
+                result.insert(index)
+            }
+        }
+        return result
+    }
+
     static func intersectsViewport(
         rowMinY: CGFloat,
         rowMaxY: CGFloat,

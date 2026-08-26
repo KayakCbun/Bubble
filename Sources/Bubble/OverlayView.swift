@@ -702,7 +702,9 @@ struct OverlayView: View {
                         .equatable()
                         .id(row.id)
                         .background {
-                            TranscriptRowAnchor(id: row.id, historyTickID: row.historyTickID)
+                            if row.id == row.historyTickID {
+                                TranscriptRowAnchor(id: row.id, historyTickID: row.historyTickID)
+                            }
                         }
                         .padding(.top, row.isContinuation ? -10 : 0)
                         .opacity(row.isAfterBranchPoint ? 0.34 : 1)

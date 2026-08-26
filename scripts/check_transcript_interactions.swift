@@ -22,6 +22,18 @@ private enum TranscriptInteractionCheck {
             "user-authored messages with the setup prefix must survive relaunch"
         )
         expect(
+            StartupTranscriptPolicy.isTransientInternalError("Internal error", isSystem: true),
+            "a bare transient runtime failure must be discarded after relaunch"
+        )
+        expect(
+            !StartupTranscriptPolicy.isTransientInternalError("Internal error", isSystem: false),
+            "user-authored text matching a runtime failure must survive relaunch"
+        )
+        expect(
+            !StartupTranscriptPolicy.isTransientInternalError("Internal error: details", isSystem: true),
+            "diagnostic system messages with useful detail must survive relaunch"
+        )
+        expect(
             StartupTranscriptPolicy.shouldPresentAfterConnection(hasCredentials: false),
             "a connected runtime still needs setup guidance when no provider is signed in"
         )

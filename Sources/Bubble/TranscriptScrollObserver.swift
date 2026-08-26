@@ -130,6 +130,7 @@ final class TranscriptScrollProbe: NSView {
     private var diagnosedUserScroll = false
     private var diagnosedAnchorRestore = false
     private var rowAnchors: [ObjectIdentifier: WeakTranscriptRowAnchor] = [:]
+    private var cachedHistoryAnchors: [String: (frame: CGRect, position: CGFloat)] = [:]
     private var anchorIndex: [(id: String, historyTickID: String?, frame: CGRect, position: CGFloat)] = []
     private var anchorCaptureQueued = false
     private var anchorRestoreQueued = false
@@ -283,6 +284,7 @@ final class TranscriptScrollProbe: NSView {
         observedDocument = nil
         visibleAnchor = nil
         rowAnchors.removeAll()
+        cachedHistoryAnchors.removeAll()
         anchorIndex.removeAll()
         anchorCaptureQueued = false
         anchorRestoreQueued = false
@@ -435,9 +437,13 @@ final class TranscriptScrollProbe: NSView {
               let scrollView = observedScrollView,
               let document = observedDocument else { return }
         let visible = scrollView.contentView.bounds
-        guard let anchor = visibleAnchorCandidates(in: visible)
+        let visibleCandidates = visibleAnchorCandidates(in: visible)
+        let anchor = visibleCandidates
             .min(by: { abs($0.position - visibleEdge(visible, document: document))
-                < abs($1.position - visibleEdge(visible, document: document)) }) else { return }
+                < abs($1.position - visibleEdge(visible, document: document)) })
+            ?? anchorIndex.last(where: { $0.frame.minY <= visible.minY })
+            ?? anchorIndex.first
+        guard let anchor else { return }
         visibleAnchor = (
             id: anchor.id,
             offset: anchor.position - visibleEdge(visible, document: document)
@@ -484,7 +490,12 @@ final class TranscriptScrollProbe: NSView {
             guard let anchor = weakAnchor.value else { return false }
             return anchor.window != nil && anchor.enclosingScrollView === observedScrollView
         }
-        anchorIndex = rowAnchors.values.compactMap { weakAnchor in
+        let liveAnchors = rowAnchors.values.compactMap { weakAnchor -> (
+            id: String,
+            historyTickID: String?,
+            frame: CGRect,
+            position: CGFloat
+        )? in
             guard let anchor = weakAnchor.value else { return nil }
             let frame = anchor.convert(anchor.bounds, to: document)
             return (
@@ -494,8 +505,17 @@ final class TranscriptScrollProbe: NSView {
                 document.isFlipped ? frame.minY : frame.maxY
             )
         }
+        for anchor in liveAnchors {
+            cachedHistoryAnchors[anchor.historyTickID ?? anchor.id] = (
+                anchor.frame,
+                anchor.position
+            )
+        }
+        anchorIndex = cachedHistoryAnchors.map { id, cached in
+            (id, Optional(id), cached.frame, cached.position)
+        }
         .sorted { $0.frame.minY < $1.frame.minY }
-        diagnosticPeakAnchorCount = max(diagnosticPeakAnchorCount, anchorIndex.count)
+        diagnosticPeakAnchorCount = max(diagnosticPeakAnchorCount, rowAnchors.count)
     }
 
     private func visibleAnchorCandidates(in visible: CGRect) -> ArraySlice<(
@@ -564,10 +584,8 @@ final class TranscriptScrollProbe: NSView {
               let targetID = pendingHistoryTargetID,
               let scrollView = observedScrollView,
               let document = observedDocument,
-              let target = rowAnchors.values.lazy.compactMap(\.value).first(where: {
-                  $0.id == targetID && $0.window != nil && $0.enclosingScrollView === scrollView
-              }) else { return }
-        let frame = target.convert(target.bounds, to: document)
+              let target = anchorIndex.first(where: { $0.id == targetID }) else { return }
+        let frame = target.frame
         let visible = scrollView.contentView.bounds
         let minimumY = document.bounds.minY
         let maximumY = max(minimumY, document.bounds.maxY - visible.height)
@@ -577,7 +595,7 @@ final class TranscriptScrollProbe: NSView {
             scrollView.contentView.scroll(to: NSPoint(x: visible.minX, y: targetY))
             scrollView.reflectScrolledClipView(scrollView.contentView)
         }
-        let stableFrame = target.convert(target.bounds, to: document)
+        guard let stableFrame = anchorIndex.first(where: { $0.id == targetID })?.frame else { return }
         let stablePosition = document.isFlipped ? stableFrame.minY : stableFrame.maxY
         let frameStable = historyAlignmentLastPosition.map { abs($0 - stablePosition) <= 0.5 } ?? false
         let viewportStable = abs(scrollView.contentView.bounds.minY - targetY) <= 0.5
@@ -730,7 +748,7 @@ final class TranscriptScrollProbe: NSView {
             let visible = scrollView.contentView.bounds
             reportPosition()
             rebuildAnchorIndex()
-            if visibleAnchorCandidates(in: visible).isEmpty {
+            if liveVisibleHistoryTickIDs(in: visible, document: document).isEmpty {
                 diagnosticBlankSamples += 1
                 diagnosticCurrentBlankStreak += 1
                 diagnosticLongestBlankStreak = max(
@@ -752,22 +770,11 @@ final class TranscriptScrollProbe: NSView {
         in visible: CGRect,
         document: NSView
     ) -> Set<String> {
-        var result: Set<String> = []
-        var pending = document.subviews
-        while let view = pending.popLast() {
-            if let anchor = view as? TranscriptRowAnchorView,
-               let historyTickID = anchor.historyTickID,
-               anchor.window != nil,
-               anchor.enclosingScrollView === observedScrollView {
-                let frame = anchor.convert(anchor.bounds, to: document)
-                if frame.maxY >= visible.minY && frame.minY <= visible.maxY {
-                    result.insert(historyTickID)
-                }
-            } else {
-                pending.append(contentsOf: view.subviews)
-            }
-        }
-        return result
+        return visibleHistoryTickIDs(
+            anchors: anchorIndex.map { ($0.historyTickID ?? $0.id, $0.frame) },
+            visible: visible,
+            documentMaxY: document.bounds.maxY
+        )
     }
 
     private func finishMountAudit(sampleCount: Int) {
@@ -807,7 +814,7 @@ final class TranscriptScrollProbe: NSView {
             String(
                 format: "transcript mount audit samples=%d anchors=%d peakAnchors=%d blankSamples=%d longestBlankStreak=%d coverageMismatches=%d documentHeight=%.0f anchorError=%.2f",
                 sampleCount,
-                anchorIndex.count,
+                rowAnchors.count,
                 diagnosticPeakAnchorCount,
                 diagnosticBlankSamples,
                 diagnosticLongestBlankStreak,
@@ -873,7 +880,7 @@ final class TranscriptScrollProbe: NSView {
                     p95,
                     p99,
                     maximum,
-                    anchorIndex.count,
+                    rowAnchors.count,
                     diagnosticPeakAnchorCount,
                     diagnosticBlankSamples,
                     diagnosticLongestBlankStreak
@@ -889,22 +896,29 @@ final class TranscriptScrollProbe: NSView {
     }
 
     private func mountedAnchorIntersects(_ visible: CGRect, in document: NSView) -> Bool {
-        rowAnchors.values.contains { weakAnchor in
-            guard let anchor = weakAnchor.value,
-                  anchor.window != nil,
-                  anchor.enclosingScrollView === observedScrollView else { return false }
-            return anchor.convert(anchor.bounds, to: document).intersects(visible)
-        }
+        !liveVisibleHistoryTickIDs(in: visible, document: document).isEmpty
     }
 
     private func liveVisibleHistoryTickIDs(in visible: CGRect, document: NSView) -> Set<String> {
-        Set(rowAnchors.values.compactMap { weakAnchor -> String? in
-            guard let anchor = weakAnchor.value,
-                  anchor.window != nil,
-                  anchor.enclosingScrollView === observedScrollView else { return nil }
-            let frame = anchor.convert(anchor.bounds, to: document)
-            guard frame.intersects(visible) else { return nil }
-            return anchor.historyTickID ?? anchor.id
-        })
+        return visibleHistoryTickIDs(
+            anchors: anchorIndex.map { ($0.historyTickID ?? $0.id, $0.frame) },
+            visible: visible,
+            documentMaxY: document.bounds.maxY
+        )
+    }
+
+    private func visibleHistoryTickIDs(
+        anchors: [(id: String, frame: CGRect)],
+        visible: CGRect,
+        documentMaxY: CGFloat
+    ) -> Set<String> {
+        let sorted = anchors.sorted { $0.frame.minY < $1.frame.minY }
+        let indexes = HistoryRailPolicy.visibleTurnIndexes(
+            turnStarts: sorted.map(\.frame.minY),
+            documentMaxY: documentMaxY,
+            viewportMinY: visible.minY,
+            viewportMaxY: visible.maxY
+        )
+        return Set(indexes.map { sorted[$0].id })
     }
 }

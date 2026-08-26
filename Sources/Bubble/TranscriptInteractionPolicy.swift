@@ -5,6 +5,10 @@ enum StartupTranscriptPolicy {
         isSystem && text.hasPrefix("Set up Bubble")
     }
 
+    static func isTransientInternalError(_ text: String, isSystem: Bool) -> Bool {
+        isSystem && text == "Internal error"
+    }
+
     static func shouldPresentAfterConnection(hasCredentials: Bool) -> Bool {
         !hasCredentials
     }

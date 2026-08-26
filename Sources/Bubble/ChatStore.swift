@@ -3364,6 +3364,12 @@ final class ChatStore {
         let clean: ([ChatItem]) -> [ChatItem] = { rows in rows.compactMap { item in
             var copy = item
             copy.deliveryState = nil
+            if StartupTranscriptPolicy.isTransientInternalError(
+                copy.text,
+                isSystem: copy.kind == .system
+            ) {
+                return nil
+            }
             if copy.kind == .assistant || copy.kind == .thought {
                 copy.text = stripDiagnostics(copy.text)
                 if copy.text.isEmpty { return nil }

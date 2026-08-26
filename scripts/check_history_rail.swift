@@ -25,6 +25,19 @@ enum CheckHistoryRail {
             viewportMaxY: 400
         ))
 
+        precondition(HistoryRailPolicy.visibleTurnIndexes(
+            turnStarts: [0, 300, 900],
+            documentMaxY: 1_500,
+            viewportMinY: 250,
+            viewportMaxY: 650
+        ) == IndexSet([0, 1]))
+        precondition(HistoryRailPolicy.visibleTurnIndexes(
+            turnStarts: [0, 300, 900],
+            documentMaxY: 1_500,
+            viewportMinY: 1_100,
+            viewportMaxY: 1_300
+        ) == IndexSet(integer: 2))
+
         precondition(HistoryRailPolicy.width(distance: 0) == 16)
         precondition(HistoryRailPolicy.width(distance: 1) == 12)
         precondition(HistoryRailPolicy.width(distance: 2) == 8)
