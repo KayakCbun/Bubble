@@ -625,11 +625,14 @@ struct OverlayView: View {
     }
 
     private var historyTicks: [HistoryTick] {
-        let itemsByID = Dictionary(uniqueKeysWithValues: store.items.map { ($0.id, $0) })
+        let entryIDByItemID = Dictionary(uniqueKeysWithValues: store.items.compactMap { item in
+            item.sourceEntryId.map { (item.id, $0) }
+        })
+        let variantCounts = store.conversationTree?.userVariantCountsByEntryID ?? [:]
         return HistoryPreview.ticks(from: store.visibleItems).map { tick in
             var tick = tick
-            if let item = itemsByID[tick.id] {
-                tick.branchCount = max(1, store.variants(for: item).count)
+            if let entryID = entryIDByItemID[tick.id] {
+                tick.branchCount = max(1, variantCounts[entryID] ?? 1)
             }
             return tick
         }
@@ -667,8 +670,16 @@ struct OverlayView: View {
             branchSourceID: store.branchDraft?.sourceItemID.uuidString,
             streamingSeedIDs: streamingSeedIDs
         )
+        var activeHistoryTickID: String?
         return plan.units.map { unit in
-            MainTranscriptRenderRow(unit: unit, source: baseRows[unit.seedIndex])
+            if unit.kind == .user {
+                activeHistoryTickID = unit.id
+            }
+            return MainTranscriptRenderRow(
+                unit: unit,
+                source: baseRows[unit.seedIndex],
+                historyTickID: activeHistoryTickID
+            )
         }
     }
 
@@ -690,7 +701,9 @@ struct OverlayView: View {
                         }
                         .equatable()
                         .id(row.id)
-                        .background { TranscriptRowAnchor(id: row.id) }
+                        .background {
+                            TranscriptRowAnchor(id: row.id, historyTickID: row.historyTickID)
+                        }
                         .padding(.top, row.isContinuation ? -10 : 0)
                         .opacity(row.isAfterBranchPoint ? 0.34 : 1)
                     }
@@ -1767,7 +1780,11 @@ struct OverlayView: View {
             .padding(.vertical, names.isEmpty ? 11 : 10)
             .background(
                 RoundedRectangle(cornerRadius: OverlaySurface.userRadius, style: .continuous)
-                    .fill(OverlaySurface.userFill)
+                    .fill(OverlaySurface.userCardFill)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: OverlaySurface.userRadius, style: .continuous)
+                            .stroke(OverlaySurface.cardStroke, lineWidth: 1)
+                    }
             )
         }
     }
@@ -2796,6 +2813,7 @@ private enum TranscriptRow: Identifiable {
 private struct MainTranscriptRenderRow: Identifiable {
     var unit: TranscriptRenderUnit
     var source: TranscriptRow
+    var historyTickID: String?
 
     var id: String { unit.id }
     var text: String { unit.text }

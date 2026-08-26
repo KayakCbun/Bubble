@@ -1,7 +1,9 @@
+import AppKit
 import SwiftUI
 
 enum OverlaySurface {
     static var userFill: Color { Color.primary.opacity(0.045) }
+    static var userCardFill: Color { Color(nsColor: .controlBackgroundColor) }
     static var userQueuedFill: Color { Color.primary.opacity(0.03) }
     static var chipFill: Color { Color.primary.opacity(0.04) }
     static var chipStroke: Color { Color.primary.opacity(0.10) }

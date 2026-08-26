@@ -88,6 +88,10 @@ require(
 
 let variants = snapshot.variants(around: "u2b")
 require(variants.map(\.entryID) == ["u2a", "u2b"], "sibling variants are ordered")
+require(
+    snapshot.userVariantCountsByEntryID == ["u1": 1, "u2a": 2, "u2b": 2],
+    "indicator branch badges are derived for the full tree in one pass"
+)
 require(variants.map(\.tipID) == ["a2a", "a2b"], "each variant resolves to its latest tip")
 require(variants.map(\.isCurrent) == [false, true], "current variant follows the active leaf")
 require(snapshot.tipID(for: "u2a") == "a2a", "off-path entries expose a navigable branch tip")

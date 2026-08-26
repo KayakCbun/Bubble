@@ -4,21 +4,25 @@ import SwiftUI
 
 struct TranscriptRowAnchor: NSViewRepresentable {
     var id: String
+    var historyTickID: String?
 
     func makeNSView(context: Context) -> TranscriptRowAnchorView {
-        TranscriptRowAnchorView(id: id)
+        TranscriptRowAnchorView(id: id, historyTickID: historyTickID)
     }
 
     func updateNSView(_ view: TranscriptRowAnchorView, context: Context) {
         view.id = id
+        view.historyTickID = historyTickID
     }
 }
 
 final class TranscriptRowAnchorView: NSView {
     var id: String
+    var historyTickID: String?
 
-    init(id: String) {
+    init(id: String, historyTickID: String?) {
         self.id = id
+        self.historyTickID = historyTickID
         super.init(frame: .zero)
     }
 
@@ -38,8 +42,13 @@ final class TranscriptRowAnchorView: NSView {
     }
 }
 
-private extension Notification.Name {
+extension Notification.Name {
     static let transcriptRowAnchorChanged = Notification.Name("BubbleTranscriptRowAnchorChanged")
+    static let transcriptViewportChanged = Notification.Name("BubbleTranscriptViewportChanged")
+}
+
+enum TranscriptViewportUserInfoKey {
+    static let visibleRowIDs = "visibleRowIDs"
 }
 
 private final class WeakTranscriptRowAnchor {
@@ -102,7 +111,7 @@ final class TranscriptScrollProbe: NSView {
     private var diagnosedUserScroll = false
     private var diagnosedAnchorRestore = false
     private var rowAnchors: [ObjectIdentifier: WeakTranscriptRowAnchor] = [:]
-    private var anchorIndex: [(id: String, frame: CGRect, position: CGFloat)] = []
+    private var anchorIndex: [(id: String, historyTickID: String?, frame: CGRect, position: CGFloat)] = []
     private var anchorCaptureQueued = false
     private var anchorRestoreQueued = false
     private var anchorIndexRebuildQueued = false
@@ -118,6 +127,7 @@ final class TranscriptScrollProbe: NSView {
     private var diagnosticBlankSamples = 0
     private var diagnosticLongestBlankStreak = 0
     private var diagnosticCurrentBlankStreak = 0
+    private var lastReportedVisibleRowIDs: Set<String> = []
 
     private var diagnosticsEnabled: Bool { diagnosticsMode != nil }
 
@@ -184,6 +194,7 @@ final class TranscriptScrollProbe: NSView {
             self.reportPosition()
             self.registerExistingAnchors(in: document)
             self.rebuildAnchorIndex()
+            self.reportPosition()
             self.captureVisibleAnchor()
             if self.diagnosticsEnabled {
                 OverlayLog.write("transcript scroll observer attached")
@@ -266,6 +277,7 @@ final class TranscriptScrollProbe: NSView {
                   generation == self.userEventGeneration,
                   CACurrentMediaTime() >= self.userEventDeadline else { return }
             self.rebuildAnchorIndex()
+            self.reportPosition()
             self.captureVisibleAnchor()
         }
     }
@@ -309,6 +321,26 @@ final class TranscriptScrollProbe: NSView {
         let atEnd = distanceToEnd <= Self.endThreshold
         let userDriven = CACurrentMediaTime() <= userEventDeadline
         onChange?(atEnd, userDriven)
+
+        let visibleRowIDs: Set<String> = Set(visibleAnchorCandidates(in: visible).compactMap { anchor -> String? in
+            guard HistoryRailPolicy.intersectsViewport(
+                rowMinY: anchor.frame.minY,
+                rowMaxY: anchor.frame.maxY,
+                viewportMinY: visible.minY,
+                viewportMaxY: visible.maxY
+            ) else { return nil }
+            return anchor.historyTickID ?? anchor.id
+        })
+        if visibleRowIDs != lastReportedVisibleRowIDs {
+            lastReportedVisibleRowIDs = visibleRowIDs
+            NotificationCenter.default.post(
+                name: .transcriptViewportChanged,
+                object: self,
+                userInfo: [
+                    TranscriptViewportUserInfoKey.visibleRowIDs: Array(visibleRowIDs),
+                ]
+            )
+        }
     }
 
     private func captureVisibleAnchor() {
@@ -368,13 +400,23 @@ final class TranscriptScrollProbe: NSView {
         anchorIndex = rowAnchors.values.compactMap { weakAnchor in
             guard let anchor = weakAnchor.value else { return nil }
             let frame = anchor.convert(anchor.bounds, to: document)
-            return (anchor.id, frame, document.isFlipped ? frame.minY : frame.maxY)
+            return (
+                anchor.id,
+                anchor.historyTickID,
+                frame,
+                document.isFlipped ? frame.minY : frame.maxY
+            )
         }
         .sorted { $0.frame.minY < $1.frame.minY }
         diagnosticPeakAnchorCount = max(diagnosticPeakAnchorCount, anchorIndex.count)
     }
 
-    private func visibleAnchorCandidates(in visible: CGRect) -> ArraySlice<(id: String, frame: CGRect, position: CGFloat)> {
+    private func visibleAnchorCandidates(in visible: CGRect) -> ArraySlice<(
+        id: String,
+        historyTickID: String?,
+        frame: CGRect,
+        position: CGFloat
+    )> {
         var lower = 0
         var upper = anchorIndex.count
         while lower < upper {
@@ -411,6 +453,7 @@ final class TranscriptScrollProbe: NSView {
             guard let self else { return }
             self.anchorIndexRebuildQueued = false
             self.rebuildAnchorIndex()
+            self.reportPosition()
         }
     }
 

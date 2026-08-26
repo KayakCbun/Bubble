@@ -132,6 +132,20 @@ struct ConversationTreeSnapshot: Equatable, Sendable {
         }
     }
 
+    /// Branch badge counts for every user entry in one pass. The indicator
+    /// consumes the whole active history, so asking `variants(around:)` once
+    /// per turn would repeatedly scan and sort the same tree.
+    var userVariantCountsByEntryID: [String: Int] {
+        var siblingCounts: [String?: Int] = [:]
+        for entry in entries where entry.isUserMessage {
+            siblingCounts[entry.parentID, default: 0] += 1
+        }
+        return Dictionary(uniqueKeysWithValues: entries.compactMap { entry in
+            guard entry.isUserMessage else { return nil }
+            return (entry.id, siblingCounts[entry.parentID] ?? 1)
+        })
+    }
+
     func selecting(leafID: String?) -> ConversationTreeSnapshot {
         ConversationTreeSnapshot(entries: entries, leafID: leafID)
     }
