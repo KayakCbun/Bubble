@@ -37,8 +37,12 @@ enum TranscriptFollowPolicy {
 }
 
 enum TranscriptTextSelectionPolicy {
-    static func isEnabled(isHovering: Bool, primaryButtonPressed: Bool) -> Bool {
-        isHovering || primaryButtonPressed
+    static func isEnabled(
+        isHovering: Bool,
+        primaryButtonPressed: Bool,
+        pointerMoved: Bool = true
+    ) -> Bool {
+        (isHovering && pointerMoved) || primaryButtonPressed
     }
 }
 

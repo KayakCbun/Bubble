@@ -2872,14 +2872,32 @@ private struct HoverSelectableTranscriptRow<Content: View>: View {
     var body: some View {
         content
             .environment(\.bubbleTextSelectionEnabled, selectionEnabled)
+            .onContinuousHover { phase in
+                guard case .active = phase,
+                      NSApp.currentEvent?.type == .mouseMoved,
+                      !selectionEnabled else { return }
+                releaseGeneration += 1
+                selectionEnabled = TranscriptTextSelectionPolicy.isEnabled(
+                    isHovering: true,
+                    primaryButtonPressed: NSEvent.pressedMouseButtons & 1 != 0,
+                    pointerMoved: true
+                )
+            }
             .onHover { hovering in
+                // SwiftUI also emits hover-entry callbacks when scrolling moves
+                // a lazy row under a stationary pointer. Enabling text selection
+                // there rebuilds the row while it is being mounted and can turn
+                // one wheel event into an unbounded update loop. Actual pointer
+                // movement is handled by onContinuousHover above.
+                guard !hovering else { return }
                 releaseGeneration += 1
                 let primaryButtonPressed = NSEvent.pressedMouseButtons & 1 != 0
                 selectionEnabled = TranscriptTextSelectionPolicy.isEnabled(
-                    isHovering: hovering,
-                    primaryButtonPressed: primaryButtonPressed
+                    isHovering: false,
+                    primaryButtonPressed: primaryButtonPressed,
+                    pointerMoved: false
                 )
-                if !hovering, primaryButtonPressed {
+                if primaryButtonPressed {
                     disarmAfterSelectionDrag(generation: releaseGeneration)
                 }
             }

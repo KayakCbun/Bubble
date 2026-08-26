@@ -70,8 +70,20 @@ private enum TranscriptInteractionCheck {
             "offscreen transcript rows must not retain SwiftUI selection overlays"
         )
         expect(
-            TranscriptTextSelectionPolicy.isEnabled(isHovering: true, primaryButtonPressed: false),
+            TranscriptTextSelectionPolicy.isEnabled(
+                isHovering: true,
+                primaryButtonPressed: false,
+                pointerMoved: true
+            ),
             "hovering a transcript row enables quote selection"
+        )
+        expect(
+            !TranscriptTextSelectionPolicy.isEnabled(
+                isHovering: true,
+                primaryButtonPressed: false,
+                pointerMoved: false
+            ),
+            "scrolling content under a stationary pointer must not mount selection overlays"
         )
         expect(
             TranscriptTextSelectionPolicy.isEnabled(isHovering: false, primaryButtonPressed: true),
