@@ -25,6 +25,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
     private var pendingLayout: OverlayLayout?
     private var layoutQueued = false
     private var lastAppliedLayout: OverlayLayout?
+    private var pendingSessionPresentationID: UUID?
     private let frameAnimator = OverlayFrameAnimator()
     private var commandReturnApplication: NSRunningApplication?
     private var workspaceRevealGeneration = 0
@@ -283,7 +284,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
             self.configureRuntime(next)
             next.visibleScreenWidth = self.currentVisibleFrame()?.width ?? next.visibleScreenWidth
             next.setStreamUISuspended(!self.panel.isVisible || self.isHiding)
-            self.position()
+            self.position(confirmsSessionPresentation: false)
         }
         let root = SessionOverlayView(
             sessions: sessions,
@@ -362,7 +363,9 @@ final class OverlayController: NSObject, NSWindowDelegate {
         ) else {
             return
         }
-        guard OverlayRenderPolicy.layoutNeedsApply(previous: lastAppliedLayout, next: layout) else {
+        let confirmsSessionPresentation = sessions.isAwaitingSelectedLayout(layout.sessionID)
+        guard confirmsSessionPresentation
+                || OverlayRenderPolicy.layoutNeedsApply(previous: lastAppliedLayout, next: layout) else {
             return
         }
         let previousPreviewWidth = lastAppliedLayout?.previewWidth ?? 0
@@ -395,7 +398,10 @@ final class OverlayController: NSObject, NSWindowDelegate {
         }
     }
 
-    private func apply(_ layout: OverlayLayout) {
+    private func apply(
+        _ layout: OverlayLayout,
+        confirmsSessionPresentation: Bool = true
+    ) {
         guard !isHiding,
               layout.totalHeight > 1,
               OverlayRenderPolicy.acceptsSessionLayout(
@@ -467,13 +473,22 @@ final class OverlayController: NSObject, NSWindowDelegate {
         if needsMask, !destChanged || animateFrame {
             applyMask(layout: applied, width: chatWidth)
         }
-        lastAppliedLayout = applied
+        if confirmsSessionPresentation {
+            lastAppliedLayout = applied
+        }
+        if confirmsSessionPresentation, let sessionID = applied.sessionID {
+            if isUpdatingFrame || frameAnimator.isAnimating {
+                pendingSessionPresentationID = sessionID
+            } else {
+                sessions.selectedLayoutDidApply(sessionID)
+            }
+        }
         if workspaceRevealPending, layout.previewWidth > 0, !destChanged {
             scheduleWorkspacePaneRevealOnNextFrame()
         }
     }
 
-    private func position() {
+    private func position(confirmsSessionPresentation: Bool = true) {
         let contentHeight = max(
             OverlayMetrics.minHeight,
             panel.frame.height - OverlayMetrics.shadowInset * 2
@@ -497,7 +512,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
             previewWidth: previewWidth,
             chromeVisible: store.sideStageChromeVisible,
             sessionTabCount: sessions.showsTabs ? sessions.tabs.count : 0
-        ))
+        ), confirmsSessionPresentation: confirmsSessionPresentation)
     }
 
     private func applyMask(layout: OverlayLayout, width: CGFloat) {
@@ -594,6 +609,10 @@ final class OverlayController: NSObject, NSWindowDelegate {
         }
         targetPanelFrame = nil
         isUpdatingFrame = false
+        if let sessionID = pendingSessionPresentationID {
+            pendingSessionPresentationID = nil
+            sessions.selectedLayoutDidApply(sessionID)
+        }
         if workspaceRevealPending,
            OverlayRenderPolicy.shouldRefreshHostingSurfaceAfterFrameSettle {
             hostingView?.needsDisplay = true

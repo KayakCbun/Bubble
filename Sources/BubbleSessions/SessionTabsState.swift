@@ -26,11 +26,18 @@ public struct SessionTabState: Identifiable, Equatable, Sendable {
     }
 }
 
+public enum SessionSelectionPhase: Equatable, Sendable {
+    case idle
+    case requested(UUID)
+    case rendering(UUID)
+}
+
 public struct SessionTabsState: Equatable, Sendable {
     public static let defaultMaximum = 5
 
     public private(set) var tabs: [SessionTabState]
     public private(set) var selectedID: UUID
+    public private(set) var selectionPhase: SessionSelectionPhase
     public let maximum: Int
 
     public init(
@@ -41,6 +48,7 @@ public struct SessionTabsState: Equatable, Sendable {
         self.maximum = maximum
         tabs = [SessionTabState(id: primaryID, ordinal: 1)]
         selectedID = primaryID
+        selectionPhase = .idle
     }
 
     public var showsTabs: Bool {
@@ -57,15 +65,53 @@ public struct SessionTabsState: Equatable, Sendable {
         }
         tabs.append(SessionTabState(id: id, ordinal: tabs.count + 1))
         selectedID = id
+        selectionPhase = .idle
         return id
     }
 
-    public mutating func select(_ id: UUID) throws {
-        guard let index = tabs.firstIndex(where: { $0.id == id }) else {
+    public var presentedSelectedID: UUID {
+        switch selectionPhase {
+        case .requested(let id), .rendering(let id): id
+        case .idle: selectedID
+        }
+    }
+
+    public var isSwitching: Bool {
+        selectionPhase != .idle
+    }
+
+    public mutating func requestSelection(_ id: UUID) throws {
+        guard tabs.contains(where: { $0.id == id }) else {
             throw SessionTabsError.unknownSession
+        }
+        guard id != selectedID else {
+            if case .rendering(let renderingID) = selectionPhase,
+               renderingID == id {
+                return
+            }
+            selectionPhase = .idle
+            return
+        }
+        selectionPhase = .requested(id)
+    }
+
+    @discardableResult
+    public mutating func commitRequestedSelection() -> UUID? {
+        guard case .requested(let id) = selectionPhase,
+              let index = tabs.firstIndex(where: { $0.id == id }) else {
+            return nil
         }
         selectedID = id
         tabs[index].hasUnread = false
+        selectionPhase = .rendering(id)
+        return id
+    }
+
+    public mutating func finishSelection(_ id: UUID) {
+        guard case .rendering(let renderingID) = selectionPhase,
+              renderingID == id,
+              selectedID == id else { return }
+        selectionPhase = .idle
     }
 
     public mutating func setBusy(_ busy: Bool, for id: UUID) throws {

@@ -6,6 +6,7 @@ import Observation
 final class SessionTabsStore {
     private(set) var state: SessionTabsState
     private var runtimes: [UUID: ChatStore]
+    @ObservationIgnored private var selectionGeneration = 0
 
     var onSelectionChanged: ((ChatStore, ChatStore) -> Void)?
     var onRuntimeCreated: ((ChatStore) -> Void)?
@@ -27,6 +28,8 @@ final class SessionTabsStore {
 
     var tabs: [SessionTabState] { state.tabs }
     var showsTabs: Bool { state.showsTabs }
+    var presentedSelectedID: UUID { state.presentedSelectedID }
+    var isSwitchingSession: Bool { state.isSwitching }
 
     func createSideSession() {
         let id = UUID()
@@ -62,16 +65,73 @@ final class SessionTabsStore {
     }
 
     func select(_ id: UUID) {
-        guard id != state.selectedID, let next = runtimes[id] else { return }
-        let previous = activeStore
+        guard let next = runtimes[id] else { return }
+        selectionGeneration &+= 1
+        let generation = selectionGeneration
         do {
-            try state.select(id)
+            try state.requestSelection(id)
         } catch {
             return
+        }
+        guard case .requested = state.selectionPhase else { return }
+        guard usesLoadingMask(for: next) else {
+            commitRequestedSelection(waitForLayout: false)
+            return
+        }
+        OverlayPulse.shared.onNextFrame { [weak self] in
+            guard let self, self.selectionGeneration == generation else { return }
+            OverlayPulse.shared.onNextFrame { [weak self] in
+                guard let self, self.selectionGeneration == generation else { return }
+                self.commitRequestedSelection(waitForLayout: true)
+            }
+        }
+    }
+
+    func isAwaitingSelectedLayout(_ id: UUID?) -> Bool {
+        guard let id,
+              case .rendering(let renderingID) = state.selectionPhase else { return false }
+        return renderingID == id
+    }
+
+    func selectedLayoutDidApply(_ id: UUID) {
+        guard case .rendering(let renderingID) = state.selectionPhase,
+              renderingID == id else { return }
+        OverlayPulse.shared.onNextFrame { [weak self] in
+            self?.state.finishSelection(id)
+        }
+    }
+
+    private func commitRequestedSelection(waitForLayout: Bool) {
+        let previous = activeStore
+        guard let id = state.commitRequestedSelection(),
+              let next = runtimes[id] else { return }
+        if !waitForLayout {
+            state.finishSelection(id)
         }
         previous.setStreamUISuspended(true)
         onSelectionChanged?(previous, next)
         next.requestFocus()
+    }
+
+    private func usesLoadingMask(for runtime: ChatStore) -> Bool {
+        let visibleItems = runtime.visibleItems
+        var textBytes = 0
+        var mediaCount = 0
+        for item in visibleItems {
+            textBytes = min(
+                SessionSwitchLoadingPolicy.textByteThreshold,
+                textBytes + item.text.utf8.count
+            )
+            mediaCount += item.imageNames?.count ?? 0
+            if SessionSwitchLoadingPolicy.usesMask(
+                sourceItemCount: visibleItems.count,
+                textBytes: textBytes,
+                mediaCount: mediaCount
+            ) {
+                return true
+            }
+        }
+        return false
     }
 
     func prepareToQuit() {

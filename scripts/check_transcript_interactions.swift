@@ -107,6 +107,38 @@ private enum TranscriptInteractionCheck {
             "very large transcripts retain row virtualization"
         )
         expect(
+            !SessionSwitchLoadingPolicy.usesMask(
+                sourceItemCount: 40,
+                textBytes: 12_000,
+                mediaCount: 0
+            ),
+            "short sessions must keep instant tab switching without a loading flash"
+        )
+        expect(
+            SessionSwitchLoadingPolicy.usesMask(
+                sourceItemCount: 240,
+                textBytes: 12_000,
+                mediaCount: 0
+            ),
+            "long sessions must show a loading mask before their transcript is mounted"
+        )
+        expect(
+            SessionSwitchLoadingPolicy.usesMask(
+                sourceItemCount: 12,
+                textBytes: 100_000,
+                mediaCount: 0
+            ),
+            "a few very large messages must still count as a long session"
+        )
+        expect(
+            SessionSwitchLoadingPolicy.usesMask(
+                sourceItemCount: 8,
+                textBytes: 8_000,
+                mediaCount: 6
+            ),
+            "media-heavy sessions must show loading before image views mount"
+        )
+        expect(
             !TranscriptFollowPolicy.followsRevisionChange(isBusy: false),
             "idle transcript metadata writes must not yank the main conversation to the bottom"
         )
