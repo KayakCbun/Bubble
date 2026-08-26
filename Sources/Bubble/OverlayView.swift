@@ -723,7 +723,6 @@ struct OverlayView: View {
                         .frame(height: OverlayMetrics.transcriptCornerRadius)
                         .id("transcript-end")
                 }
-                .scrollTargetLayout()
                 .padding(.leading, ticks.isEmpty ? OverlayMetrics.transcriptInset : HistoryLimits.gutter + 16)
                 .padding(.trailing, OverlayMetrics.transcriptInset)
                 .padding(.top, OverlayMetrics.transcriptInset)
