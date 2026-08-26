@@ -4,6 +4,7 @@ enum BubblePiAcpPatch {
     static let packageVersion = "0.0.33"
     static let packageSpec = "pi-acp@\(packageVersion)"
     static let marker = "_bubble/session/select_leaf"
+    static let recoveryMarker = "_bubble/session/recover_dead_rpc"
 
     enum Error: Swift.Error, Equatable {
         case unsupportedSource
@@ -12,21 +13,23 @@ enum BubblePiAcpPatch {
     }
 
     static func patch(source: String) throws -> String {
-        if source.contains(marker), source.contains("async getEntries()"), source.contains("async getTree()"), source.contains("async selectLeaf(targetId)") {
-            return source
-        }
-
         var source = source
-        if source.contains("_bubble/session/navigate_tree") {
-            source = try removeLegacyPatch(from: source)
-        }
+        let branchPatchApplied = source.contains(marker)
+            && source.contains("async getEntries()")
+            && source.contains("async getTree()")
+            && source.contains("async selectLeaf(targetId)")
 
-        let processAnchor = "  async getMessages() {"
-        let agentAnchor = "  constructor(conn, _config) {"
-        guard source.range(of: processAnchor) != nil,
-              let agentRange = source.range(of: agentAnchor) else {
-            throw Error.unsupportedSource
-        }
+        if !branchPatchApplied {
+            if source.contains("_bubble/session/navigate_tree") {
+                source = try removeLegacyPatch(from: source)
+            }
+
+            let processAnchor = "  async getMessages() {"
+            let agentAnchor = "  constructor(conn, _config) {"
+            guard source.range(of: processAnchor) != nil,
+                  let agentRange = source.range(of: agentAnchor) else {
+                throw Error.unsupportedSource
+            }
 
         let processBridge = #"""
   async getEntries() {
@@ -70,17 +73,56 @@ enum BubblePiAcpPatch {
   }
 """#
 
-        var patched = source.replacingOccurrences(
-            of: processAnchor,
-            with: processBridge + "\n" + processAnchor,
-            options: [],
-            range: source.startIndex..<source.endIndex
-        )
-        guard let patchedAgentRange = patched.range(of: agentAnchor, range: agentRange.lowerBound..<patched.endIndex) else {
+            var patched = source.replacingOccurrences(
+                of: processAnchor,
+                with: processBridge + "\n" + processAnchor,
+                options: [],
+                range: source.startIndex..<source.endIndex
+            )
+            guard let patchedAgentRange = patched.range(of: agentAnchor, range: agentRange.lowerBound..<patched.endIndex) else {
+                throw Error.unsupportedSource
+            }
+            patched.insert(contentsOf: extensionBridge + "\n", at: patchedAgentRange.lowerBound)
+            source = patched
+        }
+
+        return try patchDeadSessionRecovery(source: source)
+    }
+
+    private static func patchDeadSessionRecovery(source: String) throws -> String {
+        if source.contains(recoveryMarker),
+           source.contains("existing?.proc?.isAlive?.()"),
+           source.contains("this.sessions.close(sessionId)") {
+            return source
+        }
+
+        let processAnchor = "  onEvent(handler) {"
+        let restoreAnchor = #"""
+    const existing = this.sessions.maybeGet(sessionId);
+    if (existing) return existing;
+"""#
+        guard source.contains(processAnchor), source.contains(restoreAnchor) else {
             throw Error.unsupportedSource
         }
-        patched.insert(contentsOf: extensionBridge + "\n", at: patchedAgentRange.lowerBound)
-        return patched
+
+        let livenessBridge = #"""
+  // _bubble/session/recover_dead_rpc
+  isAlive() {
+    return this.child.exitCode === null
+      && !this.child.killed
+      && this.child.stdin?.destroyed !== true
+      && this.child.stdin?.writableEnded !== true;
+  }
+
+"""#
+        let restoreBridge = #"""
+    const existing = this.sessions.maybeGet(sessionId);
+    if (existing?.proc?.isAlive?.()) return existing;
+    if (existing) this.sessions.close(sessionId);
+"""#
+        return source
+            .replacingOccurrences(of: processAnchor, with: livenessBridge + processAnchor, options: [], range: source.startIndex..<source.endIndex)
+            .replacingOccurrences(of: restoreAnchor, with: restoreBridge, options: [], range: source.startIndex..<source.endIndex)
     }
 
     private static func removeLegacyPatch(from source: String) throws -> String {
@@ -127,7 +169,13 @@ enum BubblePiAcpPatch {
               let manifest = try? JSONSerialization.jsonObject(with: packageData) as? [String: Any],
               manifest["version"] as? String == packageVersion,
               let source = try? String(contentsOf: adapter, encoding: .utf8) else { return false }
-        return source.contains(marker) && source.contains("async getEntries()") && source.contains("async getTree()") && source.contains("async selectLeaf(targetId)")
+        return source.contains(marker)
+            && source.contains("async getEntries()")
+            && source.contains("async getTree()")
+            && source.contains("async selectLeaf(targetId)")
+            && source.contains(recoveryMarker)
+            && source.contains("existing?.proc?.isAlive?.()")
+            && source.contains("this.sessions.close(sessionId)")
     }
 }
 

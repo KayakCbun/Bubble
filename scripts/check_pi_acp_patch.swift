@@ -12,12 +12,19 @@ private enum PiAcpPatchCheck {
 static func main() throws {
 let fixture = """
 class PiRpcProcess {
+  onEvent(handler) {
+    return handler;
+  }
   async getMessages() {
     const res = await this.request({ type: "get_messages" });
     return res.data;
   }
 }
 class PiAcpAgent {
+  async restoreSession(sessionId, opts) {
+    const existing = this.sessions.maybeGet(sessionId);
+    if (existing) return existing;
+  }
   constructor(conn, _config) {
     this.conn = conn;
   }
@@ -32,6 +39,10 @@ require(patched.contains("_bubble/session/navigate_tree"), "navigation method is
 require(patched.contains("/bubble-navigate"), "navigation stays owned by the Pi extension")
 require(patched.contains("_bubble/session/select_leaf"), "exact leaf selection method is installed")
 require(patched.contains("async selectLeaf(targetId)"), "exact leaf selection reaches Pi RPC")
+require(patched.contains("_bubble/session/recover_dead_rpc"), "dead Pi RPC recovery is marked")
+require(patched.contains("isAlive()"), "Pi RPC liveness is observable")
+require(patched.contains("existing?.proc?.isAlive?.()"), "live sessions are reused")
+require(patched.contains("this.sessions.close(sessionId)"), "dead sessions are evicted before restore")
 let patchedAgain = try BubblePiAcpPatch.patch(source: patched)
 require(patchedAgain == patched, "patch is idempotent")
 

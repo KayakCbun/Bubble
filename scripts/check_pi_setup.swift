@@ -95,6 +95,12 @@ struct PiSetupCheck {
     static func testSteeringExtension() {
         let source = BubbleConfig.workspaceExtensionSource
         expectContains(source, "pi.sendUserMessage(content, { deliverAs: \"steer\" })", "extension uses native steering")
+        expectContains(source, "await pi.sendUserMessage(content, { deliverAs: \"steer\" })", "steering reply waits for delivery")
+        expectContains(source, "let handling = false", "steering socket handles one request")
+        expectContains(source, "let replied = false", "steering socket sends one reply")
+        expectContains(source, "socket.on(\"error\", () => {})", "steering socket errors cannot crash Pi RPC")
+        expectContains(source, "let settled = false", "workspace control call settles once")
+        expectContains(source, "socket.destroy()", "workspace control closes the socket once")
         expectContains(source, "if (!steeringBusy) throw new Error(\"steer-unavailable\")", "extension rejects closed steering windows")
         expectContains(source, "path.join(os.homedir(), \".bubble\", \"steering\")", "extension publishes a session-local endpoint")
         expectContains(source, "request.token !== steeringToken || request.generation !== steeringGeneration", "steering endpoint is bound to one turn")

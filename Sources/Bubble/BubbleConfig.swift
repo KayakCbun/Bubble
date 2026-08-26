@@ -322,12 +322,22 @@ function startSteeringControl(pi: ExtensionAPI, sessionFile: string | undefined)
   if (!steeringServer) {
     steeringServer = net.createServer((socket) => {
       let buffer = "";
+      let handling = false;
+      let replied = false;
+      const reply = (payload: unknown) => {
+        if (replied || socket.destroyed || socket.writableEnded) return;
+        replied = true;
+        socket.end(JSON.stringify(payload) + "\n");
+      };
       socket.setTimeout(5000);
       socket.on("timeout", () => socket.destroy());
-      socket.on("data", (chunk) => {
+      socket.on("error", () => {});
+      socket.on("data", async (chunk) => {
+        if (handling) return;
         buffer += chunk.toString("utf8");
         const newline = buffer.indexOf("\n");
         if (newline < 0) return;
+        handling = true;
         try {
           const request = JSON.parse(buffer.slice(0, newline)) as {
             token?: string;
@@ -354,11 +364,11 @@ function startSteeringControl(pi: ExtensionAPI, sessionFile: string | undefined)
           const content = images.length === 0
             ? text
             : [{ type: "text" as const, text }, ...images];
-          pi.sendUserMessage(content, { deliverAs: "steer" });
-          socket.end(JSON.stringify({ ok: true }) + "\n");
+          await pi.sendUserMessage(content, { deliverAs: "steer" });
+          reply({ ok: true });
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
-          socket.end(JSON.stringify({ ok: false, error: message }) + "\n");
+          reply({ ok: false, error: message });
         }
       });
     });
@@ -381,8 +391,11 @@ function call(method: string, params: Record<string, unknown>): Promise<unknown>
   return new Promise((resolve, reject) => {
     const socket = net.connect({ host: "127.0.0.1", port: cfg.port });
     let buf = "";
+    let settled = false;
     const finish = (err: Error | null, value?: unknown) => {
-      socket.end();
+      if (settled) return;
+      settled = true;
+      socket.destroy();
       if (err) reject(err);
       else resolve(value);
     };
