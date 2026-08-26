@@ -99,9 +99,10 @@ final class SessionTabsStore {
 
     func select(_ id: UUID) {
         guard runtimes[id] != nil else { return }
-        guard SessionSwitchLoadingPolicy.usesMask(
-            requestedSessionID: id,
-            activeSessionID: state.selectedID
+        guard SessionSelectionRequestPolicy.shouldForward(
+            requestedID: id,
+            activeID: state.selectedID,
+            phase: state.selectionPhase
         ) else { return }
         selectionGeneration &+= 1
         let generation = selectionGeneration

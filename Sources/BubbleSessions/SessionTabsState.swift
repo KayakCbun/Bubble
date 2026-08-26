@@ -120,6 +120,16 @@ public enum SessionSelectionPhase: Equatable, Sendable {
     case rendering(UUID)
 }
 
+public enum SessionSelectionRequestPolicy {
+    public static func shouldForward(
+        requestedID: UUID,
+        activeID: UUID,
+        phase: SessionSelectionPhase
+    ) -> Bool {
+        requestedID != activeID || phase != .idle
+    }
+}
+
 public struct SessionTabsState: Equatable, Sendable {
     public static let defaultMaximum = 5
 

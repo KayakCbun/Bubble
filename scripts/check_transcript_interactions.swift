@@ -106,21 +106,6 @@ private enum TranscriptInteractionCheck {
             TranscriptStackPolicy.usesLazyStack(rowCount: 120, sourceItemCount: 1_520),
             "very large transcripts retain row virtualization"
         )
-        let activeSessionID = UUID()
-        expect(
-            SessionSwitchLoadingPolicy.usesMask(
-                requestedSessionID: UUID(),
-                activeSessionID: activeSessionID
-            ),
-            "every session change must show the same immediate loading response"
-        )
-        expect(
-            !SessionSwitchLoadingPolicy.usesMask(
-                requestedSessionID: activeSessionID,
-                activeSessionID: activeSessionID
-            ),
-            "reselecting the current session must not flash a loading mask"
-        )
         expect(
             !TranscriptFollowPolicy.followsRevisionChange(isBusy: false),
             "idle transcript metadata writes must not yank the main conversation to the bottom"

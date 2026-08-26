@@ -30,6 +30,31 @@ do {
     expect(state.isSwitching, "re-clicking the rendering tab must not dismiss loading")
     state.finishSelection(first)
     expect(!state.isSwitching, "the new transcript's first frame must dismiss loading")
+
+    let cancellationPrimary = UUID()
+    let cancellationSide = UUID()
+    var cancellationState = SessionTabsState(primaryID: cancellationPrimary)
+    _ = try cancellationState.createSideSession(id: cancellationSide)
+    expect(
+        SessionSelectionRequestPolicy.shouldForward(
+            requestedID: cancellationPrimary,
+            activeID: cancellationSide,
+            phase: cancellationState.selectionPhase
+        ),
+        "a different tab must always begin the uniform loading transition"
+    )
+    try cancellationState.requestSelection(cancellationPrimary)
+    expect(
+        SessionSelectionRequestPolicy.shouldForward(
+            requestedID: cancellationSide,
+            activeID: cancellationSide,
+            phase: cancellationState.selectionPhase
+        ),
+        "clicking back to the active transcript must cancel an in-flight switch"
+    )
+    try cancellationState.requestSelection(cancellationSide)
+    expect(!cancellationState.isSwitching, "the last click must cancel the pending transition")
+    expect(cancellationState.commitRequestedSelection() == nil, "a cancelled transition must never commit")
     try state.setBusy(true, for: second)
     try state.markUpdated(second)
     expect(state.tabs[1].isBusy, "background busy state must be retained")

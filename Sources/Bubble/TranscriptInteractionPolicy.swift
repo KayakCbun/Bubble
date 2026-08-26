@@ -58,12 +58,6 @@ enum TranscriptStackPolicy {
     }
 }
 
-enum SessionSwitchLoadingPolicy {
-    static func usesMask(requestedSessionID: UUID, activeSessionID: UUID) -> Bool {
-        requestedSessionID != activeSessionID
-    }
-}
-
 struct TranscriptFollowState: Equatable {
     private enum Mode: Equatable {
         case followingEnd
