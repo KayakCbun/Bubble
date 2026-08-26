@@ -11,6 +11,9 @@ private func require(_ condition: @autoclosure () -> Bool, _ message: String) {
 private enum PiAcpPatchCheck {
 static func main() throws {
 let fixture = """
+function normalizePiMessageText(content) {
+  return String(content ?? "");
+}
 class PiRpcProcess {
   onEvent(handler) {
     return handler;
@@ -20,10 +23,27 @@ class PiRpcProcess {
     return res.data;
   }
 }
+class PiAcpSession {
+  handlePiEvent(ev) {
+    switch (ev.type) {
+      case "tool_execution_start": {
+        break;
+      }
+    }
+  }
+}
 class PiAcpAgent {
   async restoreSession(sessionId, opts) {
     const existing = this.sessions.maybeGet(sessionId);
     if (existing) return existing;
+  }
+  async replay(messages) {
+    for (const m of messages) {
+      const role = String(m?.role ?? "");
+      if (role === "toolResult") {
+        continue;
+      }
+    }
   }
   constructor(conn, _config) {
     this.conn = conn;
@@ -43,6 +63,9 @@ require(patched.contains("_bubble/session/recover_dead_rpc"), "dead Pi RPC recov
 require(patched.contains("isAlive()"), "Pi RPC liveness is observable")
 require(patched.contains("existing?.proc?.isAlive?.()"), "live sessions are reused")
 require(patched.contains("this.sessions.close(sessionId)"), "dead sessions are evicted before restore")
+require(patched.contains("_bubble/forward_custom_images"), "displayed Pi custom images are forwarded to ACP")
+require(patched.contains("message?.role !== \"custom\""), "only Pi custom messages use the custom-image bridge")
+require(patched.contains("sessionUpdate: \"agent_message_chunk\""), "custom image blocks become assistant content chunks")
 let patchedAgain = try BubblePiAcpPatch.patch(source: patched)
 require(patchedAgain == patched, "patch is idempotent")
 

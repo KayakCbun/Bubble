@@ -1,5 +1,10 @@
 import Foundation
 
+struct ConversationImageContent: Equatable, Sendable {
+    var mimeType: String
+    var data: String
+}
+
 struct ConversationEntry: Equatable, Sendable {
     var id: String
     var parentID: String?
@@ -11,6 +16,7 @@ struct ConversationEntry: Equatable, Sendable {
     var toolCallID: String?
     var isError: Bool
     var hasStructuredContent: Bool
+    var images: [ConversationImageContent] = []
     var order: Int
 
     var isUserMessage: Bool { type == "message" && role == "user" }
@@ -40,6 +46,7 @@ struct ConversationTranscriptRecord: Equatable, Sendable {
     var toolCallID: String?
     var isError: Bool
     var branchable: Bool
+    var images: [ConversationImageContent] = []
 }
 
 struct ConversationTreeSnapshot: Equatable, Sendable {
@@ -113,8 +120,13 @@ struct ConversationTreeSnapshot: Equatable, Sendable {
                 if !entry.thinking.isEmpty {
                     records.append(Self.record(.thought, entry: entry, text: entry.thinking, branchable: true))
                 }
-                if !entry.text.isEmpty {
-                    records.append(Self.record(.assistant, entry: entry, text: entry.text, branchable: true))
+                if !entry.text.isEmpty || !entry.images.isEmpty {
+                    records.append(Self.record(
+                        .assistant,
+                        entry: entry,
+                        text: entry.text,
+                        branchable: entry.type == "message"
+                    ))
                 }
                 return records
             case "toolResult", "bashExecution":
@@ -227,18 +239,20 @@ struct ConversationTreeSnapshot: Equatable, Sendable {
               let id = string(object["id"]),
               let type = string(object["type"]) else { return nil }
         let message = object["message"] as? [String: Any] ?? [:]
-        let content = message["content"]
+        let isDisplayedCustomMessage = type == "custom_message" && bool(object["display"])
+        let content = isDisplayedCustomMessage ? object["content"] : message["content"]
         return ConversationEntry(
             id: id,
             parentID: string(object["parentId"]),
             type: type,
-            role: string(message["role"]),
+            role: isDisplayedCustomMessage ? "assistant" : string(message["role"]),
             text: contentText(content),
             thinking: thinkingText(content),
             toolName: string(message["toolName"]) ?? string(message["command"]),
             toolCallID: string(message["toolCallId"]),
             isError: bool(message["isError"]),
             hasStructuredContent: hasStructuredContent(content),
+            images: imageContent(content),
             order: order
         )
     }
@@ -265,6 +279,18 @@ struct ConversationTreeSnapshot: Equatable, Sendable {
         return blocks.contains { block in
             guard let item = block as? [String: Any], let type = string(item["type"]) else { return false }
             return type != "text" && type != "thinking"
+        }
+    }
+
+    private static func imageContent(_ content: Any?) -> [ConversationImageContent] {
+        guard let blocks = content as? [Any] else { return [] }
+        return blocks.compactMap { block in
+            guard let item = block as? [String: Any],
+                  string(item["type"]) == "image",
+                  let mimeType = string(item["mimeType"]),
+                  mimeType.lowercased().hasPrefix("image/"),
+                  let data = string(item["data"]) else { return nil }
+            return ConversationImageContent(mimeType: mimeType, data: data)
         }
     }
 
@@ -305,7 +331,8 @@ struct ConversationTreeSnapshot: Equatable, Sendable {
             toolName: entry.toolName,
             toolCallID: entry.toolCallID,
             isError: entry.isError,
-            branchable: branchable
+            branchable: branchable,
+            images: entry.images
         )
     }
 

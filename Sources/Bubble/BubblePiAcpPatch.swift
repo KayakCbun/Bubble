@@ -5,6 +5,7 @@ enum BubblePiAcpPatch {
     static let packageSpec = "pi-acp@\(packageVersion)"
     static let marker = "_bubble/session/select_leaf"
     static let recoveryMarker = "_bubble/session/recover_dead_rpc"
+    static let customImageMarker = "_bubble/forward_custom_images"
 
     enum Error: Swift.Error, Equatable {
         case unsupportedSource
@@ -86,7 +87,67 @@ enum BubblePiAcpPatch {
             source = patched
         }
 
-        return try patchDeadSessionRecovery(source: source)
+        let recovered = try patchDeadSessionRecovery(source: source)
+        return try patchCustomMessageImages(source: recovered)
+    }
+
+    private static func patchCustomMessageImages(source: String) throws -> String {
+        if source.contains(customImageMarker) { return source }
+        let helperAnchor = "function normalizePiMessageText(content) {"
+        let eventAnchor = #"      case "tool_execution_start": {"#
+        let replayAnchor = #"      if (role === "toolResult") {"#
+        guard source.contains(helperAnchor),
+              source.contains(eventAnchor),
+              source.contains(replayAnchor) else {
+            throw Error.unsupportedSource
+        }
+
+        let helper = #"""
+// _bubble/forward_custom_images
+function bubbleDisplayContentBlocks(content) {
+  const blocks = typeof content === "string"
+    ? [{ type: "text", text: content }]
+    : Array.isArray(content) ? content : [];
+  return blocks.flatMap((block) => {
+    if (block?.type === "text" && typeof block.text === "string" && block.text) {
+      return [{ type: "text", text: block.text }];
+    }
+    if (block?.type === "image"
+      && typeof block.mimeType === "string"
+      && block.mimeType.startsWith("image/")
+      && typeof block.data === "string"
+      && block.data) {
+      return [{ type: "image", mimeType: block.mimeType, data: block.data }];
+    }
+    return [];
+  });
+}
+
+"""#
+        let eventBridge = #"""
+      case "message_end": {
+        const message = ev.message;
+        if (message?.role !== "custom" || message.display !== true) break;
+        for (const content of bubbleDisplayContentBlocks(message.content)) {
+          this.emit({ sessionUpdate: "agent_message_chunk", content });
+        }
+        break;
+      }
+"""#
+        let replayBridge = #"""
+      if (role === "custom" && m?.display === true) {
+        for (const content of bubbleDisplayContentBlocks(m?.content)) {
+          await this.conn.sessionUpdate({
+            sessionId: session.sessionId,
+            update: { sessionUpdate: "agent_message_chunk", content }
+          });
+        }
+      }
+"""#
+        return source
+            .replacingOccurrences(of: helperAnchor, with: helper + helperAnchor, options: [], range: source.startIndex..<source.endIndex)
+            .replacingOccurrences(of: eventAnchor, with: eventBridge + eventAnchor, options: [], range: source.startIndex..<source.endIndex)
+            .replacingOccurrences(of: replayAnchor, with: replayBridge + replayAnchor, options: [], range: source.startIndex..<source.endIndex)
     }
 
     private static func patchDeadSessionRecovery(source: String) throws -> String {
@@ -176,6 +237,8 @@ enum BubblePiAcpPatch {
             && source.contains(recoveryMarker)
             && source.contains("existing?.proc?.isAlive?.()")
             && source.contains("this.sessions.close(sessionId)")
+            && source.contains(customImageMarker)
+            && source.contains("bubbleDisplayContentBlocks")
     }
 }
 

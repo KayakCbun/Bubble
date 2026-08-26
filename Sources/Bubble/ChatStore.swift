@@ -962,6 +962,26 @@ final class ChatStore {
         workspacePaneStreamingAssistantId = rows.last(where: { $0.kind == .assistant })?.id
     }
 
+    private func appendWorkspacePaneAssistantImage(
+        _ image: AssistantMessageImage,
+        path: String?,
+        sessionId: String?,
+        runId: String?
+    ) {
+        guard let runId, !runId.isEmpty,
+              let name = BubbleImages.save(image.data, mimeType: image.mimeType) else { return }
+        var rows = workspaceRunBuffer(runId: runId)
+        if let index = TranscriptStream.resumeAssistantIndex(kinds: rows.map(\.kind.rawValue)) {
+            appendImageName(name, to: &rows[index])
+        } else {
+            rows.append(ChatItem(kind: .assistant, text: "", imageNames: [name]))
+        }
+        cacheWorkspaceRunRows(rows, runId: runId)
+        guard workspacePaneIsCurrent(path: path, sessionId: sessionId, runId: runId) else { return }
+        workspacePaneItems = rows
+        workspacePaneStreamingAssistantId = rows.last(where: { $0.kind == .assistant })?.id
+    }
+
     private func workspaceRunBuffer(runId: String) -> [ChatItem] {
         if let rows = workspacePaneRowsByRun[runId] { return rows }
         guard let card = items.last(where: {
@@ -1128,7 +1148,10 @@ final class ChatStore {
         items.filter { item in
             switch item.kind {
             case .assistant:
-                return !item.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                return AssistantMessagePresentation.hasContent(
+                    text: item.text,
+                    imageNames: item.imageNames
+                )
             case .thought:
                 if item.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     return isBusy && item.id == streamingThoughtId
@@ -1144,7 +1167,10 @@ final class ChatStore {
         workspacePaneItems.filter { item in
             switch item.kind {
             case .assistant:
-                return !item.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                return AssistantMessagePresentation.hasContent(
+                    text: item.text,
+                    imageNames: item.imageNames
+                )
             case .thought:
                 if item.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     return item.id == workspacePaneStreamingThoughtId
@@ -2159,9 +2185,14 @@ final class ChatStore {
         switch kind {
         case "agent_message_chunk":
             if hushMainAssistant { return }
-            if let text = extractText(update["content"]), !text.isEmpty {
+            if let content = AssistantMessageContent.parse(update["content"]),
+               let text = content.text, !text.isEmpty {
                 if injecting { injectSpoke = true }
                 appendAssistant(text)
+            }
+            if let image = AssistantMessageContent.parse(update["content"])?.image {
+                if injecting { injectSpoke = true }
+                appendAssistantImage(image)
             }
         case "agent_thought_chunk":
             if hushMainAssistant || injecting { return }
@@ -2789,6 +2820,32 @@ final class ChatStore {
         queueStreamFlush()
     }
 
+    private func appendAssistantImage(_ image: AssistantMessageImage) {
+        flushStreamChunks()
+        guard let name = BubbleImages.save(image.data, mimeType: image.mimeType) else {
+            OverlayLog.write("assistant image ignored: unreadable \(image.mimeType) payload")
+            return
+        }
+        if let id = streamingAssistantId,
+           let index = items.firstIndex(where: { $0.id == id }) {
+            appendImageName(name, to: &items[index])
+        } else if let index = TranscriptStream.resumeAssistantIndex(kinds: items.map(\.kind.rawValue)) {
+            appendImageName(name, to: &items[index])
+            streamingAssistantId = items[index].id
+        } else {
+            let item = ChatItem(kind: .assistant, text: "", imageNames: [name])
+            streamingAssistantId = item.id
+            items.append(item)
+        }
+        persist()
+    }
+
+    private func appendImageName(_ name: String, to item: inout ChatItem) {
+        var names = item.imageNames ?? []
+        if !names.contains(name) { names.append(name) }
+        item.imageNames = names
+    }
+
     private func appendThought(_ raw: String) {
         pendingThoughtChunk += raw
         queueStreamFlush()
@@ -3081,6 +3138,7 @@ final class ChatStore {
                     rich.toolStatus = projected.toolStatus ?? rich.toolStatus
                     rich.toolKind = projected.toolKind ?? rich.toolKind
                     rich.toolOutput = projected.toolOutput ?? rich.toolOutput
+                    rich.imageNames = projected.imageNames ?? rich.imageNames
                     rich.sourceEntryId = record.entryID
                     rich.sourceBranchable = record.branchable
                     rich.deliveryState = nil
@@ -3221,7 +3279,13 @@ final class ChatStore {
         case .user:
             return ChatItem(kind: .user, text: record.text, sourceEntryId: record.entryID, sourceBranchable: record.branchable)
         case .assistant:
-            return ChatItem(kind: .assistant, text: record.text, sourceEntryId: record.entryID, sourceBranchable: record.branchable)
+            return ChatItem(
+                kind: .assistant,
+                text: record.text,
+                imageNames: restoredImageNames(record.images),
+                sourceEntryId: record.entryID,
+                sourceBranchable: record.branchable
+            )
         case .thought:
             return ChatItem(kind: .thought, text: record.text, sourceEntryId: record.entryID, sourceBranchable: record.branchable)
         case .tool:
@@ -3243,6 +3307,15 @@ final class ChatStore {
                 sourceBranchable: false
             )
         }
+    }
+
+    private static func restoredImageNames(_ images: [ConversationImageContent]) -> [String]? {
+        let names = images.compactMap { image -> String? in
+            guard let data = Data(base64Encoded: image.data),
+                  data.count <= AssistantMessageContent.maxImageBytes else { return nil }
+            return BubbleImages.save(data, mimeType: image.mimeType)
+        }
+        return names.isEmpty ? nil : names
     }
 
     private static func chatKind(_ kind: ConversationTranscriptRecord.Kind) -> ChatItem.Kind {
@@ -3324,7 +3397,12 @@ final class ChatStore {
                     .suffix(TranscriptVirtualizationLimits.retainedItems)
                     .filter { item in
                         if item.kind == .assistant || item.kind == .thought {
-                            return !item.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            return item.kind == .assistant
+                                ? AssistantMessagePresentation.hasContent(
+                                    text: item.text,
+                                    imageNames: item.imageNames
+                                )
+                                : !item.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                         }
                         return true
                     }
@@ -3372,7 +3450,14 @@ final class ChatStore {
             }
             if copy.kind == .assistant || copy.kind == .thought {
                 copy.text = stripDiagnostics(copy.text)
-                if copy.text.isEmpty { return nil }
+                if copy.kind == .assistant {
+                    if !AssistantMessagePresentation.hasContent(
+                        text: copy.text,
+                        imageNames: copy.imageNames
+                    ) { return nil }
+                } else if copy.text.isEmpty {
+                    return nil
+                }
             } else if copy.kind == .system, copy.text == "Started a fresh session." {
                 copy.text = "Bubble is ready."
             }
@@ -3421,6 +3506,10 @@ final class ChatStore {
                 next: item.kind.rawValue
                ) {
                 result[last].text = TranscriptStream.joinText(result[last].text, item.text)
+                result[last].imageNames = Self.mergedImageNames(
+                    result[last].imageNames,
+                    item.imageNames
+                )
                 continue
             }
             if let last = result.indices.last,
@@ -3428,6 +3517,10 @@ final class ChatStore {
                item.kind == .assistant,
                TranscriptStream.shouldGlueSplitAssistant(result[last].text, item.text) {
                 result[last].text = TranscriptStream.joinText(result[last].text, item.text)
+                result[last].imageNames = Self.mergedImageNames(
+                    result[last].imageNames,
+                    item.imageNames
+                )
                 continue
             }
             result.append(item)
@@ -3444,10 +3537,19 @@ final class ChatStore {
         }
         return result.filter { item in
             if item.kind == .assistant {
-                return !item.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                return AssistantMessagePresentation.hasContent(
+                    text: item.text,
+                    imageNames: item.imageNames
+                )
             }
             return true
         }
+    }
+
+    private static func mergedImageNames(_ left: [String]?, _ right: [String]?) -> [String]? {
+        let names = (left ?? []) + (right ?? [])
+        guard !names.isEmpty else { return nil }
+        return Array(NSOrderedSet(array: names)) as? [String]
     }
 
     private static func workspaceRunRecord(_ item: ChatItem) -> TranscriptStream.WorkspaceRunRecord {
@@ -4214,10 +4316,19 @@ final class ChatStore {
         let sessionId = routedSessionId.isEmpty ? childSessionId : routedSessionId
         switch kind {
         case "agent_message_chunk":
-            if let text = extractText(update["content"]), !text.isEmpty {
+            if let content = AssistantMessageContent.parse(update["content"]),
+               let text = content.text, !text.isEmpty {
                 childAssistant += text
                 patchActiveSummary(childAssistant)
                 appendWorkspacePaneAssistant(text, path: path, sessionId: sessionId, runId: runId)
+            }
+            if let image = AssistantMessageContent.parse(update["content"])?.image {
+                appendWorkspacePaneAssistantImage(
+                    image,
+                    path: path,
+                    sessionId: sessionId,
+                    runId: runId
+                )
             }
         case "agent_thought_chunk":
             if let text = extractText(update["content"]), !text.isEmpty {

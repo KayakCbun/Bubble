@@ -1847,7 +1847,7 @@ struct OverlayView: View {
                 if !names.isEmpty {
                     VStack(alignment: .trailing, spacing: 8) {
                         ForEach(names, id: \.self) { name in
-                            userImageThumb(name)
+                            transcriptImageThumb(name)
                         }
                     }
                 }
@@ -1911,7 +1911,7 @@ struct OverlayView: View {
                 if !message.imageNames.isEmpty {
                     VStack(alignment: .trailing, spacing: 8) {
                         ForEach(message.imageNames, id: \.self) { name in
-                            userImageThumb(name)
+                            transcriptImageThumb(name)
                         }
                     }
                 }
@@ -1955,7 +1955,7 @@ struct OverlayView: View {
         }
     }
 
-    private func userImageThumb(_ name: String) -> some View {
+    private func transcriptImageThumb(_ name: String) -> some View {
         let image = BubbleImages.load(name)
         return Button {
             if let image {
@@ -2000,11 +2000,16 @@ struct OverlayView: View {
             isStreaming: live
         )
         return VStack(alignment: .leading, spacing: 8) {
+            if let names = item.imageNames, !names.isEmpty {
+                assistantImageGrid(names)
+            }
             HStack(alignment: .firstTextBaseline, spacing: 6) {
-                MessageBody(text: item.text, streaming: live)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                if live {
-                    StreamingCaret()
+                if !text.isEmpty {
+                    MessageBody(text: item.text, streaming: live)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    if live {
+                        StreamingCaret()
+                    }
                 }
             }
             if !live, !text.isEmpty {
@@ -2046,6 +2051,9 @@ struct OverlayView: View {
                 isStreaming: false
             )
         return VStack(alignment: .leading, spacing: 8) {
+            if isTerminalChunk, let names = item.imageNames, !names.isEmpty {
+                assistantImageGrid(names)
+            }
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 MessageBody(text: text, streaming: live, virtualizedChunk: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -2081,6 +2089,15 @@ struct OverlayView: View {
                 store.beginBranch(from: item)
             }
         }
+    }
+
+    private func assistantImageGrid(_ names: [String]) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(names, id: \.self) { name in
+                transcriptImageThumb(name)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func quoteCard(_ text: String) -> some View {

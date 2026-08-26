@@ -105,6 +105,35 @@ require(transcript[4].toolName == "read", "historic tool identity is preserved")
 require(transcript[4].text == "tool output", "historic tool output is preserved")
 require(transcript.first?.branchable == true, "plain text user messages remain branchable")
 
+let customImageResponse: [String: Any] = [
+    "entries": [
+        "entries": [
+            ["type": "model_change", "id": "custom-root", "parentId": NSNull()],
+            [
+                "type": "custom_message",
+                "id": "custom-image",
+                "parentId": "custom-root",
+                "customType": "generated-image",
+                "display": true,
+                "content": [
+                    ["type": "text", "text": "Generated preview"],
+                    ["type": "image", "mimeType": "image/png", "data": "aW1hZ2U="],
+                ],
+            ],
+        ],
+        "leafId": "custom-image",
+    ],
+]
+guard let customImageSnapshot = ConversationTreeSnapshot(response: customImageResponse),
+      let customImageRecord = customImageSnapshot.transcript.first else {
+    fputs("conversation tree check failed: displayed custom image was omitted\n", stderr)
+    exit(1)
+}
+require(customImageRecord.kind == .assistant, "displayed Pi custom content projects as an assistant row")
+require(customImageRecord.text == "Generated preview", "custom image captions survive history restore")
+require(customImageRecord.images.first?.mimeType == "image/png", "custom image MIME survives history restore")
+require(customImageRecord.images.first?.data == "aW1hZ2U=", "custom image data survives history restore")
+
 let oldBranch = snapshot.selecting(leafID: "a2a")
 require(oldBranch.activePath.map(\.id) == ["model", "u1", "a1", "u2a", "a2a"], "selecting an older leaf is deterministic")
 require(oldBranch.variants(around: "u2a").map(\.isCurrent) == [true, false], "variant selection follows restored leaf")

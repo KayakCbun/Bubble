@@ -42,6 +42,9 @@ swiftc -parse-as-library Sources/Bubble/SideStage.swift Sources/Bubble/Workspace
 swiftc -parse-as-library Sources/Bubble/TranscriptInteractionPolicy.swift scripts/check_transcript_interactions.swift -o /tmp/bubble-check-transcript-interactions
 /tmp/bubble-check-transcript-interactions
 
+swiftc -parse-as-library Sources/Bubble/AssistantMessageContent.swift scripts/check_assistant_message_images.swift -o /tmp/bubble-check-assistant-images
+/tmp/bubble-check-assistant-images
+
 swiftc -parse-as-library Sources/Bubble/HistoryRailPolicy.swift scripts/check_history_rail.swift -o /tmp/bubble-check-history-rail
 /tmp/bubble-check-history-rail
 
