@@ -20,6 +20,11 @@ struct OverlayLayoutCheck {
                "session loading must keep the transcript visible")
         expect(OverlayLayoutPolicy.isTranscriptPresented(itemCount: 1, isStartingSession: false),
                "a ready message must keep the transcript visible")
+        expect(OverlayLayoutPolicy.isTranscriptPresented(
+            itemCount: 0,
+            isStartingSession: false,
+            sessionTabCount: 2
+        ), "parallel-session tabs must keep an empty conversation window visible")
         expect(OverlayLayoutPolicy.previewExtraWidth(0, gap: 8) == 0,
                "a closed preview must not grow the panel")
         expect(OverlayLayoutPolicy.previewExtraWidth(440, gap: 8) == 448,
@@ -78,6 +83,10 @@ struct OverlayLayoutCheck {
                "chrome visibility must refresh the card mask")
         expect(OverlayRenderPolicy.maskNeedsApply(previous: chrome, next: revealed),
                "fading the extra card updates hit testing without resizing")
+        var tabbed = chrome
+        tabbed.sessionTabCount = 2
+        expect(OverlayRenderPolicy.layoutNeedsApply(previous: chrome, next: tabbed),
+               "showing session tabs must refresh the physical hit mask")
         expect(!OverlayRenderPolicy.shouldPersistStreamChunk(isBusy: true, childBusy: false),
                "a live main turn must not write transcript.json on every token")
         expect(!OverlayRenderPolicy.shouldPersistStreamChunk(isBusy: false, childBusy: true),

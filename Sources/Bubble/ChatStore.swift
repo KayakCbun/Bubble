@@ -131,6 +131,24 @@ struct QueuedUserMessage: Identifiable, Equatable {
     var imageNames: [String]
 }
 
+enum SessionRuntimeRole: Equatable {
+    case main
+    case side
+
+    var restoresSavedTranscript: Bool { self == .main }
+    var persistsAsMain: Bool { self == .main }
+    var persistsWorkspaceRegistry: Bool { self == .main }
+
+    func controlFile(runtimeID: UUID) -> URL {
+        switch self {
+        case .main:
+            return OverlayPaths.controlFile
+        case .side:
+            return OverlayPaths.sideControlFile(runtimeID: runtimeID)
+        }
+    }
+}
+
 @Observable
 final class ChatStore {
     var items: [ChatItem] = []
@@ -165,7 +183,10 @@ final class ChatStore {
         didSet { syncOverlayChrome() }
     }
     var isBusy = false {
-        didSet { syncOverlayChrome() }
+        didSet {
+            syncOverlayChrome()
+            onActivityChanged?(isBusy)
+        }
     }
     var selectedAvatarFile = AvatarSelection.file
     var transcriptWide = UserDefaults.standard.bool(forKey: "bubble.transcript.wide")
@@ -197,6 +218,9 @@ final class ChatStore {
     var macEpoch = 0
     var slashHighlight = 0
     var onHideOverlay: (() -> Void)?
+    var onCreateSideSession: (() -> Void)?
+    var onActivityChanged: ((Bool) -> Void)?
+    var onTranscriptUpdated: (() -> Void)?
     var onWorkspacePanePresentationRequested: (() -> Void)?
     var onSideStageChromePresentationRequested: (() -> Void)?
     var onSideStageChromeDismissalRequested: (() -> Void)?
@@ -218,7 +242,7 @@ final class ChatStore {
     var isSwitchingBranch = false
     private var paletteSuppressed = false
     private var lastPaletteSignature = ""
-    private let control = WorkspaceControlServer()
+    private let control: WorkspaceControlServer
     private var childSessionId: String?
     private var childSessionIds: Set<String> = []
     private var workspaceRunGeneration = 0
@@ -1078,7 +1102,9 @@ final class ChatStore {
         workspacePaneItems = rows
     }
 
-    let client = AcpClient()
+    let runtimeID: UUID
+    let client: AcpClient
+    private let runtimeRole: SessionRuntimeRole
     private static let catalogRefreshQueue = DispatchQueue(
         label: "local.bubble.catalog-refresh",
         qos: .userInitiated,
@@ -1103,9 +1129,16 @@ final class ChatStore {
     private static let workspacePaneLoadingText = "Loading workspace session…"
     private static let workspacePaneRunCacheLimit = 24
 
-    init() {
+    init(runtimeID: UUID = UUID(), runtimeRole: SessionRuntimeRole = .main) {
+        self.runtimeID = runtimeID
+        self.runtimeRole = runtimeRole
+        let controlFile = runtimeRole.controlFile(runtimeID: runtimeID)
+        client = AcpClient(controlFile: controlFile)
+        control = WorkspaceControlServer(controlFile: controlFile)
         OverlayPaths.bootstrap()
-        let restored = Self.loadTranscript()
+        let restored = runtimeRole.restoresSavedTranscript
+            ? Self.loadTranscript()
+            : (items: [], richItems: [])
         items = restored.items.filter {
             !StartupTranscriptPolicy.isSetupCard($0.text, isSystem: $0.kind == .system)
         }
@@ -1113,19 +1146,24 @@ final class ChatStore {
             if let key = Self.richKey(item) { richTranscriptRows[key] = item }
         }
         workspaceState = WorkspaceRegistry.load(from: OverlayPaths.mountsFile)
-        if workspaceState.active?.isActive == true {
+        if runtimeRole.persistsWorkspaceRegistry, workspaceState.active?.isActive == true {
             workspaceState.active = nil
             try? WorkspaceRegistry.save(workspaceState, to: OverlayPaths.mountsFile)
+        } else if !runtimeRole.persistsWorkspaceRegistry {
+            workspaceState.active = nil
         }
         refreshMountSkills()
         // Persist startup-message migrations immediately so Pi metadata does not
         // return the next time Bubble restores the local transcript.
-        writeTranscript()
+        if runtimeRole.restoresSavedTranscript {
+            writeTranscript()
+        }
         refreshCatalog()
         client.onUpdate = { [weak self] update in
             guard update.shouldDeliverToTranscript else { return }
             DispatchQueue.main.async {
                 self?.routeUpdate(update.sessionId, update.data)
+                self?.onTranscriptUpdated?()
             }
         }
         client.onLog = { text in
@@ -1153,10 +1191,17 @@ final class ChatStore {
     func prepareToQuit() {
         closeSideStage(animated: false)
         WorkspaceRegistry.interruptActive(in: &workspaceState)
-        persistWorkspaceState()
+        if runtimeRole.persistsWorkspaceRegistry {
+            persistWorkspaceState()
+        }
         writeTranscript()
         Self.transcriptPersistQueue.sync {}
         control.stop()
+    }
+
+    func shutdown() {
+        prepareToQuit()
+        client.stop()
     }
 
     var visibleItems: [ChatItem] {
@@ -1573,6 +1618,12 @@ final class ChatStore {
         focusTick += 1
     }
 
+    func presentSessionMessage(_ text: String) {
+        items.append(ChatItem(kind: .system, text: text))
+        persist(immediate: true)
+        requestFocus()
+    }
+
     func refreshCatalog() {
         let workspace = OverlayPaths.workspace
         Self.catalogRefreshQueue.async { [weak self] in
@@ -1685,7 +1736,11 @@ final class ChatStore {
             return
         }
         do {
-            _ = try await client.connectAndResume()
+            if runtimeRole == .main {
+                _ = try await client.connectAndResume()
+            } else {
+                _ = try await client.reconnectSideSession()
+            }
             isConnected = true
             status = "ready"
             removeSetupCards(persistNow: true)
@@ -1871,6 +1926,10 @@ final class ChatStore {
         let imageData = composerImages.map(\.png)
         let branch = branchDraft
         guard !text.isEmpty || !composerClips.isEmpty || !imageData.isEmpty else { return }
+        if branch == nil, SlashCommand.token(in: text) == "side", handleLocalSlash(text) {
+            consumeComposer()
+            return
+        }
         guard branch == nil || !isBusy else {
             status = "finish the current turn before branching"
             return
@@ -2344,6 +2403,10 @@ final class ChatStore {
             draft = ""
             startFreshConversation()
             return true
+        case "side":
+            draft = ""
+            onCreateSideSession?()
+            return true
         case "copy":
             draft = ""
             copyLastAssistant()
@@ -2580,7 +2643,7 @@ final class ChatStore {
                 if !isConnected {
                     await connect()
                 }
-                _ = try await client.switchToSession(id)
+                _ = try await client.switchToSession(id, persistAsMain: runtimeRole.persistsAsMain)
                 let restored = Self.loadTranscript(sessionID: id)
                 items = restored.items
                 richTranscriptRows = [:]
@@ -2687,7 +2750,7 @@ final class ChatStore {
                 if !isConnected {
                     await connect()
                 }
-                _ = try await client.startFreshSession()
+                _ = try await client.startFreshSession(persistAsMain: runtimeRole.persistsAsMain)
                 try resetWorkspaceSessionsForFreshMainSession()
                 isConnected = true
                 status = "ready"
@@ -3491,6 +3554,7 @@ final class ChatStore {
         let selectedLeafID = Self.savedConversationLeaves()[sessionID]
         let sessionURL = Self.transcriptURL(sessionID: sessionID)
         let transcriptURL = OverlayPaths.transcriptFile
+        let writesCurrentTranscript = runtimeRole.persistsAsMain
         Self.transcriptPersistQueue.async {
             do {
                 let stored = itemSnapshot
@@ -3518,7 +3582,9 @@ final class ChatStore {
                     withIntermediateDirectories: true
                 )
                 try data.write(to: sessionURL, options: .atomic)
-                try data.write(to: transcriptURL, options: .atomic)
+                if writesCurrentTranscript {
+                    try data.write(to: transcriptURL, options: .atomic)
+                }
             } catch {
                 OverlayLog.write("transcript save failed: \(error.localizedDescription)")
             }
@@ -3847,6 +3913,11 @@ final class ChatStore {
     }
 
     private func persistWorkspaceStateOrThrow() throws {
+        guard runtimeRole.persistsWorkspaceRegistry else {
+            refreshMountSkills()
+            macEpoch += 1
+            return
+        }
         try WorkspaceRegistry.save(workspaceState, to: OverlayPaths.mountsFile)
         refreshMountSkills()
         macEpoch += 1

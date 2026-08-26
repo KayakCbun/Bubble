@@ -39,6 +39,7 @@ struct OverlayLayout: Equatable {
     var composerHeight: CGFloat
     var previewWidth: CGFloat = 0
     var chromeVisible: Bool = false
+    var sessionTabCount: Int = 0
 }
 
 enum OverlayPalettePolicy {
@@ -75,8 +76,12 @@ enum OverlayPalettePolicy {
 }
 
 enum OverlayLayoutPolicy {
-    static func isTranscriptPresented(itemCount: Int, isStartingSession: Bool) -> Bool {
-        itemCount > 0 || isStartingSession
+    static func isTranscriptPresented(
+        itemCount: Int,
+        isStartingSession: Bool,
+        sessionTabCount: Int = 0
+    ) -> Bool {
+        itemCount > 0 || isStartingSession || sessionTabCount > 0
     }
 
     static func transcriptHeight(isPresented: Bool, maximum: CGFloat) -> CGFloat {

@@ -12,6 +12,14 @@ _Avoid_: overlay (the window is the face, not the agent), Pi (the harness)
 Bubble's long-lived ACP session. cwd is always `~/.bubble/workspace`.
 _Avoid_: parent agent, root agent
 
+**Side session**:
+An independent Bubble ACP runtime opened with `/side`. It has its own Pi process, conversation context, transcript, draft, Waiting/Steering queue, and workspace-control endpoint. Up to five main-plus-side sessions may be open and running concurrently.
+_Avoid_: conversation branch, workspace session
+
+**Session tab**:
+The left-edge selector for an open main or side session. The strip is hidden while only one session is open; background activity and unread output belong to the tab that owns that runtime.
+_Avoid_: conversation variant, branch switcher
+
 **Conversation branch**:
 An alternative path inside one main-session Pi JSONL tree. Bubble shows one active root-to-leaf path at a time and keeps sibling paths available through the inline variant switcher.
 _Avoid_: session, fork

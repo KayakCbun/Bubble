@@ -2,7 +2,8 @@ import AppKit
 import SwiftUI
 
 final class OverlayController: NSObject, NSWindowDelegate {
-    let store = ChatStore()
+    let sessions = SessionTabsStore()
+    var store: ChatStore { sessions.activeStore }
 
     private let panel = OverlayPanel()
     private let rootView = OverlayRootView(frame: .zero)
@@ -11,7 +12,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
     private var mouseMonitor: Any?
     private var localMouseMonitor: Any?
     private var localKeys: Any?
-    private var connecting = false
+    private var connectingRuntimeIDs: Set<UUID> = []
     private var restoredPosition = false
     private var isUpdatingFrame = false
     private var isHiding = false
@@ -122,8 +123,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         if let mouseMonitor { NSEvent.removeMonitor(mouseMonitor) }
         if let localMouseMonitor { NSEvent.removeMonitor(localMouseMonitor) }
         if let localKeys { NSEvent.removeMonitor(localKeys) }
-        store.prepareToQuit()
-        store.client.stop()
+        sessions.prepareToQuit()
         frameAnimator.cancel()
         hide(animated: false)
     }
@@ -268,24 +268,19 @@ final class OverlayController: NSObject, NSWindowDelegate {
     }
 
     private func installView() {
-        store.onHideOverlay = { [weak self] in
-            self?.hide()
+        configureRuntime(store)
+        sessions.onRuntimeCreated = { [weak self] runtime in
+            self?.configureRuntime(runtime)
         }
-        store.onWorkspacePanePresentationRequested = { [weak self] in
-            self?.requestWorkspacePaneReveal()
+        sessions.onSelectionChanged = { [weak self] _, next in
+            guard let self else { return }
+            self.configureRuntime(next)
+            next.visibleScreenWidth = self.currentVisibleFrame()?.width ?? next.visibleScreenWidth
+            next.setStreamUISuspended(!self.panel.isVisible || self.isHiding)
+            self.position()
         }
-        store.onSideStageChromePresentationRequested = { [weak self] in
-            self?.requestSideStageChromeReveal()
-            self?.position()
-        }
-        store.onSideStageChromeDismissalRequested = { [weak self] in
-            self?.requestSideStageChromeHide()
-        }
-        store.onSideStageChromeInvalidated = { [weak self] in
-            self?.invalidateSideStageChrome()
-        }
-        let root = OverlayView(
-            store: store,
+        let root = SessionOverlayView(
+            sessions: sessions,
             onEscape: { [weak self] in self?.hide() },
             onToggleWidth: { [weak self] in self?.requestTranscriptWidthToggle() }
         )
@@ -333,6 +328,25 @@ final class OverlayController: NSObject, NSWindowDelegate {
         panel.setFrame(initial, display: false)
         frameAnimator.attach(panel)
         rootView.applyCardMask(transcriptHeight: 0, pickerHeight: 0, composerHeight: OverlayMetrics.minHeight)
+    }
+
+    private func configureRuntime(_ runtime: ChatStore) {
+        runtime.onHideOverlay = { [weak self] in
+            self?.hide()
+        }
+        runtime.onWorkspacePanePresentationRequested = { [weak self] in
+            self?.requestWorkspacePaneReveal()
+        }
+        runtime.onSideStageChromePresentationRequested = { [weak self] in
+            self?.requestSideStageChromeReveal()
+            self?.position()
+        }
+        runtime.onSideStageChromeDismissalRequested = { [weak self] in
+            self?.requestSideStageChromeHide()
+        }
+        runtime.onSideStageChromeInvalidated = { [weak self] in
+            self?.invalidateSideStageChrome()
+        }
     }
 
     private func scheduleApply(_ layout: OverlayLayout) {
@@ -418,7 +432,8 @@ final class OverlayController: NSObject, NSWindowDelegate {
             transcriptWidth: chatWidth,
             composerHeight: layout.composerHeight,
             previewWidth: layout.previewWidth,
-            chromeVisible: layout.chromeVisible
+            chromeVisible: layout.chromeVisible,
+            sessionTabCount: layout.sessionTabCount
         )
         let animateFrame = panel.isVisible && OverlayRenderPolicy.shouldAnimatePanelFrame(
             previous: lastAppliedLayout,
@@ -453,7 +468,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         )
         apply(OverlayLayout(
             totalHeight: contentHeight,
-            transcriptHeight: (store.visibleItems.isEmpty && !store.isStartingSession && !store.sideStagePresented)
+            transcriptHeight: (store.visibleItems.isEmpty && !store.isStartingSession && !store.sideStagePresented && !sessions.showsTabs)
                 ? 0
                 : max(0, contentHeight - OverlayMetrics.minHeight - OverlayMetrics.stackSpacing),
             pickerHeight: store.showAvatarPicker ? OverlayMetrics.pickerHeight : 0,
@@ -461,7 +476,8 @@ final class OverlayController: NSObject, NSWindowDelegate {
             transcriptWidth: transcriptWidth,
             composerHeight: store.composerChromeHeight,
             previewWidth: previewWidth,
-            chromeVisible: store.sideStageChromeVisible
+            chromeVisible: store.sideStageChromeVisible,
+            sessionTabCount: sessions.showsTabs ? sessions.tabs.count : 0
         ))
     }
 
@@ -477,7 +493,8 @@ final class OverlayController: NSObject, NSWindowDelegate {
                 previewWidth: layout.previewWidth
             ),
             previewIsMarkdown: store.markdownPreview != nil,
-            previewHasBack: store.canReturnToWorkspace
+            previewHasBack: store.canReturnToWorkspace,
+            sessionTabCount: layout.sessionTabCount
         )
     }
 
@@ -843,9 +860,10 @@ final class OverlayController: NSObject, NSWindowDelegate {
     }
 
     private func connectIfNeeded() async {
-        if store.isConnected || connecting { return }
-        connecting = true
-        await store.connect()
-        connecting = false
+        let runtime = store
+        if runtime.isConnected || connectingRuntimeIDs.contains(runtime.runtimeID) { return }
+        connectingRuntimeIDs.insert(runtime.runtimeID)
+        await runtime.connect()
+        connectingRuntimeIDs.remove(runtime.runtimeID)
     }
 }

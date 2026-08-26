@@ -65,6 +65,8 @@ swiftc -parse-as-library Sources/Bubble/PromptTriggerPolicy.swift scripts/check_
 
 swift run DiagramChecks
 
+swift run SessionTabsChecks
+
 swiftc -parse-as-library Sources/Bubble/MessageDelivery.swift scripts/check_message_delivery.swift -o /tmp/bubble-check-message-delivery
 /tmp/bubble-check-message-delivery
 

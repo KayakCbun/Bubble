@@ -381,7 +381,7 @@ function startSteeringControl(pi: ExtensionAPI, sessionFile: string | undefined)
 }
 
 function controlConfig() {
-  const file = path.join(os.homedir(), ".bubble", "control.json");
+  const file = process.env.BUBBLE_CONTROL_FILE || path.join(os.homedir(), ".bubble", "control.json");
   const raw = fs.readFileSync(file, "utf8");
   return JSON.parse(raw) as { port: number; token: string };
 }

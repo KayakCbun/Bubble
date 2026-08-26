@@ -72,6 +72,7 @@ struct SlashCommand: Identifiable, Equatable {
         .init(name: "clipboard", description: "Attach the live clipboard and send", local: true),
         .init(name: "clear", description: "Start a fresh session", local: true),
         .init(name: "new", description: "Start a fresh session", local: true),
+        .init(name: "side", description: "Open a parallel side session", local: true),
         .init(name: "compact", description: "Compact older conversation turns now", hint: "instructions", local: false),
         .init(name: "autocompact", description: "Toggle automatic compaction", hint: "on|off|toggle", local: false),
         .init(name: "session", description: "Show session stats", local: false),

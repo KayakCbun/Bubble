@@ -1,5 +1,6 @@
 import AppKit
 import BubbleMounts
+import BubbleSessions
 import SwiftUI
 
 enum OverlayMetrics {
@@ -66,6 +67,7 @@ struct OverlayView: View {
     @Bindable var store: ChatStore
     var onEscape: () -> Void
     var onToggleWidth: () -> Void
+    var sessionTabCount: Int = 0
 
     @FocusState private var focused: Bool
     @State private var transcriptPlanner = TranscriptRenderPlanner()
@@ -106,7 +108,8 @@ struct OverlayView: View {
     private var isTranscriptPresented: Bool {
         OverlayLayoutPolicy.isTranscriptPresented(
             itemCount: store.visibleItems.count,
-            isStartingSession: store.isStartingSession
+            isStartingSession: store.isStartingSession,
+            sessionTabCount: sessionTabCount
         ) || store.sideStagePresented
     }
 
@@ -157,7 +160,8 @@ struct OverlayView: View {
             transcriptWidth: chatWidth,
             composerHeight: composerHeight,
             previewWidth: previewWidth,
-            chromeVisible: store.sideStageChromeVisible
+            chromeVisible: store.sideStageChromeVisible,
+            sessionTabCount: sessionTabCount
         )
     }
 
@@ -3748,7 +3752,8 @@ struct OverlayLayoutKey: PreferenceKey {
         transcriptWidth: OverlayMetrics.transcriptWidthDefault,
         composerHeight: OverlayMetrics.minHeight,
         previewWidth: 0,
-        chromeVisible: false
+        chromeVisible: false,
+        sessionTabCount: 0
     )
     static func reduce(value: inout OverlayLayout, nextValue: () -> OverlayLayout) {
         value = nextValue()
