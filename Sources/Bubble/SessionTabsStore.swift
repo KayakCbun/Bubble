@@ -51,6 +51,11 @@ final class SessionTabsStore {
     var isSwitchingSession: Bool { state.isSwitching }
     var allRuntimes: [ChatStore] { state.tabs.compactMap { runtimes[$0.id] } }
 
+    func preview(for id: UUID) -> String {
+        let firstUserInput = runtimes[id]?.items.first(where: { $0.kind == .user })?.text
+        return SessionTabPreviewPolicy.summary(from: firstUserInput)
+    }
+
     @discardableResult
     func createSideSession(resuming sessionID: String? = nil) -> Int? {
         if let sessionID,

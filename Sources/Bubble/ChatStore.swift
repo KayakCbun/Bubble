@@ -239,6 +239,7 @@ final class ChatStore {
     var childBusy = false
     var streamUISuspended = true
     var transcriptRevision: UInt64 = 0
+    @ObservationIgnored private var resumeActionGeneration = 0
     var conversationTree: ConversationTreeSnapshot?
     var branchDraft: ConversationBranchDraft? {
         didSet { syncOverlayChrome() }
@@ -2650,11 +2651,30 @@ final class ChatStore {
             return
         }
         resumeDestination.request(sessionID: id)
+        resumeActionGeneration &+= 1
         requestFocus()
     }
 
     func resolveResumeDestination(_ choice: ResumeDestinationChoice) {
-        guard let resolution = resumeDestination.resolve(choice) else { return }
+        guard let outcome = resumeDestination.choose(choice) else { return }
+        guard outcome == .actionQueued else {
+            requestFocus()
+            return
+        }
+        resumeActionGeneration &+= 1
+        let generation = resumeActionGeneration
+        requestFocus()
+        OverlayPulse.shared.onNextFrame { [weak self] in
+            guard let self, self.resumeActionGeneration == generation else { return }
+            OverlayPulse.shared.onNextFrame { [weak self] in
+                guard let self, self.resumeActionGeneration == generation,
+                      let resolution = self.resumeDestination.takePendingAction() else { return }
+                self.performResumeDestination(resolution)
+            }
+        }
+    }
+
+    private func performResumeDestination(_ resolution: ResumeDestinationResolution) {
         switch resolution {
         case .side(let sessionID):
             if let ordinal = onResumeInSideSession?(sessionID) {

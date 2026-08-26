@@ -145,21 +145,47 @@ do {
         "resume must expose a transient in-conversation destination prompt"
     )
     expect(
-        resumePrompt.resolve(.side) == .side(sessionID: "saved-session"),
-        "choosing side resume must retain the requested session id"
+        resumePrompt.choose(.side) == .actionQueued,
+        "choosing side resume must queue its action behind immediate UI feedback"
     )
     expect(resumePrompt.prompt == nil, "choosing a destination must dismiss the prompt")
+    expect(resumePrompt.isPerformingAction, "resume action must expose loading immediately")
+    expect(
+        resumePrompt.takePendingAction() == .side(sessionID: "saved-session"),
+        "queued side resume must retain the requested session id"
+    )
+    expect(!resumePrompt.isPerformingAction, "taking the action must clear transient loading")
 
     resumePrompt.request(sessionID: "replacement")
     expect(
-        resumePrompt.resolve(.replaceCurrent) == .replaceCurrent(sessionID: "replacement"),
-        "choosing replace must retain the requested session id"
+        resumePrompt.choose(.replaceCurrent) == .actionQueued,
+        "choosing replace must queue its action behind immediate UI feedback"
     )
     expect(resumePrompt.prompt == nil, "replace must not leave prompt UI behind")
+    expect(
+        resumePrompt.takePendingAction() == .replaceCurrent(sessionID: "replacement"),
+        "queued replacement must retain the requested session id"
+    )
 
     resumePrompt.request(sessionID: "cancelled")
-    expect(resumePrompt.resolve(.cancel) == .cancelled, "cancel must resolve without a destination")
+    expect(resumePrompt.choose(.cancel) == .cancelled, "cancel must resolve without a destination")
     expect(resumePrompt.prompt == nil, "cancel must remove the prompt without residue")
+    expect(!resumePrompt.isPerformingAction, "cancel must not flash an action loading mask")
+
+    expect(
+        SessionTabPreviewPolicy.summary(from: "  研究一下这个仓库\n下一步给出方案  ")
+            == "研究一下这个仓库 下一步给出方案",
+        "tab preview must summarize the first user input as compact readable text"
+    )
+    expect(
+        SessionTabPreviewPolicy.summary(from: "1234567890ABCDE", maxCharacters: 10)
+            == "123456789…",
+        "tab preview must stay bounded inside its hover card"
+    )
+    expect(
+        SessionTabPreviewPolicy.summary(from: nil) == "New session",
+        "a tab without user input must still explain what it contains"
+    )
 } catch {
     fputs("FAIL: unexpected error: \(error)\n", stderr)
     exit(1)

@@ -174,7 +174,9 @@ struct OverlayView: View {
                     .frame(width: chatWidth, height: transcriptHeight)
                     .frostedGlass(in: transcriptShape)
                     .overlay {
-                        if sessionSwitchLoading {
+                        if sessionSwitchLoading
+                            || store.isStartingSession
+                            || store.resumeDestination.isPerformingAction {
                             SessionSwitchLoadingMask()
                                 .clipShape(transcriptShape)
                         }

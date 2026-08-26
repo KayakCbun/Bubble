@@ -23,6 +23,7 @@ struct SessionOverlayView: View {
                         SessionTabButton(
                             tab: tab,
                             selected: tab.id == sessions.presentedSelectedID,
+                            preview: sessions.preview(for: tab.id),
                             select: { sessions.select(tab.id) }
                         )
                     }
@@ -43,33 +44,24 @@ struct SessionOverlayView: View {
 private struct SessionTabButton: View {
     let tab: SessionTabState
     let selected: Bool
+    let preview: String
     let select: () -> Void
     @State private var hovering = false
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         HStack(spacing: 2) {
-            if hovering {
-                Text("\(tab.ordinal)")
-                    .font(.system(size: 11, weight: .semibold, design: .rounded))
-            }
+            Text("\(tab.ordinal)")
+                .font(.system(size: 11, weight: selected ? .bold : .semibold, design: .rounded))
         }
-        .foregroundStyle(selected ? Color.primary : Color.secondary)
-        .frame(
-            width: hovering
-                ? SessionTabLayoutMetrics.bubble.expandedWidth
-                : SessionTabLayoutMetrics.bubble.collapsedWidth,
-            height: SessionTabLayoutMetrics.bubble.height
-        )
-        .background {
-            UnevenRoundedRectangle(
-                topLeadingRadius: SessionTabLayoutMetrics.bubble.cornerRadius,
-                bottomLeadingRadius: SessionTabLayoutMetrics.bubble.cornerRadius,
-                bottomTrailingRadius: 3,
-                topTrailingRadius: 3,
-                style: .continuous
+            .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+            .frame(
+                width: hovering
+                    ? SessionTabLayoutMetrics.bubble.expandedWidth
+                    : SessionTabLayoutMetrics.bubble.collapsedWidth,
+                height: SessionTabLayoutMetrics.bubble.height
             )
-            .fill(selected ? Color(nsColor: .controlBackgroundColor) : Color(nsColor: .windowBackgroundColor))
-            .overlay {
+            .background {
                 UnevenRoundedRectangle(
                     topLeadingRadius: SessionTabLayoutMetrics.bubble.cornerRadius,
                     bottomLeadingRadius: SessionTabLayoutMetrics.bubble.cornerRadius,
@@ -77,32 +69,120 @@ private struct SessionTabButton: View {
                     topTrailingRadius: 3,
                     style: .continuous
                 )
-                .strokeBorder(Color.primary.opacity(selected ? 0.18 : 0.09), lineWidth: 1)
+                .fill(
+                    selected
+                        ? Color.accentColor.opacity(colorScheme == .dark ? 0.24 : 0.14)
+                        : Color(nsColor: hovering ? .controlBackgroundColor : .windowBackgroundColor)
+                )
+                .overlay {
+                    UnevenRoundedRectangle(
+                        topLeadingRadius: SessionTabLayoutMetrics.bubble.cornerRadius,
+                        bottomLeadingRadius: SessionTabLayoutMetrics.bubble.cornerRadius,
+                        bottomTrailingRadius: 3,
+                        topTrailingRadius: 3,
+                        style: .continuous
+                    )
+                    .strokeBorder(
+                        selected ? Color.accentColor.opacity(0.58) : Color.primary.opacity(0.09),
+                        lineWidth: selected ? 1.5 : 1
+                    )
+                }
+                .shadow(color: .black.opacity(selected ? 0.13 : 0.08), radius: 4, y: 1)
             }
-            .shadow(color: .black.opacity(0.08), radius: 4, y: 1)
-        }
+            .overlay(alignment: .trailing) {
+                if selected {
+                    Capsule(style: .continuous)
+                        .fill(Color.accentColor)
+                        .frame(width: 3, height: 16)
+                        .offset(x: 1)
+                }
+            }
+            .overlay(alignment: .topLeading) {
+                if tab.hasUnread {
+                    Circle()
+                        .fill(Color.accentColor)
+                        .frame(width: 6, height: 6)
+                        .offset(x: 3, y: 3)
+                }
+            }
+            .overlay(alignment: .bottomLeading) {
+                if tab.isBusy {
+                    Capsule()
+                        .fill(Color.accentColor.opacity(0.8))
+                        .frame(width: 8, height: 2)
+                        .offset(x: 3, y: -3)
+                }
+            }
+            .contentShape(Rectangle())
+            .onTapGesture(perform: select)
+            .onHover { isHovering in
+                hovering = isHovering
+                if isHovering {
+                    NSCursor.pointingHand.set()
+                } else {
+                    NSCursor.arrow.set()
+                }
+            }
+
+        .frame(
+            width: SessionTabLayoutMetrics.bubble.expandedWidth,
+            height: SessionTabLayoutMetrics.bubble.height,
+            alignment: .trailing
+        )
         .overlay(alignment: .topLeading) {
-            if tab.hasUnread {
-                Circle()
-                    .fill(Color.accentColor)
-                    .frame(width: 6, height: 6)
-                    .offset(x: 3, y: 3)
+            if hovering {
+                SessionTabPreviewCard(
+                    ordinal: tab.ordinal,
+                    preview: preview,
+                    selected: selected
+                )
+                .offset(x: SessionTabLayoutMetrics.bubble.expandedWidth + 8, y: -4)
+                .transition(.opacity.combined(with: .scale(scale: 0.97, anchor: .leading)))
+                .allowsHitTesting(false)
             }
         }
-        .overlay(alignment: .bottomLeading) {
-            if tab.isBusy {
-                Capsule()
-                    .fill(Color.accentColor.opacity(0.8))
-                    .frame(width: 8, height: 2)
-                    .offset(x: 3, y: -3)
-            }
-        }
-        .contentShape(Rectangle())
-        .onTapGesture(perform: select)
-        .onHover { hovering = $0 }
+        .zIndex(hovering ? 20 : (selected ? 2 : 1))
         .animation(OverlayMotion.quick, value: hovering)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Session \(tab.ordinal)\(selected ? ", selected" : "")")
+        .accessibilityValue(preview)
         .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
+    }
+}
+
+private struct SessionTabPreviewCard: View {
+    let ordinal: Int
+    let preview: String
+    let selected: Bool
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(selected ? Color.accentColor : Color.secondary.opacity(0.55))
+                    .frame(width: 6, height: 6)
+                Text("Session \(ordinal)")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+            Text(preview)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.primary)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
+        .frame(width: 280, alignment: .leading)
+        .background {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(colorScheme == .dark ? Color(white: 0.16) : Color.white)
+                .shadow(color: .black.opacity(0.22), radius: 18, y: 8)
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+        }
     }
 }

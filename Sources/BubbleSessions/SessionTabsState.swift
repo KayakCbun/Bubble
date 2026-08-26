@@ -72,26 +72,61 @@ public enum ResumeDestinationResolution: Equatable, Sendable {
     case cancelled
 }
 
+public enum ResumeDestinationSelectionOutcome: Equatable, Sendable {
+    case actionQueued
+    case cancelled
+}
+
 public struct ResumeDestinationState: Equatable, Sendable {
     public private(set) var prompt: ResumeDestinationPrompt?
+    public private(set) var pendingAction: ResumeDestinationResolution?
 
     public init() {}
 
     public mutating func request(sessionID: String) {
+        pendingAction = nil
         prompt = ResumeDestinationPrompt(sessionID: sessionID)
     }
 
-    public mutating func resolve(_ choice: ResumeDestinationChoice) -> ResumeDestinationResolution? {
+    public var isPerformingAction: Bool {
+        pendingAction != nil
+    }
+
+    public mutating func choose(_ choice: ResumeDestinationChoice) -> ResumeDestinationSelectionOutcome? {
         guard let prompt else { return nil }
         self.prompt = nil
         switch choice {
         case .side:
-            return .side(sessionID: prompt.sessionID)
+            pendingAction = .side(sessionID: prompt.sessionID)
+            return .actionQueued
         case .replaceCurrent:
-            return .replaceCurrent(sessionID: prompt.sessionID)
+            pendingAction = .replaceCurrent(sessionID: prompt.sessionID)
+            return .actionQueued
         case .cancel:
+            pendingAction = nil
             return .cancelled
         }
+    }
+
+    public mutating func takePendingAction() -> ResumeDestinationResolution? {
+        defer { pendingAction = nil }
+        return pendingAction
+    }
+}
+
+public enum SessionTabPreviewPolicy {
+    public static func summary(
+        from firstUserInput: String?,
+        maxCharacters: Int = 72
+    ) -> String {
+        guard maxCharacters > 1 else { return "" }
+        let compact = firstUserInput?
+            .split(whereSeparator: { $0.isWhitespace })
+            .joined(separator: " ") ?? ""
+        guard !compact.isEmpty else { return "New session" }
+        guard compact.count > maxCharacters else { return compact }
+        let end = compact.index(compact.startIndex, offsetBy: maxCharacters - 1)
+        return String(compact[..<end]).trimmingCharacters(in: .whitespaces) + "…"
     }
 }
 
@@ -275,7 +310,7 @@ public struct SessionTabLayoutMetrics: Equatable, Sendable {
     }
 
     public static let bubble = SessionTabLayoutMetrics(
-        collapsedWidth: 14,
+        collapsedWidth: 20,
         expandedWidth: 32,
         height: 32,
         spacing: 8,
