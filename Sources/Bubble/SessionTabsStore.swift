@@ -98,7 +98,11 @@ final class SessionTabsStore {
     }
 
     func select(_ id: UUID) {
-        guard let next = runtimes[id] else { return }
+        guard runtimes[id] != nil else { return }
+        guard SessionSwitchLoadingPolicy.usesMask(
+            requestedSessionID: id,
+            activeSessionID: state.selectedID
+        ) else { return }
         selectionGeneration &+= 1
         let generation = selectionGeneration
         do {
@@ -107,10 +111,6 @@ final class SessionTabsStore {
             return
         }
         guard case .requested = state.selectionPhase else { return }
-        guard usesLoadingMask(for: next) else {
-            commitRequestedSelection(waitForLayout: false)
-            return
-        }
         OverlayPulse.shared.onNextFrame { [weak self] in
             guard let self, self.selectionGeneration == generation else { return }
             OverlayPulse.shared.onNextFrame { [weak self] in
@@ -145,27 +145,6 @@ final class SessionTabsStore {
         previous.setStreamUISuspended(true)
         onSelectionChanged?(previous, next)
         next.requestFocus()
-    }
-
-    private func usesLoadingMask(for runtime: ChatStore) -> Bool {
-        let visibleItems = runtime.visibleItems
-        var textBytes = 0
-        var mediaCount = 0
-        for item in visibleItems {
-            textBytes = min(
-                SessionSwitchLoadingPolicy.textByteThreshold,
-                textBytes + item.text.utf8.count
-            )
-            mediaCount += item.imageNames?.count ?? 0
-            if SessionSwitchLoadingPolicy.usesMask(
-                sourceItemCount: visibleItems.count,
-                textBytes: textBytes,
-                mediaCount: mediaCount
-            ) {
-                return true
-            }
-        }
-        return false
     }
 
     func prepareToQuit() {

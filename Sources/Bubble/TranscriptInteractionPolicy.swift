@@ -59,18 +59,8 @@ enum TranscriptStackPolicy {
 }
 
 enum SessionSwitchLoadingPolicy {
-    static let sourceItemThreshold = 80
-    static let textByteThreshold = 64_000
-    static let mediaThreshold = 4
-
-    static func usesMask(
-        sourceItemCount: Int,
-        textBytes: Int,
-        mediaCount: Int
-    ) -> Bool {
-        sourceItemCount >= sourceItemThreshold
-            || textBytes >= textByteThreshold
-            || mediaCount >= mediaThreshold
+    static func usesMask(requestedSessionID: UUID, activeSessionID: UUID) -> Bool {
+        requestedSessionID != activeSessionID
     }
 }
 
