@@ -1208,8 +1208,14 @@ final class ChatStore {
     }
 
     func shutdown() {
+        cancelPendingResumeAction()
         prepareToQuit()
         client.stop()
+    }
+
+    func cancelPendingResumeAction() {
+        resumeActionGeneration &+= 1
+        resumeDestination.cancelPendingAction()
     }
 
     var visibleItems: [ChatItem] {

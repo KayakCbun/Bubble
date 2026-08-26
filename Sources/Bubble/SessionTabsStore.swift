@@ -6,6 +6,7 @@ import Observation
 final class SessionTabsStore {
     private(set) var state: SessionTabsState
     private var runtimes: [UUID: ChatStore]
+    private var tabPreviews: [UUID: String] = [:]
     @ObservationIgnored private var selectionGeneration = 0
 
     var onSelectionChanged: ((ChatStore, ChatStore) -> Void)?
@@ -34,6 +35,7 @@ final class SessionTabsStore {
         for tab in state.tabs {
             if let runtime = runtimes[tab.id] {
                 bind(runtime, id: tab.id)
+                refreshPreview(for: tab.id, runtime: runtime)
             }
         }
     }
@@ -52,8 +54,7 @@ final class SessionTabsStore {
     var allRuntimes: [ChatStore] { state.tabs.compactMap { runtimes[$0.id] } }
 
     func preview(for id: UUID) -> String {
-        let firstUserInput = runtimes[id]?.items.first(where: { $0.kind == .user })?.text
-        return SessionTabPreviewPolicy.summary(from: firstUserInput)
+        tabPreviews[id] ?? SessionTabPreviewPolicy.summary(from: nil)
     }
 
     @discardableResult
@@ -83,6 +84,7 @@ final class SessionTabsStore {
         runtime.isStartingSession = true
         runtimes[id] = runtime
         bind(runtime, id: id)
+        refreshPreview(for: id, runtime: runtime)
         onRuntimeCreated?(runtime)
         previous.setStreamUISuspended(true)
         onSelectionChanged?(previous, runtime)
@@ -169,13 +171,27 @@ final class SessionTabsStore {
         }
         runtime.onSessionIdentityChanged = { [weak self] in
             self?.persistSessionTabs()
+            self?.refreshPreview(for: id, runtime: runtime)
         }
         runtime.onActivityChanged = { [weak self] busy in
             try? self?.state.setBusy(busy, for: id)
         }
         runtime.onTranscriptUpdated = { [weak self] in
             try? self?.state.markUpdated(id)
+            guard self?.tabPreviews[id] == nil || self?.tabPreviews[id] == "New session" else { return }
+            self?.refreshPreview(for: id, runtime: runtime)
         }
+    }
+
+    private func refreshPreview(for id: UUID, runtime: ChatStore) {
+        let persisted = runtime.currentSessionID.flatMap { sessionID in
+            PiSessions.firstUserInput(sessionId: sessionID)
+        }
+        let local = runtime.items.first(where: { $0.kind == .user })
+        tabPreviews[id] = SessionTabPreviewPolicy.summary(
+            from: persisted?.text ?? local?.text,
+            attachmentCount: persisted?.imageCount ?? local?.imageNames?.count ?? 0
+        )
     }
 
     private func persistSessionTabs() {

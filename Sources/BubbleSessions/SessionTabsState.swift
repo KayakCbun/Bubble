@@ -112,18 +112,28 @@ public struct ResumeDestinationState: Equatable, Sendable {
         defer { pendingAction = nil }
         return pendingAction
     }
+
+    public mutating func cancelPendingAction() {
+        pendingAction = nil
+    }
 }
 
 public enum SessionTabPreviewPolicy {
     public static func summary(
         from firstUserInput: String?,
+        attachmentCount: Int = 0,
         maxCharacters: Int = 72
     ) -> String {
         guard maxCharacters > 1 else { return "" }
-        let compact = firstUserInput?
+        let bounded = String((firstUserInput ?? "").prefix(2_000))
+        let compact = bounded
             .split(whereSeparator: { $0.isWhitespace })
-            .joined(separator: " ") ?? ""
-        guard !compact.isEmpty else { return "New session" }
+            .joined(separator: " ")
+        if compact.isEmpty {
+            if attachmentCount == 1 { return "Image" }
+            if attachmentCount > 1 { return "\(attachmentCount) images" }
+            return "New session"
+        }
         guard compact.count > maxCharacters else { return compact }
         let end = compact.index(compact.startIndex, offsetBy: maxCharacters - 1)
         return String(compact[..<end]).trimmingCharacters(in: .whitespaces) + "…"

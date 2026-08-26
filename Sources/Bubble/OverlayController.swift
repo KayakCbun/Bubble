@@ -222,6 +222,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
 
     private func hide(animated: Bool, returningFocusTo application: NSRunningApplication?) {
         commandReturnApplication = nil
+        store.cancelPendingResumeAction()
         store.setStreamUISuspended(true)
         ImageZoomController.shared.close()
         MermaidZoomController.shared.close()

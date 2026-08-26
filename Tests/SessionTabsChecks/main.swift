@@ -156,6 +156,12 @@ do {
     )
     expect(!resumePrompt.isPerformingAction, "taking the action must clear transient loading")
 
+    resumePrompt.request(sessionID: "dismissed")
+    _ = resumePrompt.choose(.side)
+    resumePrompt.cancelPendingAction()
+    expect(!resumePrompt.isPerformingAction, "hiding Bubble must cancel a delayed resume action")
+    expect(resumePrompt.takePendingAction() == nil, "a cancelled delayed action must never run")
+
     resumePrompt.request(sessionID: "replacement")
     expect(
         resumePrompt.choose(.replaceCurrent) == .actionQueued,
@@ -185,6 +191,10 @@ do {
     expect(
         SessionTabPreviewPolicy.summary(from: nil) == "New session",
         "a tab without user input must still explain what it contains"
+    )
+    expect(
+        SessionTabPreviewPolicy.summary(from: "", attachmentCount: 2) == "2 images",
+        "an image-only first input must not look like an empty session"
     )
 } catch {
     fputs("FAIL: unexpected error: \(error)\n", stderr)
