@@ -142,4 +142,19 @@ public enum SessionTabLayout {
         }
         return regions
     }
+
+    public static func index(
+        at point: CGPoint,
+        count: Int,
+        transcriptOriginY: CGFloat,
+        trailingX: CGFloat,
+        metrics: SessionTabLayoutMetrics = .bubble
+    ) -> Int? {
+        hitRegions(
+            count: count,
+            transcriptOriginY: transcriptOriginY,
+            trailingX: trailingX,
+            metrics: metrics
+        ).firstIndex(where: { $0.contains(point) })
+    }
 }

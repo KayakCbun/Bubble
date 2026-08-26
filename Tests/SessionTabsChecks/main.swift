@@ -49,6 +49,24 @@ do {
         CGRect(x: 4, y: 60, width: 32, height: 32),
         CGRect(x: 4, y: 100, width: 32, height: 32),
     ], "physical hit regions must match the rendered tab strip")
+    expect(
+        SessionTabLayout.index(
+            at: CGPoint(x: 29, y: 76),
+            count: 2,
+            transcriptOriginY: 36,
+            trailingX: 36
+        ) == 0,
+        "a physical click on the first visible tab must resolve to the main session"
+    )
+    expect(
+        SessionTabLayout.index(
+            at: CGPoint(x: 29, y: 116),
+            count: 2,
+            transcriptOriginY: 36,
+            trailingX: 36
+        ) == 1,
+        "a physical click on the second visible tab must resolve to the side session"
+    )
 } catch {
     fputs("FAIL: unexpected error: \(error)\n", stderr)
     exit(1)

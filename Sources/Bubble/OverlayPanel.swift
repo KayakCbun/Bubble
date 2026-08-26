@@ -84,6 +84,28 @@ final class OverlayRootView: NSView {
             || hitRegions.contains(where: { $0.contains(localPoint) })
     }
 
+    func sessionTabIndex(atWindowPoint windowPoint: NSPoint) -> Int? {
+        guard maskSessionTabCount > 0, maskTranscriptHeight > 1 else { return nil }
+        let localPoint = convert(windowPoint, from: nil)
+        let inputHeight = maskComposerHeight > 1
+            ? maskComposerHeight
+            : OverlayMetrics.minHeight
+        let inputY = max(
+            OverlayMetrics.shadowInset,
+            bounds.height - OverlayMetrics.shadowInset - inputHeight
+        )
+        let transcriptY = max(
+            OverlayMetrics.shadowInset,
+            inputY - OverlayMetrics.stackSpacing - maskTranscriptHeight
+        )
+        return SessionTabLayout.index(
+            at: localPoint,
+            count: maskSessionTabCount,
+            transcriptOriginY: transcriptY,
+            trailingX: OverlayMetrics.shadowInset
+        )
+    }
+
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
         switch control(at: point) {
