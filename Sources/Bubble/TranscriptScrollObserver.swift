@@ -48,10 +48,18 @@ extension Notification.Name {
     static let transcriptProgrammaticScrollStarted = Notification.Name(
         "BubbleTranscriptProgrammaticScrollStarted"
     )
+    static let transcriptHistoryNavigationRequested = Notification.Name(
+        "BubbleTranscriptHistoryNavigationRequested"
+    )
+    static let transcriptHistoryNavigationSettled = Notification.Name(
+        "BubbleTranscriptHistoryNavigationSettled"
+    )
 }
 
 enum TranscriptViewportUserInfoKey {
     static let visibleRowIDs = "visibleRowIDs"
+    static let targetID = "targetID"
+    static let atEnd = "atEnd"
 }
 
 private final class WeakTranscriptRowAnchor {
@@ -103,10 +111,16 @@ final class TranscriptScrollProbe: NSView {
     private var documentFrameObserver: NSObjectProtocol?
     private var rowAnchorObserver: NSObjectProtocol?
     private var programmaticScrollObserver: NSObjectProtocol?
+    private var historyNavigationObserver: NSObjectProtocol?
     private var eventMonitor: Any?
     private var userEventDeadline: TimeInterval = 0
     private var userEventGeneration = 0
     private var suppressingPriorScrollSequence = false
+    private var pendingHistoryTargetID: String?
+    private var historyAlignmentQueued = false
+    private var historyAlignmentGeneration = 0
+    private var historyAlignmentStablePasses = 0
+    private var historyAlignmentLastPosition: CGFloat?
     private var visibleAnchor: (id: String, offset: CGFloat)?
     private var correctingAnchor = false
     private let diagnosticsMode = ProcessInfo.processInfo.environment["BUBBLE_SCROLL_DIAGNOSTICS"]
@@ -120,6 +134,7 @@ final class TranscriptScrollProbe: NSView {
     private var anchorCaptureQueued = false
     private var anchorRestoreQueued = false
     private var anchorIndexRebuildQueued = false
+    private var viewportReportQueued = false
     private var diagnosticFramesRemaining = 0
     private var diagnosticDirection: CGFloat = -1
     private var diagnosticLastTick: TimeInterval?
@@ -132,6 +147,7 @@ final class TranscriptScrollProbe: NSView {
     private var diagnosticBlankSamples = 0
     private var diagnosticLongestBlankStreak = 0
     private var diagnosticCurrentBlankStreak = 0
+    private var diagnosticCoverageMismatches = 0
     private var lastReportedVisibleRowIDs: Set<String> = []
 
     private var diagnosticsEnabled: Bool { diagnosticsMode != nil }
@@ -196,9 +212,25 @@ final class TranscriptScrollProbe: NSView {
                 queue: .main
             ) { [weak self] _ in
                 guard let self else { return }
-                self.userEventDeadline = 0
-                self.userEventGeneration += 1
-                self.suppressingPriorScrollSequence = true
+                self.prepareForProgrammaticScroll()
+                self.cancelPendingHistoryAlignment()
+            }
+            self.historyNavigationObserver = NotificationCenter.default.addObserver(
+                forName: .transcriptHistoryNavigationRequested,
+                object: nil,
+                queue: .main
+            ) { [weak self] note in
+                guard let self,
+                      let targetID = note.userInfo?[TranscriptViewportUserInfoKey.targetID] as? String else {
+                    return
+                }
+                self.prepareForProgrammaticScroll()
+                self.pendingHistoryTargetID = targetID
+                self.historyAlignmentGeneration += 1
+                self.historyAlignmentStablePasses = 0
+                self.historyAlignmentLastPosition = nil
+                self.visibleAnchor = nil
+                self.schedulePendingHistoryAlignment()
             }
             self.eventMonitor = NSEvent.addLocalMonitorForEvents(
                 matching: [.scrollWheel, .leftMouseDragged, .keyDown]
@@ -239,6 +271,10 @@ final class TranscriptScrollProbe: NSView {
             NotificationCenter.default.removeObserver(programmaticScrollObserver)
             self.programmaticScrollObserver = nil
         }
+        if let historyNavigationObserver {
+            NotificationCenter.default.removeObserver(historyNavigationObserver)
+            self.historyNavigationObserver = nil
+        }
         if let eventMonitor {
             NSEvent.removeMonitor(eventMonitor)
             self.eventMonitor = nil
@@ -251,6 +287,8 @@ final class TranscriptScrollProbe: NSView {
         anchorCaptureQueued = false
         anchorRestoreQueued = false
         anchorIndexRebuildQueued = false
+        viewportReportQueued = false
+        cancelPendingHistoryAlignment()
         userEventGeneration += 1
         diagnosticDisplayLink?.invalidate()
         diagnosticDisplayLink = nil
@@ -272,6 +310,7 @@ final class TranscriptScrollProbe: NSView {
             let frameInWindow = scrollView.convert(scrollView.bounds, to: nil)
             guard frameInWindow.contains(event.locationInWindow) else { return }
         }
+        cancelPendingHistoryAlignment()
         deferAnchorMaintenanceUntilUserSettles()
         if diagnosticsEnabled, !diagnosedUserScroll {
             diagnosedUserScroll = true
@@ -297,6 +336,12 @@ final class TranscriptScrollProbe: NSView {
             return false
         }
         return true
+    }
+
+    private func prepareForProgrammaticScroll() {
+        userEventDeadline = 0
+        userEventGeneration += 1
+        suppressingPriorScrollSequence = true
     }
 
     private func boundsChanged() {
@@ -334,6 +379,11 @@ final class TranscriptScrollProbe: NSView {
     }
 
     private func documentFrameChanged() {
+        scheduleViewportReport()
+        if pendingHistoryTargetID != nil {
+            schedulePendingHistoryAlignment()
+            return
+        }
         guard maintainsVisibleContent, visibleAnchor != nil else { return }
         // Lazy row realization changes the document height while a wheel or
         // drag is still moving. Correcting the viewport in that window makes
@@ -363,15 +413,11 @@ final class TranscriptScrollProbe: NSView {
         let userDriven = CACurrentMediaTime() <= userEventDeadline
         onChange?(atEnd, userDriven)
 
-        let visibleRowIDs: Set<String> = Set(visibleAnchorCandidates(in: visible).compactMap { anchor -> String? in
-            guard HistoryRailPolicy.intersectsViewport(
-                rowMinY: anchor.frame.minY,
-                rowMaxY: anchor.frame.maxY,
-                viewportMinY: visible.minY,
-                viewportMaxY: visible.maxY
-            ) else { return nil }
-            return anchor.historyTickID ?? anchor.id
-        })
+        let visibleRowIDs = liveVisibleHistoryTickIDs(in: visible, document: document)
+        if diagnosticsMode == "mount-audit",
+           visibleRowIDs != hierarchyVisibleHistoryTickIDs(in: visible, document: document) {
+            diagnosticCoverageMismatches += 1
+        }
         if visibleRowIDs != lastReportedVisibleRowIDs {
             lastReportedVisibleRowIDs = visibleRowIDs
             NotificationCenter.default.post(
@@ -482,9 +528,101 @@ final class TranscriptScrollProbe: NSView {
         } else {
             rowAnchors.removeValue(forKey: key)
         }
+        scheduleViewportReport()
+        if anchor.id == pendingHistoryTargetID {
+            schedulePendingHistoryAlignment()
+        }
         if CACurrentMediaTime() > userEventDeadline {
             scheduleAnchorIndexRebuild()
         }
+    }
+
+    private func scheduleViewportReport() {
+        guard !viewportReportQueued else { return }
+        viewportReportQueued = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 120.0) { [weak self] in
+            guard let self else { return }
+            self.viewportReportQueued = false
+            self.reportPosition()
+        }
+    }
+
+    private func schedulePendingHistoryAlignment() {
+        guard !historyAlignmentQueued, pendingHistoryTargetID != nil else { return }
+        historyAlignmentQueued = true
+        let generation = historyAlignmentGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 120.0) { [weak self] in
+            guard let self else { return }
+            self.historyAlignmentQueued = false
+            guard generation == self.historyAlignmentGeneration else { return }
+            self.alignPendingHistoryTarget(generation: generation)
+        }
+    }
+
+    private func alignPendingHistoryTarget(generation: Int) {
+        guard generation == historyAlignmentGeneration,
+              let targetID = pendingHistoryTargetID,
+              let scrollView = observedScrollView,
+              let document = observedDocument,
+              let target = rowAnchors.values.lazy.compactMap(\.value).first(where: {
+                  $0.id == targetID && $0.window != nil && $0.enclosingScrollView === scrollView
+              }) else { return }
+        let frame = target.convert(target.bounds, to: document)
+        let visible = scrollView.contentView.bounds
+        let minimumY = document.bounds.minY
+        let maximumY = max(minimumY, document.bounds.maxY - visible.height)
+        let rawTargetY = document.isFlipped ? frame.minY : frame.maxY - visible.height
+        let targetY = min(maximumY, max(minimumY, rawTargetY))
+        if abs(visible.minY - targetY) > 0.5 {
+            scrollView.contentView.scroll(to: NSPoint(x: visible.minX, y: targetY))
+            scrollView.reflectScrolledClipView(scrollView.contentView)
+        }
+        let stableFrame = target.convert(target.bounds, to: document)
+        let stablePosition = document.isFlipped ? stableFrame.minY : stableFrame.maxY
+        let frameStable = historyAlignmentLastPosition.map { abs($0 - stablePosition) <= 0.5 } ?? false
+        let viewportStable = abs(scrollView.contentView.bounds.minY - targetY) <= 0.5
+        historyAlignmentLastPosition = stablePosition
+        historyAlignmentStablePasses = frameStable && viewportStable
+            ? historyAlignmentStablePasses + 1
+            : 0
+        reportPosition()
+        guard historyAlignmentStablePasses >= 2 else {
+            schedulePendingHistoryAlignment()
+            return
+        }
+        let distanceToEnd = document.isFlipped
+            ? document.bounds.maxY - scrollView.contentView.bounds.maxY
+            : scrollView.contentView.bounds.minY - document.bounds.minY
+        let finalOffset = document.isFlipped
+            ? stableFrame.minY - scrollView.contentView.bounds.minY
+            : scrollView.contentView.bounds.maxY - stableFrame.maxY
+        pendingHistoryTargetID = nil
+        historyAlignmentLastPosition = nil
+        if diagnosticsMode == "history-navigation-audit" {
+            OverlayLog.write(
+                String(
+                    format: "history navigation audit target=%@ offset=%.2f atEnd=%d",
+                    targetID,
+                    finalOffset,
+                    distanceToEnd <= Self.endThreshold ? 1 : 0
+                )
+            )
+        }
+        NotificationCenter.default.post(
+            name: .transcriptHistoryNavigationSettled,
+            object: self,
+            userInfo: [
+                TranscriptViewportUserInfoKey.targetID: targetID,
+                TranscriptViewportUserInfoKey.atEnd: distanceToEnd <= Self.endThreshold,
+            ]
+        )
+    }
+
+    private func cancelPendingHistoryAlignment() {
+        pendingHistoryTargetID = nil
+        historyAlignmentGeneration += 1
+        historyAlignmentStablePasses = 0
+        historyAlignmentLastPosition = nil
     }
 
     private func scheduleAnchorIndexRebuild() {
@@ -530,6 +668,7 @@ final class TranscriptScrollProbe: NSView {
         diagnosticBlankSamples = 0
         diagnosticLongestBlankStreak = 0
         diagnosticCurrentBlankStreak = 0
+        diagnosticCoverageMismatches = 0
         visibleAnchor = nil
         userEventDeadline = CACurrentMediaTime() + 120
         let link = window.displayLink(target: self, selector: #selector(diagnosticTick(_:)))
@@ -547,6 +686,7 @@ final class TranscriptScrollProbe: NSView {
         diagnosticBlankSamples = 0
         diagnosticLongestBlankStreak = 0
         diagnosticCurrentBlankStreak = 0
+        diagnosticCoverageMismatches = 0
         let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] timer in
             self?.mountAuditTick(timer)
         }
@@ -587,8 +727,9 @@ final class TranscriptScrollProbe: NSView {
             // is delivered. Audit the actual mounted hierarchy so a delayed
             // registration cannot be mistaken for a blank viewport.
             registerExistingAnchors(in: document)
-            rebuildAnchorIndex()
             let visible = scrollView.contentView.bounds
+            reportPosition()
+            rebuildAnchorIndex()
             if visibleAnchorCandidates(in: visible).isEmpty {
                 diagnosticBlankSamples += 1
                 diagnosticCurrentBlankStreak += 1
@@ -602,6 +743,31 @@ final class TranscriptScrollProbe: NSView {
                 diagnosticMountStep += 1
             }
         }
+    }
+
+    /// Independent audit oracle for the viewport payload. Production reporting
+    /// uses the weak anchor registry; this walks the mounted AppKit hierarchy so
+    /// missed registrations, stale IDs, and bad registry geometry remain visible.
+    private func hierarchyVisibleHistoryTickIDs(
+        in visible: CGRect,
+        document: NSView
+    ) -> Set<String> {
+        var result: Set<String> = []
+        var pending = document.subviews
+        while let view = pending.popLast() {
+            if let anchor = view as? TranscriptRowAnchorView,
+               let historyTickID = anchor.historyTickID,
+               anchor.window != nil,
+               anchor.enclosingScrollView === observedScrollView {
+                let frame = anchor.convert(anchor.bounds, to: document)
+                if frame.maxY >= visible.minY && frame.minY <= visible.maxY {
+                    result.insert(historyTickID)
+                }
+            } else {
+                pending.append(contentsOf: view.subviews)
+            }
+        }
+        return result
     }
 
     private func finishMountAudit(sampleCount: Int) {
@@ -639,12 +805,13 @@ final class TranscriptScrollProbe: NSView {
     private func logMountAudit(sampleCount: Int, document: NSView, anchorError: CGFloat) {
         OverlayLog.write(
             String(
-                format: "transcript mount audit samples=%d anchors=%d peakAnchors=%d blankSamples=%d longestBlankStreak=%d documentHeight=%.0f anchorError=%.2f",
+                format: "transcript mount audit samples=%d anchors=%d peakAnchors=%d blankSamples=%d longestBlankStreak=%d coverageMismatches=%d documentHeight=%.0f anchorError=%.2f",
                 sampleCount,
                 anchorIndex.count,
                 diagnosticPeakAnchorCount,
                 diagnosticBlankSamples,
                 diagnosticLongestBlankStreak,
+                diagnosticCoverageMismatches,
                 document.bounds.height,
                 anchorError
             )
@@ -728,5 +895,16 @@ final class TranscriptScrollProbe: NSView {
                   anchor.enclosingScrollView === observedScrollView else { return false }
             return anchor.convert(anchor.bounds, to: document).intersects(visible)
         }
+    }
+
+    private func liveVisibleHistoryTickIDs(in visible: CGRect, document: NSView) -> Set<String> {
+        Set(rowAnchors.values.compactMap { weakAnchor -> String? in
+            guard let anchor = weakAnchor.value,
+                  anchor.window != nil,
+                  anchor.enclosingScrollView === observedScrollView else { return nil }
+            let frame = anchor.convert(anchor.bounds, to: document)
+            guard frame.intersects(visible) else { return nil }
+            return anchor.historyTickID ?? anchor.id
+        })
     }
 }

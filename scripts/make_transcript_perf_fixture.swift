@@ -45,6 +45,7 @@ private enum TranscriptPerfFixture {
         items.reserveCapacity(turns * 3)
         for turn in 0..<turns {
             items.append(FixtureItem(
+                id: UUID(uuidString: String(format: "00000000-0000-0000-0001-%012d", turn))!,
                 kind: "user",
                 text: "Turn \(turn): inspect a long-context rendering scenario without losing the visible scroll anchor.",
                 sourceEntryId: "user-entry-\(turn)",

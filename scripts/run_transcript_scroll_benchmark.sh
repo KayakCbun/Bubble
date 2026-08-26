@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-APP_BIN="$ROOT/dist/Bubble.app/Contents/MacOS/Bubble"
+APP_BIN="${BUBBLE_BENCHMARK_APP_BIN:-$ROOT/dist/Bubble.app/Contents/MacOS/Bubble}"
 TURNS="${BUBBLE_BENCHMARK_TURNS:-600}"
 MODE="${BUBBLE_BENCHMARK_MODE:-display}"
 MAX_P95_MS="${BUBBLE_BENCHMARK_MAX_P95_MS:-20}"
@@ -12,8 +12,8 @@ SCROLL_STEP="${BUBBLE_BENCHMARK_SCROLL_STEP:-32}"
 MAX_JUMP_BLANK_SAMPLES="${BUBBLE_BENCHMARK_MAX_JUMP_BLANK_SAMPLES:-6}"
 MAX_JUMP_BLANK_STREAK="${BUBBLE_BENCHMARK_MAX_JUMP_BLANK_STREAK:-1}"
 
-if [[ "$MODE" != "display" && "$MODE" != "mount-audit" ]]; then
-  echo "FAIL: BUBBLE_BENCHMARK_MODE must be display or mount-audit" >&2
+if [[ "$MODE" != "display" && "$MODE" != "mount-audit" && "$MODE" != "history-navigation-audit" ]]; then
+  echo "FAIL: BUBBLE_BENCHMARK_MODE must be display, mount-audit, or history-navigation-audit" >&2
   exit 2
 fi
 
@@ -54,7 +54,22 @@ if [[ "$MODE" == "mount-audit" ]]; then
   diagnostics_mode="mount-audit"
   benchmark_pattern="transcript mount audit"
 fi
-HOME="$BENCH_HOME" CFFIXED_USER_HOME="$BENCH_HOME" BUBBLE_SCROLL_DIAGNOSTICS="$diagnostics_mode" BUBBLE_SCROLL_DIAGNOSTIC_STEP="$SCROLL_STEP" "$APP_BIN" --show >"$BENCH_HOME/bubble.stdout.log" 2>"$STDERR_FILE" &
+history_target=""
+if [[ "$MODE" == "history-navigation-audit" ]]; then
+  diagnostics_mode="history-navigation-audit"
+  benchmark_pattern="history navigation audit"
+  history_target="$(printf '00000000-0000-0000-0001-%012d' "$((TURNS / 2))")"
+fi
+benchmark_env=(
+  HOME="$BENCH_HOME"
+  CFFIXED_USER_HOME="$BENCH_HOME"
+  BUBBLE_SCROLL_DIAGNOSTICS="$diagnostics_mode"
+  BUBBLE_SCROLL_DIAGNOSTIC_STEP="$SCROLL_STEP"
+)
+if [[ -n "$history_target" ]]; then
+  benchmark_env+=(BUBBLE_HISTORY_NAVIGATION_AUDIT_TARGET="$history_target")
+fi
+env "${benchmark_env[@]}" "$APP_BIN" --show >"$BENCH_HOME/bubble.stdout.log" 2>"$STDERR_FILE" &
 APP_PID=$!
 
 deadline=$((SECONDS + 60))
@@ -78,6 +93,23 @@ if [[ -z "$benchmark_line" ]]; then
   echo "FAIL: no $MODE benchmark result after 60 seconds" >&2
   tail -40 "$STDERR_FILE" >&2 || true
   exit 1
+fi
+
+if [[ "$MODE" == "history-navigation-audit" ]]; then
+  offset="$(sed -E 's/.* offset=([^ ]+).*/\1/' <<<"$benchmark_line")"
+  at_end="$(sed -E 's/.* atEnd=([01]).*/\1/' <<<"$benchmark_line")"
+  if ! awk -v actual="$offset" 'BEGIN { exit !(actual >= -1.0 && actual <= 1.0) }'; then
+    echo "FAIL: history target settled with ${offset}px top offset" >&2
+    echo "$benchmark_line" >&2
+    exit 1
+  fi
+  if (( at_end != 0 )); then
+    echo "FAIL: middle history target incorrectly settled at the transcript end" >&2
+    echo "$benchmark_line" >&2
+    exit 1
+  fi
+  echo "PASS: $benchmark_line"
+  exit 0
 fi
 
 peak_anchors="$(sed -E 's/.* peakAnchors=([0-9]+).*/\1/' <<<"$benchmark_line")"
@@ -118,6 +150,12 @@ if [[ "$MODE" == "mount-audit" ]]; then
   anchor_error="$(sed -E 's/.* anchorError=([^ ]+).*/\1/' <<<"$benchmark_line")"
   if ! awk -v actual="$anchor_error" 'BEGIN { exit !(actual <= 1.0) }'; then
     echo "FAIL: settled visible-anchor restore error ${anchor_error}px exceeds 1px" >&2
+    echo "$benchmark_line" >&2
+    exit 1
+  fi
+  coverage_mismatches="$(sed -E 's/.* coverageMismatches=([0-9]+).*/\1/' <<<"$benchmark_line")"
+  if (( coverage_mismatches > 0 )); then
+    echo "FAIL: history indicator coverage disagreed with live mounted rows in $coverage_mismatches samples" >&2
     echo "$benchmark_line" >&2
     exit 1
   fi

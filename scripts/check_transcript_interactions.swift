@@ -89,6 +89,30 @@ private enum TranscriptInteractionCheck {
             "a fresh user gesture can interrupt an in-flight end jump"
         )
         expect(follow.showsScrollToEnd, "interrupting the end jump restores the chip")
+        follow.beginHistoryNavigation(targetID: "turn-42")
+        expect(
+            follow.historyNavigationTargetID == "turn-42",
+            "the requested history target stays addressable until its row is mounted"
+        )
+        expect(!follow.followsLatest, "a history jump does not resume live following")
+        expect(
+            !follow.maintainsVisibleContent,
+            "visible-anchor restoration stays suspended while a history target is settling"
+        )
+        expect(follow.showsScrollToEnd, "a history jump keeps the direct return-to-end affordance")
+        expect(
+            !follow.finishHistoryNavigation(targetID: "stale-turn", atEnd: false),
+            "a stale target cannot settle a newer history jump"
+        )
+        expect(
+            follow.finishHistoryNavigation(targetID: "turn-42", atEnd: false),
+            "the matching mounted target settles history navigation"
+        )
+        expect(follow.historyNavigationTargetID == nil, "settling clears the pending history target")
+        expect(
+            follow.maintainsVisibleContent,
+            "settled history browsing resumes dynamic-height anchor preservation"
+        )
         follow.userNavigated(atEnd: true)
         expect(follow.followsLatest, "returning to the end re-arms live follow")
         follow.userNavigated(atEnd: false)

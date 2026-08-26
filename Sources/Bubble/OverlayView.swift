@@ -728,7 +728,7 @@ struct OverlayView: View {
                 .foregroundStyle(OverlaySurface.conversationInk)
                 .background {
                     TranscriptScrollObserver(
-                        maintainsVisibleContent: !followState.followsLatest
+                        maintainsVisibleContent: followState.maintainsVisibleContent
                     ) { atEnd, userDriven in
                         var next = followState
                         if next.viewportChanged(atEnd: atEnd, userDriven: userDriven) {
@@ -758,12 +758,7 @@ struct OverlayView: View {
                         ticks: ticks,
                         viewportHeight: transcriptHeight
                     ) { id in
-                        followState.userNavigated(atEnd: false)
-                        OverlayPulse.shared.onNextFrame {
-                            withAnimation(OverlayMotion.scroll) {
-                                proxy.scrollTo(id.uuidString, anchor: .top)
-                            }
-                        }
+                        navigateToHistory(id: id.uuidString, proxy: proxy)
                     }
                 }
             }
@@ -798,7 +793,24 @@ struct OverlayView: View {
                 }
             }
             .animation(OverlayMotion.quick, value: followState.showsScrollToEnd)
-            .onAppear { requestFollowLatest(proxy) }
+            .onReceive(NotificationCenter.default.publisher(for: .transcriptHistoryNavigationSettled)) { note in
+                guard let targetID = note.userInfo?[TranscriptViewportUserInfoKey.targetID] as? String,
+                      let atEnd = note.userInfo?[TranscriptViewportUserInfoKey.atEnd] as? Bool else { return }
+                var next = followState
+                if next.finishHistoryNavigation(targetID: targetID, atEnd: atEnd) {
+                    followState = next
+                }
+            }
+            .onAppear {
+                requestFollowLatest(proxy)
+                if let targetID = ProcessInfo.processInfo.environment[
+                    "BUBBLE_HISTORY_NAVIGATION_AUDIT_TARGET"
+                ], !targetID.isEmpty {
+                    OverlayPulse.shared.onNextFrame {
+                        navigateToHistory(id: targetID, proxy: proxy)
+                    }
+                }
+            }
             .onChange(of: store.items.count) { _, _ in
                 if store.items.last?.kind == .user {
                     followState.resumeAtEnd()
@@ -1701,6 +1713,41 @@ struct OverlayView: View {
             withAnimation(OverlayMotion.scroll) {
                 proxy.scrollTo("transcript-end", anchor: .bottom)
             }
+        }
+    }
+
+    private func navigateToHistory(id targetID: String, proxy: ScrollViewProxy) {
+        followState.beginHistoryNavigation(targetID: targetID)
+        NotificationCenter.default.post(
+            name: .transcriptHistoryNavigationRequested,
+            object: nil,
+            userInfo: [TranscriptViewportUserInfoKey.targetID: targetID]
+        )
+        realizeHistoryTarget(targetID, proxy: proxy, attempt: 0)
+    }
+
+    private func realizeHistoryTarget(
+        _ targetID: String,
+        proxy: ScrollViewProxy,
+        attempt: Int
+    ) {
+        guard followState.historyNavigationTargetID == targetID else { return }
+        guard attempt < 240 else {
+            var next = followState
+            if next.finishHistoryNavigation(targetID: targetID, atEnd: false) {
+                followState = next
+            }
+            OverlayLog.write("history navigation target did not mount: \(targetID)")
+            return
+        }
+        OverlayPulse.shared.onNextFrame {
+            guard followState.historyNavigationTargetID == targetID else { return }
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                proxy.scrollTo(targetID, anchor: .top)
+            }
+            realizeHistoryTarget(targetID, proxy: proxy, attempt: attempt + 1)
         }
     }
 

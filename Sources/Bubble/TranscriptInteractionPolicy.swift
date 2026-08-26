@@ -37,12 +37,22 @@ struct TranscriptFollowState: Equatable {
         case followingEnd
         case freeScrolling
         case returningToEnd
+        case navigatingHistory(targetID: String)
     }
 
     private var mode: Mode = .followingEnd
 
-    var followsLatest: Bool { mode != .freeScrolling }
-    var showsScrollToEnd: Bool { mode == .freeScrolling }
+    var followsLatest: Bool { mode == .followingEnd || mode == .returningToEnd }
+    var showsScrollToEnd: Bool {
+        if case .followingEnd = mode { return false }
+        if case .returningToEnd = mode { return false }
+        return true
+    }
+    var maintainsVisibleContent: Bool { mode == .freeScrolling }
+    var historyNavigationTargetID: String? {
+        guard case .navigatingHistory(let targetID) = mode else { return nil }
+        return targetID
+    }
 
     func wouldChange(atEnd: Bool) -> Bool {
         followsLatest != atEnd
@@ -60,11 +70,28 @@ struct TranscriptFollowState: Equatable {
         mode = .returningToEnd
     }
 
+    mutating func beginHistoryNavigation(targetID: String) {
+        mode = .navigatingHistory(targetID: targetID)
+    }
+
+    @discardableResult
+    mutating func finishHistoryNavigation(targetID: String, atEnd: Bool) -> Bool {
+        guard case .navigatingHistory(let pendingID) = mode,
+              pendingID == targetID else { return false }
+        mode = atEnd ? .followingEnd : .freeScrolling
+        return true
+    }
+
     /// Programmatic scroll animation can overlap AppKit's short user-event
     /// window. Ignore those stale intermediate positions until the viewport
     /// actually reaches the end.
     @discardableResult
     mutating func viewportChanged(atEnd: Bool, userDriven: Bool) -> Bool {
+        if case .navigatingHistory = mode {
+            guard userDriven else { return false }
+            mode = atEnd ? .followingEnd : .freeScrolling
+            return true
+        }
         if mode == .returningToEnd {
             if atEnd {
                 mode = .followingEnd
