@@ -186,7 +186,7 @@ final class ChatStore {
     var isBusy = false {
         didSet {
             syncOverlayChrome()
-            onActivityChanged?(isBusy)
+            onActivityChanged?(hasActiveWork)
         }
     }
     var selectedAvatarFile = AvatarSelection.file
@@ -236,7 +236,9 @@ final class ChatStore {
     var draftImages: [DraftImage] = [] {
         didSet { syncOverlayChrome() }
     }
-    var childBusy = false
+    var childBusy = false {
+        didSet { onActivityChanged?(hasActiveWork) }
+    }
     var streamUISuspended = true
     var transcriptRevision: UInt64 = 0
     @ObservationIgnored private var resumeActionGeneration = 0
@@ -258,6 +260,8 @@ final class ChatStore {
     private var childChanged: [String] = []
     private var pendingInjection: WorkspaceBrief?
     private var injecting = false
+
+    private var hasActiveWork: Bool { isBusy || childBusy }
     private var pendingChildSteer: WorkspaceBrief?
     private var pendingPrompts: [PendingPrompt] = []
     private var steeringMessageIds: Set<UUID> = []
@@ -1109,6 +1113,7 @@ final class ChatStore {
 
     let runtimeID: UUID
     let client: AcpClient
+    let transcriptPlanner = TranscriptRenderPlanner()
     private let runtimeRole: SessionRuntimeRole
     private static let catalogRefreshQueue = DispatchQueue(
         label: "local.bubble.catalog-refresh",
@@ -1117,6 +1122,11 @@ final class ChatStore {
     )
     private static let transcriptPersistQueue = DispatchQueue(
         label: "local.bubble.transcript-persist",
+        qos: .utility,
+        autoreleaseFrequency: .workItem
+    )
+    private static let transcriptWarmupQueue = DispatchQueue(
+        label: "local.bubble.transcript-warmup",
         qos: .utility,
         autoreleaseFrequency: .workItem
     )
@@ -1153,6 +1163,7 @@ final class ChatStore {
         for item in restored.richItems + restored.items {
             if let key = Self.richKey(item) { richTranscriptRows[key] = item }
         }
+        Self.prewarmTranscriptChunks(restored.items)
         workspaceState = WorkspaceRegistry.load(from: OverlayPaths.mountsFile)
         if runtimeRole.persistsWorkspaceRegistry, workspaceState.active?.isActive == true {
             workspaceState.active = nil
@@ -1211,6 +1222,22 @@ final class ChatStore {
         cancelPendingResumeAction()
         prepareToQuit()
         client.stop()
+    }
+
+    func shutdownClosedTabRuntime() {
+        cancelPendingResumeAction()
+        writeTranscript()
+        client.onUpdate = nil
+        client.onLog = nil
+        client.onExit = nil
+        client.onConfigChange = nil
+        control.handler = nil
+        let client = client
+        let control = control
+        DispatchQueue.global(qos: .utility).async {
+            control.stop()
+            client.stop()
+        }
     }
 
     func cancelPendingResumeAction() {
@@ -3661,6 +3688,20 @@ final class ChatStore {
     private static func loadTranscript() -> (items: [ChatItem], richItems: [ChatItem]) {
         guard let expectedSessionID = PiSessions.currentId() else { return ([], []) }
         return loadTranscript(sessionID: expectedSessionID)
+    }
+
+    private static func prewarmTranscriptChunks(_ items: [ChatItem]) {
+        let assistantRows = items.compactMap { item -> (String, String)? in
+            guard item.kind == .assistant,
+                  (item.imageNames ?? []).isEmpty else { return nil }
+            return (item.id.uuidString, item.text)
+        }
+        guard !assistantRows.isEmpty else { return }
+        transcriptWarmupQueue.async {
+            for (id, text) in assistantRows {
+                _ = WorkspaceTranscriptChunker.chunks(text, identity: id)
+            }
+        }
     }
 
     private static func loadTranscript(sessionID: String) -> (items: [ChatItem], richItems: [ChatItem]) {

@@ -8,6 +8,9 @@ final class SessionTabsStore {
     private var runtimes: [UUID: ChatStore]
     private var tabPreviews: [UUID: String] = [:]
     @ObservationIgnored private var selectionGeneration = 0
+    @ObservationIgnored private var sessionSwitchDiagnosticStarted = false
+    @ObservationIgnored private var sessionSwitchDiagnosticRequestTime: ContinuousClock.Instant?
+    @ObservationIgnored private var sessionSwitchDiagnosticCommitTime: ContinuousClock.Instant?
 
     var onSelectionChanged: ((ChatStore, ChatStore) -> Void)?
     var onRuntimeCreated: ((ChatStore) -> Void)?
@@ -121,11 +124,50 @@ final class SessionTabsStore {
         guard case .requested = state.selectionPhase else { return }
         OverlayPulse.shared.onNextFrame { [weak self] in
             guard let self, self.selectionGeneration == generation else { return }
-            OverlayPulse.shared.onNextFrame { [weak self] in
-                guard let self, self.selectionGeneration == generation else { return }
-                self.commitRequestedSelection(waitForLayout: true)
-            }
+            self.commitRequestedSelection(waitForLayout: true)
         }
+    }
+
+    func startSessionSwitchDiagnosticIfNeeded() {
+        guard !sessionSwitchDiagnosticStarted,
+              ProcessInfo.processInfo.environment["BUBBLE_SESSION_SWITCH_DIAGNOSTICS"] == "1",
+              let target = state.tabs.first(where: { $0.id != state.selectedID }) else { return }
+        sessionSwitchDiagnosticStarted = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            guard let self else { return }
+            self.sessionSwitchDiagnosticRequestTime = .now
+            self.select(target.id)
+        }
+    }
+
+    @discardableResult
+    func closeSideSession(_ id: UUID, stopIfBusy: Bool = false) -> Bool {
+        guard !state.isSwitching,
+              let tab = state.tabs.first(where: { $0.id == id }),
+              tab.ordinal != 1,
+              let closing = runtimes[id] else { return false }
+        guard !tab.isBusy || stopIfBusy else { return false }
+
+        selectionGeneration &+= 1
+        let previous = activeStore
+        let result: SessionTabCloseResult
+        do {
+            result = try state.closeSideSession(id)
+        } catch {
+            return false
+        }
+        runtimes.removeValue(forKey: id)
+        tabPreviews.removeValue(forKey: id)
+        persistSessionTabs()
+
+        if result.selectionChanged {
+            let next = activeStore
+            previous.setStreamUISuspended(true)
+            onSelectionChanged?(previous, next)
+            next.requestFocus()
+        }
+        closing.shutdownClosedTabRuntime()
+        return true
     }
 
     func isAwaitingSelectedLayout(_ id: UUID?) -> Bool {
@@ -138,14 +180,24 @@ final class SessionTabsStore {
         guard case .rendering(let renderingID) = state.selectionPhase,
               renderingID == id else { return }
         OverlayPulse.shared.onNextFrame { [weak self] in
-            self?.state.finishSelection(id)
+            self?.selectedContentDidApply(id)
         }
+    }
+
+    private func selectedContentDidApply(_ id: UUID) {
+        guard case .rendering(let renderingID) = state.selectionPhase,
+              renderingID == id else { return }
+        state.finishSelection(id)
+        finishSessionSwitchDiagnosticIfNeeded()
     }
 
     private func commitRequestedSelection(waitForLayout: Bool) {
         let previous = activeStore
         guard let id = state.commitRequestedSelection(),
               let next = runtimes[id] else { return }
+        if sessionSwitchDiagnosticRequestTime != nil {
+            sessionSwitchDiagnosticCommitTime = .now
+        }
         persistSessionTabs()
         if !waitForLayout {
             state.finishSelection(id)
@@ -153,6 +205,27 @@ final class SessionTabsStore {
         previous.setStreamUISuspended(true)
         onSelectionChanged?(previous, next)
         next.requestFocus()
+    }
+
+    private func finishSessionSwitchDiagnosticIfNeeded() {
+        guard let request = sessionSwitchDiagnosticRequestTime,
+              let commit = sessionSwitchDiagnosticCommitTime else { return }
+        let now = ContinuousClock.now
+        let requestToCommit = Self.milliseconds(request.duration(to: commit))
+        let commitToPresented = Self.milliseconds(commit.duration(to: now))
+        OverlayLog.write(String(
+            format: "session switch benchmark requestToCommit=%.2fms commitToPresented=%.2fms total=%.2fms",
+            requestToCommit,
+            commitToPresented,
+            requestToCommit + commitToPresented
+        ))
+        sessionSwitchDiagnosticRequestTime = nil
+        sessionSwitchDiagnosticCommitTime = nil
+    }
+
+    private static func milliseconds(_ duration: Duration) -> Double {
+        Double(duration.components.seconds) * 1_000
+            + Double(duration.components.attoseconds) / 1_000_000_000_000_000
     }
 
     func prepareToQuit() {
@@ -202,13 +275,17 @@ final class SessionTabsStore {
             return PersistedSessionTab(
                 runtimeID: tab.id,
                 sessionID: sessionID,
-                role: runtime.sessionTabRole
+                role: runtime.sessionTabRole,
+                ordinal: tab.ordinal
             )
         }
-        guard entries.count == state.tabs.count else { return }
+        guard !entries.isEmpty else { return }
+        let selectedRuntimeID = entries.contains(where: { $0.runtimeID == state.selectedID })
+            ? state.selectedID
+            : entries[0].runtimeID
         let snapshot = SessionTabsSnapshot(
             entries: entries,
-            selectedRuntimeID: state.selectedID
+            selectedRuntimeID: selectedRuntimeID
         )
         do {
             try SessionTabsPersistence.save(snapshot, to: OverlayPaths.sessionTabsFile)

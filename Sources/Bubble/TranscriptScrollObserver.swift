@@ -54,6 +54,7 @@ extension Notification.Name {
     static let transcriptHistoryNavigationSettled = Notification.Name(
         "BubbleTranscriptHistoryNavigationSettled"
     )
+    static let transcriptUserScrollStarted = Notification.Name("BubbleTranscriptUserScrollStarted")
 }
 
 enum TranscriptViewportUserInfoKey {
@@ -114,7 +115,7 @@ final class TranscriptScrollProbe: NSView {
     private var historyNavigationObserver: NSObjectProtocol?
     private var eventMonitor: Any?
     private var userEventDeadline: TimeInterval = 0
-    private var userEventGeneration = 0
+    private var userSettleTimer: Timer?
     private var suppressingPriorScrollSequence = false
     private var pendingHistoryTargetID: String?
     private var historyAlignmentQueued = false
@@ -292,7 +293,8 @@ final class TranscriptScrollProbe: NSView {
         anchorIndexRebuildQueued = false
         viewportReportQueued = false
         cancelPendingHistoryAlignment()
-        userEventGeneration += 1
+        userSettleTimer?.invalidate()
+        userSettleTimer = nil
         diagnosticDisplayLink?.invalidate()
         diagnosticDisplayLink = nil
         diagnosticMountTimer?.invalidate()
@@ -313,8 +315,12 @@ final class TranscriptScrollProbe: NSView {
             let frameInWindow = scrollView.convert(scrollView.bounds, to: nil)
             guard frameInWindow.contains(event.locationInWindow) else { return }
         }
+        let startsUserScroll = CACurrentMediaTime() > userEventDeadline
         cancelPendingHistoryAlignment()
         deferAnchorMaintenanceUntilUserSettles()
+        if startsUserScroll {
+            NotificationCenter.default.post(name: .transcriptUserScrollStarted, object: self)
+        }
         if diagnosticsEnabled, !diagnosedUserScroll {
             diagnosedUserScroll = true
             OverlayLog.write("transcript physical scroll observed")
@@ -343,7 +349,8 @@ final class TranscriptScrollProbe: NSView {
 
     private func prepareForProgrammaticScroll() {
         userEventDeadline = 0
-        userEventGeneration += 1
+        userSettleTimer?.invalidate()
+        userSettleTimer = nil
         suppressingPriorScrollSequence = true
     }
 
@@ -359,16 +366,20 @@ final class TranscriptScrollProbe: NSView {
     private func deferAnchorMaintenanceUntilUserSettles() {
         visibleAnchor = nil
         userEventDeadline = CACurrentMediaTime() + Self.userEventWindow
-        userEventGeneration += 1
-        let generation = userEventGeneration
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.userEventWindow) { [weak self] in
-            guard let self,
-                  generation == self.userEventGeneration,
-                  CACurrentMediaTime() >= self.userEventDeadline else { return }
+        if let userSettleTimer {
+            userSettleTimer.fireDate = Date(timeIntervalSinceNow: Self.userEventWindow)
+            return
+        }
+        let timer = Timer(timeInterval: Self.userEventWindow, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            self.userSettleTimer = nil
+            guard CACurrentMediaTime() >= self.userEventDeadline else { return }
             self.rebuildAnchorIndex()
             self.reportPosition()
             self.captureVisibleAnchor()
         }
+        userSettleTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
     }
 
     private func scheduleVisibleAnchorCapture() {

@@ -71,7 +71,6 @@ struct OverlayView: View {
     var sessionSwitchLoading = false
 
     @FocusState private var focused: Bool
-    @State private var transcriptPlanner = TranscriptRenderPlanner()
     @State private var expandedThoughts: Set<UUID> = []
     @State private var expandedToolGroups: Set<String> = []
     @State private var expandedTools: Set<UUID> = []
@@ -271,6 +270,9 @@ struct OverlayView: View {
         .onChange(of: store.items.count) { _, _ in
             restoreFocus()
         }
+        .onChange(of: store.runtimeID) { _, _ in
+            resetSessionPresentationState()
+        }
 
         .onKeyPress(.escape) {
             if QuoteSelectionMonitor.shared.snapshot != nil {
@@ -303,6 +305,16 @@ struct OverlayView: View {
             }
             return .handled
         }
+    }
+
+    private func resetSessionPresentationState() {
+        expandedThoughts.removeAll(keepingCapacity: true)
+        expandedToolGroups.removeAll(keepingCapacity: true)
+        expandedTools.removeAll(keepingCapacity: true)
+        expandedFileChanges.removeAll(keepingCapacity: true)
+        followState = TranscriptFollowState()
+        followQueued = false
+        QuoteSelectionMonitor.shared.dismiss()
     }
 
     @ViewBuilder
@@ -673,7 +685,7 @@ struct OverlayView: View {
         if store.isBusy, let id = store.streamingAssistantId {
             streamingSeedIDs.insert(id.uuidString)
         }
-        let plan = transcriptPlanner.plan(
+        let plan = store.transcriptPlanner.plan(
             seeds: seeds,
             branchSourceID: store.branchDraft?.sourceItemID.uuidString,
             streamingSeedIDs: streamingSeedIDs
@@ -825,7 +837,9 @@ struct OverlayView: View {
         _ content: Content,
         hasHistoryTicks: Bool
     ) -> some View {
-        content
+        TranscriptSelectionScope {
+            content
+        }
             .padding(
                 .leading,
                 hasHistoryTicks ? HistoryLimits.gutter + 16 : OverlayMetrics.transcriptInset
@@ -856,12 +870,10 @@ struct OverlayView: View {
             if row.startsAfterBranchPoint {
                 branchCutoverDivider
             }
-            HoverSelectableTranscriptRow {
-                EquatableSection(value: mainRowRenderKey(row)) {
-                    mainTranscriptRow(row)
-                }
-                .equatable()
+            EquatableSection(value: mainRowRenderKey(row)) {
+                mainTranscriptRow(row)
             }
+            .equatable()
             .id(row.id)
             .background {
                 if row.id == row.historyTickID {
@@ -3125,7 +3137,7 @@ private struct EquatableSection<Value: Equatable, Content: View>: View, Equatabl
     }
 }
 
-private struct HoverSelectableTranscriptRow<Content: View>: View {
+private struct TranscriptSelectionScope<Content: View>: View {
     @State private var selectionEnabled = false
     @State private var releaseGeneration = 0
     private let content: Content
@@ -3137,37 +3149,40 @@ private struct HoverSelectableTranscriptRow<Content: View>: View {
     var body: some View {
         content
             .environment(\.bubbleTextSelectionEnabled, selectionEnabled)
-            .onContinuousHover { phase in
-                guard case .active = phase,
-                      NSApp.currentEvent?.type == .mouseMoved,
-                      !selectionEnabled else { return }
-                releaseGeneration += 1
-                selectionEnabled = TranscriptTextSelectionPolicy.isEnabled(
-                    isHovering: true,
-                    primaryButtonPressed: NSEvent.pressedMouseButtons & 1 != 0,
-                    pointerMoved: true
+            .background {
+                TranscriptPointerTrackingView(
+                    pointerMoved: enableSelection,
+                    pointerExited: releaseSelection
                 )
             }
-            .onHover { hovering in
-                // SwiftUI also emits hover-entry callbacks when scrolling moves
-                // a lazy row under a stationary pointer. Enabling text selection
-                // there rebuilds the row while it is being mounted and can turn
-                // one wheel event into an unbounded update loop. Actual pointer
-                // movement is handled by onContinuousHover above.
-                guard !hovering else { return }
-                releaseGeneration += 1
-                let primaryButtonPressed = NSEvent.pressedMouseButtons & 1 != 0
-                let hasSettledSelection = QuoteSelectionMonitor.shared.snapshot != nil
-                selectionEnabled = TranscriptTextSelectionPolicy.isEnabled(
-                    isHovering: false,
-                    primaryButtonPressed: primaryButtonPressed,
-                    pointerMoved: false,
-                    hasSettledSelection: hasSettledSelection
-                )
-                if primaryButtonPressed || hasSettledSelection {
-                    disarmAfterSelectionUse(generation: releaseGeneration)
-                }
+            .onReceive(NotificationCenter.default.publisher(for: .transcriptUserScrollStarted)) { _ in
+                releaseSelection()
             }
+    }
+
+    private func enableSelection() {
+        guard !selectionEnabled else { return }
+        releaseGeneration += 1
+        selectionEnabled = TranscriptTextSelectionPolicy.isEnabled(
+            isHovering: true,
+            primaryButtonPressed: NSEvent.pressedMouseButtons & 1 != 0,
+            pointerMoved: true
+        )
+    }
+
+    private func releaseSelection() {
+        releaseGeneration += 1
+        let primaryButtonPressed = NSEvent.pressedMouseButtons & 1 != 0
+        let hasSettledSelection = QuoteSelectionMonitor.shared.snapshot != nil
+        selectionEnabled = TranscriptTextSelectionPolicy.isEnabled(
+            isHovering: false,
+            primaryButtonPressed: primaryButtonPressed,
+            pointerMoved: false,
+            hasSettledSelection: hasSettledSelection
+        )
+        if primaryButtonPressed || hasSettledSelection {
+            disarmAfterSelectionUse(generation: releaseGeneration)
+        }
     }
 
     private func disarmAfterSelectionUse(generation: Int) {
@@ -3181,6 +3196,53 @@ private struct HoverSelectableTranscriptRow<Content: View>: View {
                 disarmAfterSelectionUse(generation: generation)
             }
         }
+    }
+}
+
+private struct TranscriptPointerTrackingView: NSViewRepresentable {
+    let pointerMoved: () -> Void
+    let pointerExited: () -> Void
+
+    func makeNSView(context: Context) -> TranscriptPointerTrackingNSView {
+        let view = TranscriptPointerTrackingNSView()
+        view.pointerMoved = pointerMoved
+        view.pointerExited = pointerExited
+        return view
+    }
+
+    func updateNSView(_ view: TranscriptPointerTrackingNSView, context: Context) {
+        view.pointerMoved = pointerMoved
+        view.pointerExited = pointerExited
+    }
+}
+
+private final class TranscriptPointerTrackingNSView: NSView {
+    var pointerMoved: (() -> Void)?
+    var pointerExited: (() -> Void)?
+    private var pointerTrackingArea: NSTrackingArea?
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let pointerTrackingArea {
+            removeTrackingArea(pointerTrackingArea)
+        }
+        let trackingArea = NSTrackingArea(
+            rect: .zero,
+            options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+            owner: self
+        )
+        addTrackingArea(trackingArea)
+        pointerTrackingArea = trackingArea
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        pointerMoved?()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        pointerExited?()
     }
 }
 

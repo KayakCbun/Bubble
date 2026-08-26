@@ -5,6 +5,7 @@ public enum SessionTabsError: Error, Equatable, Sendable {
     case duplicateSession
     case limitReached(maximum: Int)
     case unknownSession
+    case primarySessionCannotClose
 }
 
 public enum SessionTabRuntimeRole: String, Codable, Equatable, Sendable {
@@ -16,11 +17,18 @@ public struct PersistedSessionTab: Codable, Equatable, Sendable {
     public var runtimeID: UUID
     public var sessionID: String
     public var role: SessionTabRuntimeRole
+    public var ordinal: Int?
 
-    public init(runtimeID: UUID, sessionID: String, role: SessionTabRuntimeRole) {
+    public init(
+        runtimeID: UUID,
+        sessionID: String,
+        role: SessionTabRuntimeRole,
+        ordinal: Int? = nil
+    ) {
         self.runtimeID = runtimeID
         self.sessionID = sessionID
         self.role = role
+        self.ordinal = ordinal
     }
 }
 
@@ -159,6 +167,18 @@ public struct SessionTabState: Identifiable, Equatable, Sendable {
     }
 }
 
+public struct SessionTabCloseResult: Equatable, Sendable {
+    public let closedID: UUID
+    public let selectedID: UUID
+    public let selectionChanged: Bool
+
+    public init(closedID: UUID, selectedID: UUID, selectionChanged: Bool) {
+        self.closedID = closedID
+        self.selectedID = selectedID
+        self.selectionChanged = selectionChanged
+    }
+}
+
 public enum SessionSelectionPhase: Equatable, Sendable {
     case idle
     case requested(UUID)
@@ -198,19 +218,27 @@ public struct SessionTabsState: Equatable, Sendable {
         snapshot: SessionTabsSnapshot,
         maximum: Int = SessionTabsState.defaultMaximum
     ) throws {
+        let ordinals = snapshot.entries.enumerated().map { index, entry in
+            entry.ordinal ?? index + 1
+        }
         guard maximum > 0,
               !snapshot.entries.isEmpty,
               snapshot.entries.count <= maximum,
               snapshot.entries.first?.role == .main,
               snapshot.entries.dropFirst().allSatisfy({ $0.role == .side }),
               Set(snapshot.entries.map(\.runtimeID)).count == snapshot.entries.count,
+              ordinals.first == 1,
+              Set(ordinals).count == ordinals.count,
+              ordinals.allSatisfy({ (1...maximum).contains($0) }),
               snapshot.entries.contains(where: { $0.runtimeID == snapshot.selectedRuntimeID }) else {
             throw SessionTabsError.unknownSession
         }
         self.maximum = maximum
-        tabs = snapshot.entries.enumerated().map { index, entry in
-            SessionTabState(id: entry.runtimeID, ordinal: index + 1)
-        }
+        tabs = zip(snapshot.entries, ordinals)
+            .map { entry, ordinal in
+                SessionTabState(id: entry.runtimeID, ordinal: ordinal)
+            }
+            .sorted { $0.ordinal < $1.ordinal }
         selectedID = snapshot.selectedRuntimeID
         selectionPhase = .idle
     }
@@ -227,10 +255,46 @@ public struct SessionTabsState: Equatable, Sendable {
         guard tabs.count < maximum else {
             throw SessionTabsError.limitReached(maximum: maximum)
         }
-        tabs.append(SessionTabState(id: id, ordinal: tabs.count + 1))
+        let usedOrdinals = Set(tabs.map(\.ordinal))
+        guard let ordinal = (2...maximum).first(where: { !usedOrdinals.contains($0) }) else {
+            throw SessionTabsError.limitReached(maximum: maximum)
+        }
+        tabs.append(SessionTabState(id: id, ordinal: ordinal))
+        tabs.sort { $0.ordinal < $1.ordinal }
         selectedID = id
         selectionPhase = .idle
         return id
+    }
+
+    @discardableResult
+    public mutating func closeSideSession(_ id: UUID) throws -> SessionTabCloseResult {
+        guard let index = tabs.firstIndex(where: { $0.id == id }) else {
+            throw SessionTabsError.unknownSession
+        }
+        guard tabs[index].ordinal != 1 else {
+            throw SessionTabsError.primarySessionCannotClose
+        }
+
+        let selectionChanged = selectedID == id
+        tabs.remove(at: index)
+        if selectionChanged {
+            let replacementIndex = max(0, min(index - 1, tabs.count - 1))
+            selectedID = tabs[replacementIndex].id
+            selectionPhase = .rendering(selectedID)
+        } else {
+            switch selectionPhase {
+            case .requested(let target) where target == id,
+                 .rendering(let target) where target == id:
+                selectionPhase = .idle
+            default:
+                break
+            }
+        }
+        return SessionTabCloseResult(
+            closedID: id,
+            selectedID: selectedID,
+            selectionChanged: selectionChanged
+        )
     }
 
     public var presentedSelectedID: UUID {

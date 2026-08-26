@@ -77,6 +77,34 @@ do {
         expect(error as? SessionTabsError == .limitReached(maximum: 5), "sixth session must report the limit")
     }
 
+    let closePrimary = UUID()
+    let closeSecond = UUID()
+    let closeThird = UUID()
+    var closeState = SessionTabsState(primaryID: closePrimary)
+    _ = try closeState.createSideSession(id: closeSecond)
+    _ = try closeState.createSideSession(id: closeThird)
+    let backgroundClose = try closeState.closeSideSession(closeSecond)
+    expect(!backgroundClose.selectionChanged, "closing a background side session must keep the active transcript")
+    expect(closeState.selectedID == closeThird, "closing a background side session must preserve selection")
+    expect(closeState.tabs.map(\.ordinal) == [1, 3], "closing a tab must not renumber surviving sessions")
+    let replacementSecond = UUID()
+    _ = try closeState.createSideSession(id: replacementSecond)
+    expect(closeState.tabs.map(\.ordinal) == [1, 2, 3], "a new side session must reuse the smallest free ordinal")
+    expect(closeState.selectedID == replacementSecond, "a replacement side session must become active")
+    let selectedClose = try closeState.closeSideSession(replacementSecond)
+    expect(selectedClose.selectionChanged, "closing the active side session must report a transcript switch")
+    expect(selectedClose.selectedID == closePrimary, "closing the active side session must select its left neighbor")
+    expect(closeState.presentedSelectedID == closePrimary, "the replacement tab must highlight immediately")
+    expect(closeState.isSwitching, "closing the active side session must keep the loading mask through layout")
+    closeState.finishSelection(closePrimary)
+    expect(!closeState.isSwitching, "the replacement transcript layout must dismiss close loading")
+    do {
+        _ = try closeState.closeSideSession(closePrimary)
+        expect(false, "the main session must not be closeable")
+    } catch {
+        expect(error as? SessionTabsError == .primarySessionCannotClose, "closing the main session must report a dedicated error")
+    }
+
     let hitRegions = SessionTabLayout.hitRegions(
         count: 2,
         transcriptOriginY: 36,
@@ -109,8 +137,8 @@ do {
     let restoredSide = UUID()
     let savedTabs = SessionTabsSnapshot(
         entries: [
-            PersistedSessionTab(runtimeID: restoredPrimary, sessionID: "main-session", role: .main),
-            PersistedSessionTab(runtimeID: restoredSide, sessionID: "side-session", role: .side),
+            PersistedSessionTab(runtimeID: restoredPrimary, sessionID: "main-session", role: .main, ordinal: 1),
+            PersistedSessionTab(runtimeID: restoredSide, sessionID: "side-session", role: .side, ordinal: 4),
         ],
         selectedRuntimeID: restoredSide
     )
@@ -119,6 +147,7 @@ do {
     expect(decoded == savedTabs, "parallel session tabs must survive a persistence round trip")
     let restoredState = try SessionTabsState(snapshot: decoded)
     expect(restoredState.tabs.map(\.id) == [restoredPrimary, restoredSide], "restart must restore every session tab")
+    expect(restoredState.tabs.map(\.ordinal) == [1, 4], "restart must preserve stable session tab ordinals")
     expect(restoredState.selectedID == restoredSide, "restart must restore the selected session tab")
     let temporaryTabsFile = FileManager.default.temporaryDirectory
         .appendingPathComponent("bubble-session-tabs-\(UUID().uuidString).json")
