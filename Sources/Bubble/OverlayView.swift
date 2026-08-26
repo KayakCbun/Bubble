@@ -2865,7 +2865,7 @@ private struct ScrollToEndChip: View {
             .padding(.vertical, 6)
             .background(
                 Capsule(style: .continuous)
-                    .fill(OverlaySurface.userCardFill.opacity(0.84))
+                    .fill(OverlaySurface.userCardFill)
                     .shadow(
                         color: .black.opacity(0.07),
                         radius: 4,
