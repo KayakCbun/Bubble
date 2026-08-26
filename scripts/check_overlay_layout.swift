@@ -97,6 +97,30 @@ struct OverlayLayoutCheck {
             layoutSessionID: selectedSession,
             selectedSessionID: selectedSession
         ), "the selected session must be allowed to resize its panel")
+        let selectedLayout = OverlayLayout(
+            sessionID: selectedSession,
+            totalHeight: 614,
+            transcriptHeight: 560,
+            pickerHeight: 0,
+            commandPaletteHeight: 0,
+            transcriptWidth: 760,
+            composerHeight: 46
+        )
+        let emptyOverlayLayout = OverlayLayout(
+            totalHeight: 0,
+            transcriptHeight: 0,
+            pickerHeight: 0,
+            commandPaletteHeight: 0,
+            transcriptWidth: 760,
+            composerHeight: 46
+        )
+        expect(
+            OverlayRenderPolicy.reduceLayoutPreference(
+                current: selectedLayout,
+                next: emptyOverlayLayout
+            ) == selectedLayout,
+            "a tab overlay's empty preference must not erase the conversation layout"
+        )
         expect(!OverlayRenderPolicy.shouldPersistStreamChunk(isBusy: true, childBusy: false),
                "a live main turn must not write transcript.json on every token")
         expect(!OverlayRenderPolicy.shouldPersistStreamChunk(isBusy: false, childBusy: true),

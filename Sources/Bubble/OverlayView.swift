@@ -3758,7 +3758,10 @@ struct OverlayLayoutKey: PreferenceKey {
         sessionTabCount: 0
     )
     static func reduce(value: inout OverlayLayout, nextValue: () -> OverlayLayout) {
-        value = nextValue()
+        value = OverlayRenderPolicy.reduceLayoutPreference(
+            current: value,
+            next: nextValue()
+        )
     }
 }
 

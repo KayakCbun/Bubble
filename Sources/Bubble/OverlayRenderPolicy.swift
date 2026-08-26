@@ -26,6 +26,16 @@ enum OverlayRenderPolicy {
         layoutSessionID == selectedSessionID
     }
 
+    static func reduceLayoutPreference(
+        current: OverlayLayout,
+        next: OverlayLayout
+    ) -> OverlayLayout {
+        guard next.sessionID != nil, next.totalHeight > 1 else {
+            return current
+        }
+        return next
+    }
+
     /// Token flushes must not hit disk; the turn-end persist is the durable write.
     static func shouldPersistStreamChunk(isBusy: Bool, childBusy: Bool) -> Bool {
         !isBusy && !childBusy
