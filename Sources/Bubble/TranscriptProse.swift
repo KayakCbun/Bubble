@@ -1,23 +1,112 @@
 import AppKit
 import SwiftUI
 
-enum PathChipKind: Equatable {
-    case code
-    case file(String)
-    case folder
-    case url
+private struct BubbleTextSelectionModifier: ViewModifier {
+    @Environment(\.bubbleTextSelectionEnabled) private var enabled
 
-    var isMonospaced: Bool {
-        switch self {
-        case .code, .file, .folder: return true
-        case .url: return false
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if enabled {
+            content.textSelection(.enabled)
+        } else {
+            content
         }
+    }
+}
+
+private struct BubbleTextSelectionEnabledKey: EnvironmentKey {
+    static let defaultValue = true
+}
+
+extension EnvironmentValues {
+    var bubbleTextSelectionEnabled: Bool {
+        get { self[BubbleTextSelectionEnabledKey.self] }
+        set { self[BubbleTextSelectionEnabledKey.self] = newValue }
+    }
+}
+
+extension View {
+    func bubbleTextSelection() -> some View {
+        modifier(BubbleTextSelectionModifier())
     }
 }
 
 struct PathChipIcon: Equatable {
     var symbol: String
     var color: Color
+    var markdown: Bool = false
+}
+
+struct MarkdownFileGlyph: View {
+    var pointSize: CGFloat = 12
+
+    static let fill = Color(red: 0.22, green: 0.52, blue: 0.96)
+
+    var body: some View {
+        let width = pointSize * 0.90
+        let height = pointSize
+        ZStack {
+            MarkdownPageShape()
+                .fill(Self.fill)
+            MarkdownPageShape.fold()
+                .fill(Color.white.opacity(0.28))
+            Text("MD")
+                .font(.system(size: max(5.5, pointSize * 0.36), weight: .bold, design: .rounded))
+                .foregroundStyle(Color.white)
+                .tracking(-0.3)
+                .offset(y: pointSize * 0.08)
+        }
+        .frame(width: width, height: height)
+        .accessibilityHidden(true)
+    }
+}
+
+private struct MarkdownPageShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        Self.page(in: rect)
+    }
+
+    static func fold() -> some Shape {
+        MarkdownPageFold()
+    }
+
+    static func page(in rect: CGRect) -> Path {
+        let fold = min(rect.width, rect.height) * 0.30
+        let radius = min(1.8, rect.width * 0.16)
+        var path = Path()
+        path.move(to: CGPoint(x: rect.minX + radius, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX - fold, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.minY + fold))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY - radius))
+        path.addQuadCurve(
+            to: CGPoint(x: rect.maxX - radius, y: rect.maxY),
+            control: CGPoint(x: rect.maxX, y: rect.maxY)
+        )
+        path.addLine(to: CGPoint(x: rect.minX + radius, y: rect.maxY))
+        path.addQuadCurve(
+            to: CGPoint(x: rect.minX, y: rect.maxY - radius),
+            control: CGPoint(x: rect.minX, y: rect.maxY)
+        )
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.minY + radius))
+        path.addQuadCurve(
+            to: CGPoint(x: rect.minX + radius, y: rect.minY),
+            control: CGPoint(x: rect.minX, y: rect.minY)
+        )
+        path.closeSubpath()
+        return path
+    }
+}
+
+private struct MarkdownPageFold: Shape {
+    func path(in rect: CGRect) -> Path {
+        let fold = min(rect.width, rect.height) * 0.30
+        var path = Path()
+        path.move(to: CGPoint(x: rect.maxX - fold, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.minY + fold))
+        path.addLine(to: CGPoint(x: rect.maxX - fold, y: rect.minY + fold))
+        path.closeSubpath()
+        return path
+    }
 }
 
 enum PathChipStyle {
@@ -57,8 +146,14 @@ enum PathChipStyle {
 
     static func fileIcon(_ ext: String) -> PathChipIcon {
         switch ext {
-        case "md", "markdown", "txt", "rtf":
-            return PathChipIcon(symbol: "doc.richtext.fill", color: Color(red: 0.25, green: 0.55, blue: 0.95))
+        case "md", "markdown":
+            return PathChipIcon(
+                symbol: "doc",
+                color: MarkdownFileGlyph.fill,
+                markdown: true
+            )
+        case "txt", "rtf":
+            return PathChipIcon(symbol: "doc.text", color: Color(red: 0.42, green: 0.48, blue: 0.58))
         case "swift":
             return PathChipIcon(symbol: "swift", color: Color(red: 0.95, green: 0.45, blue: 0.18))
         case "json", "yml", "yaml", "toml", "xml", "plist":
@@ -114,11 +209,6 @@ enum PathChipStyle {
     }
 }
 
-enum InlineRun: Equatable {
-    case text(String)
-    case chip(String, PathChipKind)
-}
-
 enum ProseBlock: Equatable {
     case heading(Int, [InlineRun])
     case paragraph([InlineRun])
@@ -129,6 +219,12 @@ enum ProseBlock: Equatable {
 
 enum ProseParser {
     static func blocks(in text: String) -> [ProseBlock] {
+        ProseBlockCache.shared.blocks(for: text) {
+            parseBlocks(in: text)
+        }
+    }
+
+    private static func parseBlocks(in text: String) -> [ProseBlock] {
         let lines = text.components(separatedBy: "\n")
         var blocks: [ProseBlock] = []
         var paragraph: [String] = []
@@ -192,13 +288,12 @@ enum ProseParser {
                 continue
             }
             if remaining.hasPrefix("**") {
-                remaining.removeFirst(2)
-                if let end = remaining.range(of: "**") {
-                    let inner = String(remaining[..<end.lowerBound])
-                    remaining = String(remaining[end.upperBound...])
-                    emitEmphasis(inner, into: &runs)
+                if let span = MarkdownEmphasis.consumeLeading(in: remaining) {
+                    remaining = span.remainder
+                    emitEmphasis(span.inner, into: &runs)
                     continue
                 }
+                remaining.removeFirst(2)
                 runs.append(.text("**"))
                 continue
             }
@@ -282,24 +377,36 @@ enum ProseParser {
     }
 
     private static func emitEmphasis(_ inner: String, into runs: inout [InlineRun]) {
-        if inner.isEmpty { return }
-        if CodeToken.looksLike(inner) {
-            runs.append(.chip(inner, PathChipStyle.classify(inner)))
-            return
-        }
-        let innerRuns = tokenize(inner)
-        let hasChip = innerRuns.contains { if case .chip = $0 { return true }; return false }
-        guard hasChip else {
+        let parts = MarkdownEmphasis.boundaries(in: inner)
+        guard !parts.core.isEmpty else {
             runs.append(.text("**" + inner + "**"))
             return
         }
+        if CodeToken.looksLike(parts.core) {
+            if !parts.leading.isEmpty { runs.append(.text(parts.leading)) }
+            runs.append(.chip(parts.core, PathChipStyle.classify(parts.core)))
+            if !parts.trailing.isEmpty { runs.append(.text(parts.trailing)) }
+            return
+        }
+        let innerRuns = tokenize(parts.core)
+        let hasChip = innerRuns.contains { if case .chip = $0 { return true }; return false }
+        guard hasChip else {
+            runs.append(contentsOf: MarkdownEmphasis.runs(for: inner))
+            return
+        }
+        if !parts.leading.isEmpty { runs.append(.text(parts.leading)) }
         for run in innerRuns {
             switch run {
             case .chip:
                 runs.append(run)
             case .text(let text):
                 appendBoldText(text, into: &runs)
+            case .strong(let text):
+                appendBoldText(text, into: &runs)
             }
+        }
+        if !parts.trailing.isEmpty {
+            runs.append(.text(parts.trailing))
         }
     }
 
@@ -317,7 +424,7 @@ enum ProseParser {
             runs.append(.text(String(lead)))
         }
         let core = String(text[text.index(text.startIndex, offsetBy: coreStart)..<text.index(text.startIndex, offsetBy: coreEnd)])
-        runs.append(.text("**" + core + "**"))
+        runs.append(.strong(core))
         if !trail.isEmpty {
             runs.append(.text(String(trail.reversed())))
         }
@@ -379,6 +486,8 @@ enum ProseParser {
         for run in runs {
             if case .text(let text) = run, case .text(let last) = merged.last {
                 merged[merged.count - 1] = .text(last + text)
+            } else if case .strong(let text) = run, case .strong(let last) = merged.last {
+                merged[merged.count - 1] = .strong(last + text)
             } else {
                 merged.append(run)
             }
@@ -465,11 +574,65 @@ enum ProseParser {
     }
 }
 
+private final class ProseBlockBox {
+    let blocks: [ProseBlock]
+
+    init(_ blocks: [ProseBlock]) {
+        self.blocks = blocks
+    }
+}
+
+/// Lazy transcript rows are discarded while scrolling and can be constructed
+/// again when they re-enter the viewport. Keep the semantic parse separate
+/// from the SwiftUI view lifetime so revisiting a long answer stays cheap.
+private final class ProseBlockCache {
+    static let shared = ProseBlockCache()
+
+    private let cache: NSCache<NSString, ProseBlockBox> = {
+        let cache = NSCache<NSString, ProseBlockBox>()
+        cache.countLimit = 256
+        cache.totalCostLimit = 12 * 1_024 * 1_024
+        return cache
+    }()
+
+    func blocks(for text: String, build: () -> [ProseBlock]) -> [ProseBlock] {
+        let key = text as NSString
+        if let cached = cache.object(forKey: key) {
+            return cached.blocks
+        }
+        let blocks = build()
+        cache.setObject(ProseBlockBox(blocks), forKey: key, cost: text.utf8.count)
+        return blocks
+    }
+}
+
+struct WorkspaceTranscriptWarmupItem: Sendable {
+    var identity: String
+    var text: String
+}
+
+enum WorkspaceTranscriptWarmup {
+    static func prepare(_ items: [WorkspaceTranscriptWarmupItem]) {
+        for item in items {
+            guard !Task.isCancelled else { return }
+            guard WorkspaceTranscriptChunker.isParagraphLocal(item.text) else { continue }
+            let visibleEdges = WorkspaceTranscriptChunker.visibleEdges(
+                item.text,
+                identity: item.identity
+            )
+            for chunk in visibleEdges {
+                guard !Task.isCancelled else { return }
+                _ = ProseParser.blocks(in: chunk)
+            }
+        }
+    }
+}
+
 struct ProseDocument: View {
     var text: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: OverlaySurface.proseBlockSpacing) {
             ForEach(Array(ProseParser.blocks(in: text).enumerated()), id: \.offset) { _, block in
                 switch block {
                 case .heading(let level, let runs):
@@ -477,11 +640,11 @@ struct ProseDocument: View {
                         runs,
                         font: .system(
                             size: level <= 1 ? OverlayMetrics.heading1Size : level == 2 ? OverlayMetrics.heading2Size : OverlayMetrics.heading3Size,
-                            weight: .medium
+                            weight: .semibold
                         )
                     )
-                    .padding(.top, level <= 2 ? 8 : 4)
-                    .padding(.bottom, 1)
+                    .padding(.top, level <= 2 ? 20 : 16)
+                    .padding(.bottom, 8)
                 case .paragraph(let runs):
                     inlineFlow(runs)
                 case .rule:
@@ -507,24 +670,68 @@ struct ProseDocument: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    @ViewBuilder
     private func inlineFlow(_ runs: [InlineRun], font: Font = OverlayMetrics.bodyFont) -> some View {
-        FlowWidthReader { width in
-            FlowLayout(horizontalSpacing: 5, verticalSpacing: 5) {
-                ForEach(Array(Self.breakRuns(runs, width: width).enumerated()), id: \.offset) { _, run in
-                    switch run {
-                    case .text(let text):
-                        Text(inlineMarkdown(text))
-                            .font(font)
-                            .foregroundStyle(OverlayMetrics.ink)
-                            .lineLimit(1)
-                            .fixedSize(horizontal: true, vertical: true)
-                            .textSelection(.enabled)
-                    case .chip(let text, let kind):
-                        InlineChip(text: text, kind: kind)
+        if InlineRun.usesNativeTextLayout(runs) {
+            Text(Self.nativeAttributedText(runs, font: font))
+                .font(font)
+                .foregroundStyle(OverlaySurface.conversationInk)
+                .lineSpacing(OverlaySurface.proseLineSpacing)
+                .fixedSize(horizontal: false, vertical: true)
+                .bubbleTextSelection()
+        } else {
+            FlowWidthReader { width in
+                FlowLayout(horizontalSpacing: 5, verticalSpacing: OverlaySurface.proseLineSpacing) {
+                    ForEach(Array(Self.breakRuns(runs, width: width).enumerated()), id: \.offset) { _, run in
+                        switch run {
+                        case .text(let text):
+                            Text(inlineMarkdown(text))
+                                .font(font)
+                                .foregroundStyle(OverlaySurface.conversationInk)
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: true)
+                                .bubbleTextSelection()
+                        case .strong(let text):
+                            Text(inlineMarkdown(text))
+                                .font(font)
+                                .fontWeight(.semibold)
+                                .foregroundStyle(OverlaySurface.conversationInk)
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: true)
+                                .bubbleTextSelection()
+                        case .chip(let text, let kind):
+                            InlineChip(text: text, kind: kind)
+                        }
                     }
                 }
             }
         }
+    }
+
+    private static func nativeAttributedText(_ runs: [InlineRun], font: Font) -> AttributedString {
+        var result = AttributedString()
+        for run in runs {
+            let text: String
+            switch run {
+            case .text(let value), .strong(let value), .chip(let value, _):
+                text = value
+            }
+            var part = AttributedString(text)
+            part.foregroundColor = OverlaySurface.conversationInk
+            switch run {
+            case .text:
+                break
+            case .strong:
+                part.font = font.weight(.semibold)
+            case .chip(_, .code):
+                part.font = .system(size: OverlayMetrics.chipSize, weight: .regular, design: .monospaced)
+                part.backgroundColor = OverlaySurface.chipFill
+            case .chip:
+                break
+            }
+            result.append(part)
+        }
+        return result
     }
 
     private static func breakRuns(_ runs: [InlineRun], width: CGFloat) -> [InlineRun] {
@@ -554,7 +761,7 @@ struct ProseDocument: View {
                 result.append(run)
                 x += w + spacing
                 if x >= width { x = 0 }
-            case .text(let raw):
+            case .text(let raw), .strong(let raw):
                 let segments = raw.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline)
                 for (index, segment) in segments.enumerated() {
                     if index > 0 { x = 0 }
@@ -571,11 +778,11 @@ struct ProseDocument: View {
                                 x = 0
                                 continue
                             }
-                            result.append(.text(remainingText))
+                            result.append(run.replacingText(with: remainingText))
                             x = 0
                             break
                         }
-                        result.append(.text(head))
+                        result.append(run.replacingText(with: head))
                         if tail.isEmpty {
                             x += widthOf(head, font: font) + spacing
                             if x >= width { x = 0 }
@@ -646,28 +853,33 @@ struct InlineChip: View {
     @State private var hovering = false
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: 6, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: OverlaySurface.chipRadius, style: .continuous)
         let icon = PathChipStyle.icon(for: kind)
         let label = HStack(spacing: 4) {
-            if let icon {
+            if kind.isFilePath {
+                PierreFileIcon(path: displayText, size: 11)
+            } else if let icon {
                 Image(systemName: icon.symbol)
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(icon.color)
             }
             Text(displayText)
                 .font(.system(size: OverlayMetrics.chipSize, weight: .regular, design: kind.isMonospaced ? .monospaced : .default))
-                .foregroundStyle(kind == .url ? Color(red: 0.16, green: 0.42, blue: 0.90) : OverlayMetrics.ink.opacity(hovering && isActionable ? 0.95 : 0.82))
+                .foregroundStyle(kind == .url ? Color(red: 0.16, green: 0.42, blue: 0.90) : OverlaySurface.conversationInk)
                 .lineLimit(1)
                 .truncationMode(.middle)
         }
-        .padding(.leading, icon == nil ? 6 : 5)
-        .padding(.trailing, 6)
-        .padding(.vertical, 2)
+        .padding(.leading, icon == nil ? 7 : 5)
+        .padding(.trailing, 7)
+        .padding(.vertical, 3)
         .background(
-            shape.fill(Color.primary.opacity(hovering && isActionable ? 0.12 : 0.06))
+            shape.fill(hovering && isActionable ? OverlaySurface.userFill : OverlaySurface.chipFill)
         )
         .overlay {
-            shape.stroke(Color.primary.opacity(hovering && isActionable ? 0.22 : 0), lineWidth: 1)
+            shape.stroke(
+                hovering && isActionable ? OverlaySurface.chipStroke.opacity(1.4) : OverlaySurface.chipStroke,
+                lineWidth: 0.5
+            )
         }
         .contentShape(shape)
         .textSelection(.disabled)
@@ -794,16 +1006,31 @@ private struct FlowWidthReader<Content: View>: View {
 
 struct FlowLayout: Layout {
     var horizontalSpacing: CGFloat = 5
-    var verticalSpacing: CGFloat = 7
+    var verticalSpacing: CGFloat = OverlaySurface.proseLineSpacing
 
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        arrange(proposal: proposal, subviews: subviews).size
+    struct Cache {
+        var width: CGFloat?
+        var subviewCount = 0
+        var result: (size: CGSize, frames: [CGRect])?
     }
 
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        let result = arrange(
-            proposal: ProposedViewSize(width: bounds.width, height: bounds.height),
-            subviews: subviews
+    func makeCache(subviews: Subviews) -> Cache {
+        Cache()
+    }
+
+    func updateCache(_ cache: inout Cache, subviews: Subviews) {
+        cache = Cache()
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) -> CGSize {
+        cachedArrangement(proposal: proposal, subviews: subviews, cache: &cache).size
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) {
+        let result = cachedArrangement(
+            proposal: ProposedViewSize(width: bounds.width, height: nil),
+            subviews: subviews,
+            cache: &cache
         )
         for (subview, frame) in zip(subviews, result.frames) {
             subview.place(
@@ -814,6 +1041,24 @@ struct FlowLayout: Layout {
                 proposal: ProposedViewSize(frame.size)
             )
         }
+    }
+
+    private func cachedArrangement(
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout Cache
+    ) -> (size: CGSize, frames: [CGRect]) {
+        let width = proposal.width
+        if cache.width == width,
+           cache.subviewCount == subviews.count,
+           let result = cache.result {
+            return result
+        }
+        let result = arrange(proposal: proposal, subviews: subviews)
+        cache.width = width
+        cache.subviewCount = subviews.count
+        cache.result = result
+        return result
     }
 
     private func arrange(proposal: ProposedViewSize, subviews: Subviews) -> (size: CGSize, frames: [CGRect]) {

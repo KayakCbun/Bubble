@@ -1,18 +1,21 @@
 import AppKit
 
 final class OverlayRootView: NSView {
-    var hitRects: [NSRect] = []
+    var hitRegions: [OverlayCardHitRegion] = []
     private var widthToggleVisible = false
     private var onWidthToggle: (() -> Void)?
     private var onPinToggle: (() -> Void)?
     private var onPreviewFinder: (() -> Void)?
     private var onPreviewClose: (() -> Void)?
+    private var onPreviewBack: (() -> Void)?
     private var maskTranscriptHeight: CGFloat = 0
     private var maskPickerHeight: CGFloat = 0
     private var maskCommandPaletteHeight: CGFloat = 0
     private var maskTranscriptWidth = OverlayMetrics.transcriptWidthDefault
     private var maskComposerHeight = OverlayMetrics.minHeight
     private var maskPreviewWidth: CGFloat = 0
+    private var maskPreviewIsMarkdown = false
+    private var maskPreviewHasBack = false
 
     override var isFlipped: Bool { true }
     override var isOpaque: Bool { false }
@@ -25,9 +28,14 @@ final class OverlayRootView: NSView {
         onPinToggle = onToggle
     }
 
-    func installPreviewControls(onFinder: @escaping () -> Void, onClose: @escaping () -> Void) {
+    func installPreviewControls(
+        onFinder: @escaping () -> Void,
+        onClose: @escaping () -> Void,
+        onBack: @escaping () -> Void
+    ) {
         onPreviewFinder = onFinder
         onPreviewClose = onClose
+        onPreviewBack = onBack
     }
 
     override func viewDidMoveToWindow() {
@@ -58,13 +66,21 @@ final class OverlayRootView: NSView {
         if control(at: point) != nil {
             return self
         }
-        if hitRects.contains(where: { $0.contains(point) }) {
+        if hitRegions.contains(where: { $0.contains(point) }) {
             return super.hitTest(point)
         }
         return nil
     }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    func containsVisibleCard(atScreenPoint screenPoint: NSPoint) -> Bool {
+        guard let window else { return false }
+        let windowPoint = window.convertPoint(fromScreen: screenPoint)
+        let localPoint = convert(windowPoint, from: nil)
+        return control(at: localPoint) != nil
+            || hitRegions.contains(where: { $0.contains(localPoint) })
+    }
 
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
@@ -81,6 +97,9 @@ final class OverlayRootView: NSView {
         case .previewClose:
             onPreviewClose?()
             return
+        case .previewBack:
+            onPreviewBack?()
+            return
         case nil:
             break
         }
@@ -92,6 +111,7 @@ final class OverlayRootView: NSView {
         case width
         case previewFinder
         case previewClose
+        case previewBack
     }
 
     private func control(at point: NSPoint) -> TranscriptControl? {
@@ -107,10 +127,10 @@ final class OverlayRootView: NSView {
         guard atEitherVerticalEdge else { return nil }
 
         if maskPreviewWidth > 1 {
-            let previewTrailing = OverlayMetrics.shadowInset
+            let previewLeading = OverlayMetrics.shadowInset
                 + maskTranscriptWidth
                 + OverlayMetrics.stackSpacing
-                + maskPreviewWidth
+            let previewTrailing = previewLeading + maskPreviewWidth
             let closeRect = NSRect(
                 x: previewTrailing - hitWidth,
                 y: 0,
@@ -120,14 +140,27 @@ final class OverlayRootView: NSView {
             if closeRect.contains(point) {
                 return .previewClose
             }
-            let finderRect = NSRect(
-                x: previewTrailing - hitWidth * 2,
-                y: 0,
-                width: hitWidth,
-                height: bounds.height
-            )
-            if finderRect.contains(point) {
-                return .previewFinder
+            if maskPreviewIsMarkdown {
+                let finderRect = NSRect(
+                    x: previewTrailing - hitWidth * 2,
+                    y: 0,
+                    width: hitWidth,
+                    height: bounds.height
+                )
+                if finderRect.contains(point) {
+                    return .previewFinder
+                }
+                if maskPreviewHasBack {
+                    let backRect = NSRect(
+                        x: previewLeading,
+                        y: 0,
+                        width: hitWidth,
+                        height: bounds.height
+                    )
+                    if backRect.contains(point) {
+                        return .previewBack
+                    }
+                }
             }
         }
 
@@ -157,7 +190,9 @@ final class OverlayRootView: NSView {
         commandPaletteHeight: CGFloat = 0,
         transcriptWidth: CGFloat = OverlayMetrics.transcriptWidthDefault,
         composerHeight: CGFloat = OverlayMetrics.minHeight,
-        previewWidth: CGFloat = 0
+        previewWidth: CGFloat = 0,
+        previewIsMarkdown: Bool = false,
+        previewHasBack: Bool = false
     ) {
         maskTranscriptHeight = transcriptHeight
         maskPickerHeight = pickerHeight
@@ -165,6 +200,8 @@ final class OverlayRootView: NSView {
         maskTranscriptWidth = transcriptWidth
         maskComposerHeight = composerHeight > 1 ? composerHeight : OverlayMetrics.minHeight
         maskPreviewWidth = previewWidth
+        maskPreviewIsMarkdown = previewIsMarkdown
+        maskPreviewHasBack = previewHasBack
         rebuildCardMask()
     }
 
@@ -177,19 +214,30 @@ final class OverlayRootView: NSView {
         let inputH = maskComposerHeight > 1 ? maskComposerHeight : OverlayMetrics.minHeight
         let gap = OverlayMetrics.stackSpacing
         widthToggleVisible = transcriptHeight > 1
-        var hit: [CGRect] = []
-        func addRect(_ rect: CGRect) {
-            hit.append(rect)
+        var hit: [OverlayCardHitRegion] = []
+        func addRect(_ rect: CGRect, cornerRadius: CGFloat) {
+            hit.append(OverlayCardHitRegion(rect: rect, cornerRadius: cornerRadius))
         }
 
         let inset = OverlayMetrics.shadowInset
         let previewExtra = OverlayLayoutPolicy.previewExtraWidth(maskPreviewWidth, gap: gap)
-        let topWidth = transcriptHeight > 1 ? chatW + previewExtra : inputW
-        let inputX = OverlayPixel.align(inset + (topWidth - inputW) / 2, scale: backingScale)
+        let fallbackWidth = (transcriptHeight > 1 ? chatW + previewExtra : inputW) + inset * 2
+        let panelWidth = bounds.width > 1 ? bounds.width : fallbackWidth
+        let inputX = OverlayPixel.align(
+            OverlayLayoutPolicy.composerOriginX(
+                panelWidth: panelWidth,
+                composerWidth: inputW,
+                bleed: inset
+            ),
+            scale: backingScale
+        )
         let inputY = max(inset, bounds.height - inset - inputH)
         if transcriptHeight > 1 {
             let chatY = max(inset, inputY - gap - transcriptHeight)
-            addRect(CGRect(x: inset, y: chatY, width: chatW, height: transcriptHeight))
+            addRect(
+                CGRect(x: inset, y: chatY, width: chatW, height: transcriptHeight),
+                cornerRadius: OverlayMetrics.transcriptCornerRadius
+            )
             if maskPreviewWidth > 1 {
                 addRect(
                     CGRect(
@@ -197,7 +245,8 @@ final class OverlayRootView: NSView {
                         y: chatY,
                         width: maskPreviewWidth,
                         height: transcriptHeight
-                    )
+                    ),
+                    cornerRadius: OverlayMetrics.transcriptCornerRadius
                 )
             }
         }
@@ -209,7 +258,8 @@ final class OverlayRootView: NSView {
                     y: pickerY,
                     width: OverlayMetrics.pickerWidth,
                     height: pickerHeight
-                )
+                ),
+                cornerRadius: OverlayMetrics.cornerRadius
             )
         }
         if commandPaletteHeight > 1 {
@@ -219,11 +269,15 @@ final class OverlayRootView: NSView {
                     y: max(inset, inputY - gap - commandPaletteHeight),
                     width: inputW,
                     height: commandPaletteHeight
-                )
+                ),
+                cornerRadius: OverlayMetrics.transcriptCornerRadius
             )
         }
-        addRect(CGRect(x: inputX, y: inputY, width: inputW, height: inputH))
-        hitRects = hit
+        addRect(
+            CGRect(x: inputX, y: inputY, width: inputW, height: inputH),
+            cornerRadius: OverlayMetrics.cornerRadius
+        )
+        hitRegions = hit
     }
 
     private var backingScale: CGFloat {
@@ -268,7 +322,7 @@ final class OverlayPanel: NSPanel {
         becomesKeyOnlyIfNeeded = false
         titleVisibility = .hidden
         titlebarAppearsTransparent = true
-        isMovableByWindowBackground = true
+        isMovableByWindowBackground = false
         animationBehavior = .none
         hidesOnDeactivate = false
         displaysWhenScreenProfileChanges = true

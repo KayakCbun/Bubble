@@ -18,7 +18,13 @@ enum OverlayMotion {
         dampingFraction: OverlaySpring.quickDamping,
         blendDuration: 0
     )
+    /// Height-only composer chrome. Ease-out avoids spring overshoot that would
+    /// bounce the transcript viewport on every quote/attachment attach.
+    static let composer = Animation.easeOut(duration: 0.16)
     static let scroll = Animation.spring(response: 0.28, dampingFraction: 0.96, blendDuration: 0)
+    static let sideStageReveal = Animation.easeOut(duration: SideStageChromePolicy.revealDuration)
+    static let sideStageHide = Animation.easeIn(duration: SideStageChromePolicy.hideDuration)
+    static let sideStageContent = Animation.easeOut(duration: 0.12)
 
     static var frameRate: CAFrameRateRange {
         CAFrameRateRange(minimum: 80, maximum: 120, preferred: 120)
@@ -181,7 +187,14 @@ final class OverlayFrameAnimator: NSObject {
             OverlaySpring.step(value: &y, velocity: &vy, target: ty, dt: slice)
             OverlaySpring.step(value: &w, velocity: &vw, target: tw, dt: slice)
             OverlaySpring.step(value: &h, velocity: &vh, target: th, dt: slice)
-            OverlaySpring.step(value: &alpha, velocity: &alphaVelocity, target: alphaTarget, dt: slice)
+            OverlaySpring.step(
+                value: &alpha,
+                velocity: &alphaVelocity,
+                target: alphaTarget,
+                dt: slice,
+                response: OverlaySpring.fadeResponse,
+                damping: OverlaySpring.fadeDamping
+            )
             remaining -= slice
         }
 
@@ -218,7 +231,14 @@ final class OverlayFrameAnimator: NSObject {
         }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        panel.setFrame(frame, display: false)
+        let sizeChanged =
+            abs(frame.width - panel.frame.width) > 0.5
+            || abs(frame.height - panel.frame.height) > 0.5
+        if settled || sizeChanged {
+            panel.setFrame(frame, display: false)
+        } else {
+            panel.setFrameOrigin(frame.origin)
+        }
         panel.alphaValue = min(max(alpha, 0), 1)
         CATransaction.commit()
         onProgress?(frame, panel.alphaValue)

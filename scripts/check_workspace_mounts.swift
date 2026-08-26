@@ -20,6 +20,7 @@ struct WorkspaceMountsCheck {
         try resolveByNameAndPath()
         try statusBlock()
         interruptActive()
+        injectionRoundTrip()
         inferWaiting()
         paletteBrowseLast()
         try paletteDrillDown()
@@ -39,6 +40,15 @@ struct WorkspaceMountsCheck {
         expect(store.mounts[0].name == "oncall-watcher", "name is folder name")
         try WorkspaceRegistry.unmount(path: "/Users/ada/work/oncall-watcher", in: &store)
         expect(store.mounts.isEmpty, "unmount removes the entry")
+
+        var sessionScoped = WorkspaceStoreFile(
+            mounts: [WorkspaceMount(path: "/tmp/work-a", name: "work-a", sessionId: "child-old")],
+            recent: [WorkspaceMount(path: "/tmp/work-b", name: "work-b", sessionId: "child-recent")]
+        )
+        WorkspaceRegistry.resetSessions(in: &sessionScoped)
+        expect(sessionScoped.mounts.count == 1, "new main session keeps mounted folders")
+        expect(sessionScoped.mounts[0].sessionId == nil, "new main session creates fresh workspace sessions")
+        expect(sessionScoped.recent[0].sessionId == nil, "recent mounts cannot revive an old main session's child")
         expect(store.recent.count == 1, "unmount keeps a recent entry")
     }
 
@@ -141,6 +151,51 @@ struct WorkspaceMountsCheck {
         )
         WorkspaceRegistry.interruptActive(in: &store)
         expect(store.active?.status == .interrupted, "quit marks the run interrupted")
+    }
+
+    static func injectionRoundTrip() {
+        let brief = WorkspaceBrief(
+            runId: "run-123",
+            path: "/Users/ada/Documents/work",
+            name: "work",
+            status: .done,
+            goal: "first line\nsummary: this belongs to the goal",
+            summary: "summary line one\nquestion: this belongs to the summary",
+            question: "continue?",
+            changedPaths: ["/tmp/report,final.json"]
+        )
+        let prompt = WorkspaceRegistry.injectionPrompt(
+            brief,
+            home: home.path,
+            sessionId: "child-456",
+            anchorEntryId: "user-789"
+        )
+        let restored = WorkspaceRegistry.parseInjectionPrompt(prompt, home: home.path)
+        expect(restored?.brief == brief, "structured relay payload restores the complete brief losslessly")
+        expect(restored?.sessionId == "child-456", "relay prompt restores the child session")
+        expect(restored?.anchorEntryId == "user-789", "relay prompt restores the workspace turn anchor")
+
+        let legacy = prompt
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { !$0.hasPrefix("bubble_workspace_relay_v1: ") }
+            .joined(separator: "\n")
+        let legacyRestored = WorkspaceRegistry.parseInjectionPrompt(legacy, home: home.path)
+        expect(legacyRestored?.brief.path == brief.path, "legacy relay prompts remain readable")
+        expect(legacyRestored?.brief.runId == nil, "legacy relays do not invent a run identity")
+        expect(
+            WorkspaceRegistry.canMatchLegacyRelay(
+                cardRunId: "legacy-local-run",
+                structuredRelayRunIds: ["modern-run"]
+            ),
+            "a first restore may reuse the identified local card belonging to a legacy relay"
+        )
+        expect(
+            !WorkspaceRegistry.canMatchLegacyRelay(
+                cardRunId: "modern-run",
+                structuredRelayRunIds: ["modern-run"]
+            ),
+            "a legacy relay cannot consume a card reserved by a structured relay"
+        )
     }
 
     static func inferWaiting() {

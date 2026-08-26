@@ -19,12 +19,49 @@ struct ProseCheck {
 
     static func main() {
         testCodeTokens()
+        testNativeTextLayoutRouting()
         testWallReflow()
         testChecklistReflow()
         testCodeSpanProtected()
+        testStandardMarkdownHeadingsStayOnOneLine()
+        testDisplayMathDelimiters()
+        testEmphasisBoundaryWhitespace()
+        testBoldNumberedTitles()
         testKinsokuWrap()
         testTableReflow()
+        testCodeDisplayChunks()
         print("PASS: prose reflow and code tokens")
+    }
+
+    static func testNativeTextLayoutRouting() {
+        let ordinary: [InlineRun] = [.text("Plain "), .strong("strong"), .chip("inline_code", .code)]
+        expect(
+            InlineRun.usesNativeTextLayout(ordinary),
+            "ordinary prose and non-actionable code use one native text layout"
+        )
+        let path: [InlineRun] = [.text("Open "), .chip("/Users/example/Project/File.swift", .file("swift"))]
+        expect(
+            !InlineRun.usesNativeTextLayout(path),
+            "actionable path chips keep the interactive flow layout"
+        )
+        let url: [InlineRun] = [.text("Visit "), .chip("https://example.com", .url)]
+        expect(
+            !InlineRun.usesNativeTextLayout(url),
+            "actionable URL chips keep the interactive flow layout"
+        )
+    }
+
+    static func testCodeDisplayChunks() {
+        let source = Array(repeating: "let stableRow = true\n", count: 2_000).joined()
+        let chunks = CodeDisplayChunker.chunks(source)
+        expect(chunks.count > 4, "very long code is split into stable display rows")
+        expect(chunks.joined() == source, "code display chunking is lossless")
+        let grown = source + "let liveTail = true\n"
+        let grownChunks = CodeDisplayChunker.chunks(grown)
+        expect(
+            Array(grownChunks.prefix(chunks.count - 1)) == Array(chunks.prefix(chunks.count - 1)),
+            "streaming code preserves every completed display chunk"
+        )
     }
 
     static func testCodeTokens() {
@@ -96,6 +133,103 @@ struct ProseCheck {
         let text = ProseReflow.reflow("前面`<at id=工号>## 不是标题</at>`后面。## 问题现象后面是一段足够长的正文内容")
         expectContains(text, "`<at id=工号>## 不是标题</at>`", "hashes inside code stay put")
         expectContains(text, "\n## 问题现象\n", "real heading still splits")
+    }
+
+    static func testStandardMarkdownHeadingsStayOnOneLine() {
+        let headings = [
+            "## 1. Agent 的瓶颈不是\u{201c}知不知道\u{201d}，而是\u{201c}做不做得对\u{201d}",
+            "## 4. Gemini 的优势可能没有对准 Agent 所需的能力分布",
+            "## 6. Agent 表现是模型和 Harness 的乘积",
+        ]
+        let source = headings.joined(separator: "\n\n")
+        let rendered = ProseReflow.reflow(source)
+        for heading in headings {
+            expectContains(rendered, heading, "standard Markdown heading stays intact")
+        }
+        expect(!rendered.contains("## 4. Gemini 的优势可能没有对准 Agen\n"), "heading cannot split inside Agent")
+        expect(!rendered.contains("## 6. Agent 表现是模型和 Harness\n"), "heading cannot move its suffix into a paragraph")
+    }
+
+    static func testDisplayMathDelimiters() {
+        expect(
+            MarkdownMath.blockExpression(from: "\\[\n0.95^{20} \\approx 36\\%\n\\]") == "0.95^{20} \\approx 36\\%",
+            "backslash-bracket display math is recognized and stripped"
+        )
+        expect(
+            MarkdownMath.blockExpression(from: "$$Agent = model \\times tools$$") == "Agent = model \\times tools",
+            "double-dollar display math is recognized and stripped"
+        )
+        expect(MarkdownMath.blockExpression(from: "[plain text]") == nil, "plain brackets are not math")
+        let document = """
+        模型每一步有 95% 的成功率：
+
+        \\[
+        0.95^{20} \\approx 36\\%
+        \\]
+
+        世界知识提升的是局部判断上限。
+        """
+        expect(
+            MarkdownMath.splitBlocks(document) == [
+                .text("模型每一步有 95% 的成功率："),
+                .display("0.95^{20} \\approx 36\\%"),
+                .text("世界知识提升的是局部判断上限。"),
+            ],
+            "display math is isolated from the surrounding Markdown"
+        )
+        expect(
+            MarkdownMath.typesetExpression("Agent 表现 = 模型策略 \\times 工具设计")
+                == "Agent \\text{表现} = \\text{模型策略} \\times \\text{工具设计}",
+            "CJK labels are placed in LaTeX text mode"
+        )
+        expect(
+            MarkdownMath.nativeExpression("0.95^{20} \\approx 36\\%") == "0.95²⁰ ≈ 36%",
+            "simple numeric display math gets a readable native representation"
+        )
+        expect(
+            MarkdownMath.nativeExpression("Agent 表现 = 模型策略 \\times 工具设计")
+                == "Agent 表现 = 模型策略 × 工具设计",
+            "mixed CJK equations stay in native text with rendered operators"
+        )
+        expect(MarkdownMath.nativeExpression("\\frac{1}{2}") == nil, "complex LaTeX stays on the MathJax path")
+    }
+
+    static func testEmphasisBoundaryWhitespace() {
+        let runs = MarkdownEmphasis.runs(for: "边界划得很干净，状态机经过推演。 ")
+        expect(runs == [.strong("边界划得很干净，状态机经过推演。"), .text(" ")], "move trailing space outside the semantic bold run \(runs)")
+
+        let multiline = MarkdownEmphasis.runs(for: "第一句。\n第二句。\u{3000}")
+        expect(multiline == [.strong("第一句。\n第二句。"), .text("\u{3000}")], "newlines and Chinese punctuation remain inside bold \(multiline)")
+        expect(
+            InlineRun.strong("一段很长的中文句子。").replacingText(with: "句子后半段。") == .strong("句子后半段。"),
+            "line wrapping preserves strong semantics instead of splitting Markdown delimiters"
+        )
+        expect(MarkdownEmphasis.runs(for: " ") == [.text("** **")], "empty emphasis stays literal")
+
+        let source = "**边界划得很干净。\n但数据库风险仍需解决。 **后文"
+        let span = MarkdownEmphasis.consumeLeading(in: source)
+        expect(span?.inner == "边界划得很干净。\n但数据库风险仍需解决。 ", "consume the complete multiline emphasis from source Markdown")
+        expect(span?.remainder == "后文", "leave following prose outside the emphasis")
+        expect(
+            span.map { MarkdownEmphasis.runs(for: $0.inner) }
+                == [.strong("边界划得很干净。\n但数据库风险仍需解决。"), .text(" ")],
+            "the production delimiter seam emits semantic strong text with trailing whitespace outside"
+        )
+    }
+
+    static func testBoldNumberedTitles() {
+        let source = """
+        ## 主要风险，按严重度排
+
+        **1. 多维表格是唯一存储（10.1、9.3）。** 业务数据、全量版本都在 Base。
+
+        **2. 检索快照同步保存门槛（5.4）。** 每次在线检索必须先写完快照再返回。
+        """
+        let rendered = ProseReflow.reflow(source)
+        expectContains(rendered, "\n1. **多维表格是唯一存储（10.1、9.3）。** 业务数据", "preserve the first bold numbered title")
+        expectContains(rendered, "\n2. **检索快照同步保存门槛（5.4）。** 每次在线检索", "preserve the second bold numbered title")
+        expect(!rendered.contains("\n**\n"), "do not leave an orphan emphasis marker\n---\n\(rendered)\n---")
+        expect(!rendered.contains("。 **"), "do not move closing emphasis after punctuation\n---\n\(rendered)\n---")
     }
 
     static func testKinsokuWrap() {

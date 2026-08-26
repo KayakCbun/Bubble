@@ -33,6 +33,14 @@ enum OverlayPaths {
         root.appendingPathComponent("control.json")
     }
 
+    static var steeringDirectory: URL {
+        root.appendingPathComponent("steering", isDirectory: true)
+    }
+
+    static func steeringControlFile(sessionId: String) -> URL {
+        steeringDirectory.appendingPathComponent("\(sessionId).json")
+    }
+
     static var agentsFile: URL {
         root.appendingPathComponent("AGENTS.md")
     }
@@ -103,6 +111,7 @@ enum OverlayPaths {
         try? fm.createDirectory(at: workspace, withIntermediateDirectories: true)
         try? fm.createDirectory(at: imagesDirectory, withIntermediateDirectories: true)
         try? fm.createDirectory(at: runtime, withIntermediateDirectories: true)
+        try? fm.createDirectory(at: steeringDirectory, withIntermediateDirectories: true)
         BubbleConfig.ensureAgentsFile()
         BubbleConfig.ensureWorkspaceExtension()
         BubbleConfig.ensureWorkspaceTrust()

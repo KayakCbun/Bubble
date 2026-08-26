@@ -37,12 +37,13 @@ macOS may require **System Settings → Privacy & Security → Open Anyway**.
 
 3. Open Bubble and type `/setup`. That installs Pi and `pi-acp` into `~/.bubble/runtime` and reconnects. If Node is missing or too old, `/setup` opens the Node download page instead.
 
-   Manual fallback, if you already use Pi from a terminal:
+   If you already use Pi from a terminal, Bubble can reuse that Pi installation:
 
    ```bash
    curl -fsSL https://pi.dev/install.sh | sh
-   npm install -g pi-acp
    ```
+
+   Still run `/setup` once. Bubble installs its pinned, branch-capable ACP adapter under `~/.bubble/runtime`.
 
 4. Sign in:
 
@@ -60,7 +61,7 @@ A menu-bar icon appears. There is no Dock icon.
 - Click the menu bar icon → **Toggle Overlay** if the hotkey is not granted yet.
 - Type and press Enter.
 - `/` opens Pi commands, prompt templates, and `/skill:name`.
-- `/login` signs in a provider. `/resume` switches sessions. `/tree` lists this session’s user turns.
+- `/login` signs in a provider. `/resume` switches sessions. `/tree` browses conversation branch points.
 - `@` fuzzy-searches workspace files; `~/` and absolute paths also complete. `@clipboard` attaches the live clipboard (text, image, files).
 - `/open` searches installed Mac apps and launches one.
 - `$` picks a skill and inserts `/skill:name` so Pi loads it.
@@ -80,7 +81,7 @@ Bubble follows Pi’s editor triggers:
 | `/setup` | Install Pi and `pi-acp` into `~/.bubble/runtime` (opens Node download if Node is missing) |
 | `/login` | Sign in a provider (API key or Pi in Terminal) |
 | `/resume` | Switch to a previous Bubble session |
-| `/tree` | List this session’s user turns; `/tree 3` copies one into the composer |
+| `/tree` | Browse earlier messages and edit one into a new in-session branch |
 | `/open` | Search and launch installed Mac apps |
 | `/mounts` | Browse folders under `~/`. Click a row to open it; the status icon mounts or unmounts |
 | `@` | File mention from `~/.bubble/workspace`, or `~/` / absolute paths |
@@ -90,6 +91,14 @@ Bubble follows Pi’s editor triggers:
 `/help` lists commands and skills. Overlay-local: `/setup`, `/install`, `/login`, `/logout`, `/resume`, `/tree`, `/reload`, `/clear`, `/new`, `/copy`, `/quit`, `/model`, `/thinking`, `/agents`, `/open`, `/mounts`, `/clipboard`. `/skill` lists installed skills. Others such as `/compact` and `/skill:research` are sent to Pi.
 
 Short phrases like `打开 Safari` or `open WeChat` also launch the matching app directly.
+
+## Conversation branches
+
+Hover a user message and choose the branch icon to edit it into an alternative prompt. Hover an assistant response and choose **Branch from here** to continue from that response with a different prompt. Sending commits the change to Pi's conversation tree without creating another `/resume` session.
+
+When a branch point has multiple alternatives, Bubble shows `‹ 2 / 3 ›` below the active user message. Use the arrows to switch paths. `/tree` opens the same branch points from the composer. Bubble remembers the selected path across relaunches.
+
+Branching image messages is not supported yet; the branch action explains that limitation instead of dropping the image silently.
 
 ## Mac capabilities
 

@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import BeautifulMermaid
+import BubbleDiagramSupport
 
 final class MermaidZoomController: NSObject, NSWindowDelegate {
     static let shared = MermaidZoomController()
@@ -38,7 +39,7 @@ final class MermaidZoomController: NSObject, NSWindowDelegate {
         }
         let hosting = NSHostingView(rootView: root)
         hosting.wantsLayer = true
-        hosting.layer?.backgroundColor = NSColor.clear.cgColor
+        hosting.layer?.backgroundColor = NSColor.white.cgColor
         hosting.frame = NSRect(origin: .zero, size: frame.size)
         panel.contentView = hosting
         panel.setFrame(frame, display: true)
@@ -68,8 +69,8 @@ final class MermaidZoomController: NSObject, NSWindowDelegate {
         panel.isFloatingPanel = true
         panel.level = .statusBar
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        panel.isOpaque = false
-        panel.backgroundColor = .clear
+        panel.isOpaque = true
+        panel.backgroundColor = .white
         panel.titlebarAppearsTransparent = true
         panel.titleVisibility = .hidden
         panel.isMovableByWindowBackground = true
@@ -101,7 +102,6 @@ private struct MermaidZoomView: View {
     var source: String
     var image: NSImage?
     var onClose: () -> Void
-    @Environment(\.colorScheme) private var colorScheme
     @State private var hiRes: NSImage?
     @State private var webHeight: CGFloat = 520
     @State private var webFailed = false
@@ -109,7 +109,7 @@ private struct MermaidZoomView: View {
 
     var body: some View {
         ZStack {
-            Color.black.opacity(0.28)
+            Color.white
                 .ignoresSafeArea()
                 .onTapGesture(perform: onClose)
             VStack(spacing: 0) {
@@ -146,15 +146,16 @@ private struct MermaidZoomView: View {
                         )
                         .padding(20)
                 }
-                .background(Color.primary.opacity(colorScheme == .dark ? 0.06 : 0.03))
+                .background(Color.white)
             }
             .background(
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .fill(.regularMaterial)
+                    .fill(Color.white)
             )
             .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
             .padding(18)
         }
+        .preferredColorScheme(.light)
         .onAppear { renderHiRes() }
         .gesture(
             MagnificationGesture().onChanged { value in
@@ -176,7 +177,8 @@ private struct MermaidZoomView: View {
                 height: $webHeight,
                 failed: $webFailed,
                 interactive: true,
-                maxHeight: 4200
+                maxHeight: 4200,
+                opaqueBackground: MermaidCanvasAppearance.isOpaqueWhite
             )
             .frame(minWidth: 720, minHeight: webHeight)
             .frame(height: webHeight)
@@ -197,15 +199,11 @@ private struct MermaidZoomView: View {
 
     private func renderHiRes() {
         let src = MessagePart.nativeMermaidSource(source)
-        let dark = colorScheme == .dark
-        DispatchQueue.global(qos: .userInitiated).async {
-            var theme = dark ? DiagramTheme.zincDark : DiagramTheme.zincLight
-            theme.transparent = true
-            let rendered = try? MermaidRenderer.renderImage(source: src, theme: theme, scale: 3.0)
-            DispatchQueue.main.async {
-                if let rendered {
-                    hiRes = MermaidImageFix.upright(rendered)
-                }
+        var theme = DiagramTheme.zincLight
+        theme.transparent = !MermaidCanvasAppearance.isOpaqueWhite
+        MermaidImageRenderer.render(source: src, theme: theme, scale: 3.0) { result in
+            if case .success(let upright) = result, let upright {
+                hiRes = upright
             }
         }
     }

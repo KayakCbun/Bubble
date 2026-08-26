@@ -1,6 +1,79 @@
 import CoreGraphics
 import Foundation
 
+enum OverlayHitTestPolicy {
+    static func shouldHide(
+        panelContainsClick: Bool,
+        visibleCardContainsClick: Bool
+    ) -> Bool {
+        !panelContainsClick || !visibleCardContainsClick
+    }
+}
+
+struct OverlayCardHitRegion {
+    var rect: CGRect
+    var cornerRadius: CGFloat
+
+    func contains(_ point: CGPoint) -> Bool {
+        guard rect.contains(point) else { return false }
+        let radius = min(cornerRadius, rect.width / 2, rect.height / 2)
+        if radius <= 0 { return true }
+        if rect.insetBy(dx: radius, dy: 0).contains(point) { return true }
+        if rect.insetBy(dx: 0, dy: radius).contains(point) { return true }
+        let center = CGPoint(
+            x: point.x < rect.midX ? rect.minX + radius : rect.maxX - radius,
+            y: point.y < rect.midY ? rect.minY + radius : rect.maxY - radius
+        )
+        let dx = point.x - center.x
+        let dy = point.y - center.y
+        return dx * dx + dy * dy <= radius * radius
+    }
+}
+
+struct OverlayLayout: Equatable {
+    var totalHeight: CGFloat
+    var transcriptHeight: CGFloat
+    var pickerHeight: CGFloat
+    var commandPaletteHeight: CGFloat
+    var transcriptWidth: CGFloat
+    var composerHeight: CGFloat
+    var previewWidth: CGFloat = 0
+    var chromeVisible: Bool = false
+}
+
+enum OverlayPalettePolicy {
+    static let rowHeight: CGFloat = 52
+    static let rowSpacing: CGFloat = 2
+    static let commandVisibleLimit = 7
+    static let mountVisibleLimit = 9
+    static let captionChrome: CGFloat = 24
+    static let searchChrome: CGFloat = 40
+    static let padding: CGFloat = 16
+
+    static func visibleRowCount(items: Int, isMount: Bool) -> Int {
+        let limit = isMount ? mountVisibleLimit : commandVisibleLimit
+        return min(max(items, 0), limit)
+    }
+
+    static func needsScroll(items: Int, isMount: Bool) -> Bool {
+        items > (isMount ? mountVisibleLimit : commandVisibleLimit)
+    }
+
+    static func listHeight(items: Int, isMount: Bool) -> CGFloat {
+        let rows = visibleRowCount(items: items, isMount: isMount)
+        guard rows > 0 else { return 0 }
+        return CGFloat(rows) * rowHeight + CGFloat(rows - 1) * rowSpacing
+    }
+
+    static func chromeHeight(items: Int, isMount: Bool, hasSearch: Bool) -> CGFloat {
+        guard items > 0 else { return 0 }
+        return listHeight(items: items, isMount: isMount)
+            + captionChrome
+            + (hasSearch ? searchChrome : 0)
+            + padding
+    }
+}
+
 enum OverlayLayoutPolicy {
     static func isTranscriptPresented(itemCount: Int, isStartingSession: Bool) -> Bool {
         itemCount > 0 || isStartingSession
@@ -10,18 +83,72 @@ enum OverlayLayoutPolicy {
         isPresented ? maximum : 0
     }
 
+    /// Quote and attachment chrome grow the composer into the transcript so the
+    /// NSPanel stays put. Springing the whole overlay relayouts every message.
+    static func fittedTranscriptHeight(
+        base: CGFloat,
+        composerHeight: CGFloat,
+        restingComposerHeight: CGFloat,
+        minimum: CGFloat = 160
+    ) -> CGFloat {
+        guard base > 1 else { return 0 }
+        let extra = max(0, composerHeight - restingComposerHeight)
+        return max(minimum, base - extra)
+    }
+
     /// Extra width the markdown pane adds to the right of the conversation card.
     static func previewExtraWidth(_ previewWidth: CGFloat, gap: CGFloat) -> CGFloat {
         previewWidth > 1 ? previewWidth + gap : 0
+    }
+
+    /// Extra card origin relative to the conversation. The extra pane is painted
+    /// beside the conversation and must not participate in the conversation's
+    /// layout width, or SwiftUI will shift the card left of the current panel.
+    static func extraPaneOriginX(conversationWidth: CGFloat, gap: CGFloat) -> CGFloat {
+        conversationWidth + gap
     }
 
     static func contentWidth(chatWidth: CGFloat, previewWidth: CGFloat, gap: CGFloat) -> CGFloat {
         chatWidth + previewExtraWidth(previewWidth, gap: gap)
     }
 
+    static func fittedChatWidth(
+        desired: CGFloat,
+        sideStageWidth: CGFloat,
+        visibleWidth: CGFloat,
+        gap: CGFloat,
+        bleed: CGFloat,
+        minimum: CGFloat
+    ) -> CGFloat {
+        guard sideStageWidth > 1 else { return desired }
+        let available = visibleWidth - sideStageWidth - gap - bleed * 2
+        return min(desired, max(minimum, available.rounded(.down)))
+    }
+
     /// Left edge of the panel so the visual center (composer) stays put while preview opens.
     static func panelOriginX(centerX: CGFloat, contentWidth: CGFloat, bleed: CGFloat) -> CGFloat {
         centerX - (contentWidth + bleed * 2) / 2
+    }
+
+    /// Composer X in the current panel, so the input stays centered while the
+    /// conversation slides left into reserved side-stage width.
+    static func composerOriginX(
+        panelWidth: CGFloat,
+        composerWidth: CGFloat,
+        bleed: CGFloat
+    ) -> CGFloat {
+        bleed + (panelWidth - bleed * 2 - composerWidth) / 2
+    }
+
+    /// Centering a target-width card stack in a still-animating smaller panel
+    /// chops the conversation's leading edge. Pinning to leading does not.
+    static func conversationLeadingClip(
+        currentContentWidth: CGFloat,
+        stackWidth: CGFloat,
+        pinToLeading: Bool
+    ) -> CGFloat {
+        if pinToLeading { return 0 }
+        return max(0, (stackWidth - currentContentWidth) / 2)
     }
 
     static func constrainedFrame(
@@ -56,13 +183,34 @@ enum OverlayPixel {
     }
 }
 
+enum RunningSweepPolicy {
+    static let cycleDuration: TimeInterval = 1.45
+    static let minimumFrameInterval: TimeInterval = 1.0 / 120.0
+    static let highlightRadius = 0.24
+    static let offscreenPadding = 0.12
+
+    static func progress(at time: TimeInterval) -> Double {
+        let cycle = max(cycleDuration, .leastNonzeroMagnitude)
+        let remainder = time.truncatingRemainder(dividingBy: cycle)
+        return (remainder < 0 ? remainder + cycle : remainder) / cycle
+    }
+
+    static func highlightCenter(at time: TimeInterval) -> Double {
+        let start = -(highlightRadius + offscreenPadding)
+        let end = 1 + highlightRadius + offscreenPadding
+        return start + (end - start) * progress(at: time)
+    }
+}
+
 enum OverlaySpring {
-    static let panelResponse: CGFloat = 0.32
-    static let panelDamping: CGFloat = 0.94
-    static let snappyResponse: CGFloat = 0.26
-    static let snappyDamping: CGFloat = 0.90
-    static let quickResponse: CGFloat = 0.18
-    static let quickDamping: CGFloat = 0.94
+    static let panelResponse: CGFloat = 0.22
+    static let panelDamping: CGFloat = 0.86
+    static let snappyResponse: CGFloat = 0.18
+    static let snappyDamping: CGFloat = 0.82
+    static let quickResponse: CGFloat = 0.14
+    static let quickDamping: CGFloat = 0.88
+    static let fadeResponse: CGFloat = 0.16
+    static let fadeDamping: CGFloat = 0.92
 
     static func step(
         value: inout CGFloat,

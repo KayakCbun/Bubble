@@ -16,6 +16,7 @@ struct CommandTapCheck {
         heldCommandIsNotATap()
         slowPairDoesNotOpen()
         bounceDoesNotOpen()
+        focusReturnPolicy()
         print("PASS: command tap policy")
     }
 
@@ -68,5 +69,32 @@ struct CommandTapCheck {
         expect(!tap.commandReleased(at: 1.05, extras: false), "first down")
         tap.commandPressed(at: 1.08, extras: false)
         expect(!tap.commandReleased(at: 1.12, extras: false), "key bounce is too fast")
+    }
+
+    static func focusReturnPolicy() {
+        expect(
+            CommandFocusReturnPolicy.remembers(frontmostPID: 42, bubblePID: 7),
+            "opening from another app remembers where focus came from"
+        )
+        expect(
+            !CommandFocusReturnPolicy.remembers(frontmostPID: 7, bubblePID: 7),
+            "Bubble must not remember itself as the focus return target"
+        )
+        expect(
+            !CommandFocusReturnPolicy.remembers(frontmostPID: nil, bubblePID: 7),
+            "a missing frontmost app is not a return target"
+        )
+        expect(
+            CommandFocusReturnPolicy.preservesExistingTarget(panelVisible: true, requestedTargetPresent: false),
+            "a redundant ordinary show must preserve the CMD focus return target"
+        )
+        expect(
+            !CommandFocusReturnPolicy.preservesExistingTarget(panelVisible: false, requestedTargetPresent: false),
+            "an ordinary show from hidden starts without a stale focus return target"
+        )
+        expect(
+            !CommandFocusReturnPolicy.preservesExistingTarget(panelVisible: true, requestedTargetPresent: true),
+            "an explicit CMD origin replaces any prior target"
+        )
     }
 }

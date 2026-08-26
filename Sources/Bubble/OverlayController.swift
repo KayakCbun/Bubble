@@ -6,8 +6,10 @@ final class OverlayController: NSObject, NSWindowDelegate {
 
     private let panel = OverlayPanel()
     private let rootView = OverlayRootView(frame: .zero)
+    private weak var hostingView: NSView?
     private let tapMonitor = CommandTapMonitor()
     private var mouseMonitor: Any?
+    private var localMouseMonitor: Any?
     private var localKeys: Any?
     private var connecting = false
     private var restoredPosition = false
@@ -21,7 +23,14 @@ final class OverlayController: NSObject, NSWindowDelegate {
     private var pendingTranscriptWide: Bool?
     private var pendingLayout: OverlayLayout?
     private var layoutQueued = false
+    private var lastAppliedLayout: OverlayLayout?
     private let frameAnimator = OverlayFrameAnimator()
+    private var commandReturnApplication: NSRunningApplication?
+    private var workspaceRevealGeneration = 0
+    private var workspaceRevealPending = false
+    private var chromeRevealGeneration = 0
+    private var chromeRevealPending = false
+    private var chromeHideGeneration = 0
 
     private let positionCenterXKey = "bubble.position.centerX"
     private let positionBottomYKey = "bubble.position.bottomY"
@@ -30,13 +39,25 @@ final class OverlayController: NSObject, NSWindowDelegate {
         OverlayPaths.bootstrap()
         installView()
         tapMonitor.onDoubleTap = { [weak self] in
-            self?.toggle()
+            self?.toggleFromCommandTap()
         }
         tapMonitor.start()
         mouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             Task { @MainActor in
                 self?.hideIfClickOutside()
             }
+        }
+        localMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
+            guard let self, event.window === self.panel else { return event }
+            let visible = self.rootView.containsVisibleCard(atScreenPoint: NSEvent.mouseLocation)
+            if OverlayHitTestPolicy.shouldHide(
+                panelContainsClick: true,
+                visibleCardContainsClick: visible
+            ) {
+                self.hide()
+                return nil
+            }
+            return event
         }
         localKeys = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             if event.keyCode == 53 {
@@ -99,6 +120,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
     func stop() {
         tapMonitor.stop()
         if let mouseMonitor { NSEvent.removeMonitor(mouseMonitor) }
+        if let localMouseMonitor { NSEvent.removeMonitor(localMouseMonitor) }
         if let localKeys { NSEvent.removeMonitor(localKeys) }
         store.prepareToQuit()
         store.client.stop()
@@ -114,8 +136,35 @@ final class OverlayController: NSObject, NSWindowDelegate {
         }
     }
 
+    private func toggleFromCommandTap() {
+        if panel.isVisible {
+            let application = commandReturnApplication
+            commandReturnApplication = nil
+            hide(animated: true, returningFocusTo: application)
+            return
+        }
+        let frontmost = NSWorkspace.shared.frontmostApplication
+        let bubblePID = ProcessInfo.processInfo.processIdentifier
+        let origin = CommandFocusReturnPolicy.remembers(
+            frontmostPID: frontmost?.processIdentifier,
+            bubblePID: bubblePID
+        ) ? frontmost : nil
+        show(returningFocusTo: origin)
+    }
+
     func show() {
+        show(returningFocusTo: nil)
+    }
+
+    private func show(returningFocusTo application: NSRunningApplication?) {
+        if !CommandFocusReturnPolicy.preservesExistingTarget(
+            panelVisible: panel.isVisible,
+            requestedTargetPresent: application != nil
+        ) {
+            commandReturnApplication = application
+        }
         restorePositionIfNeeded()
+        syncVisibleScreenWidth()
         hideGeneration += 1
         isHiding = false
         panel.ignoresMouseEvents = false
@@ -123,7 +172,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         rememberRestPosition(panel.frame)
         if appearing {
             var start = panel.frame
-            start.origin.y -= 10
+            start.origin.y -= 16
             CATransaction.begin()
             CATransaction.setDisableActions(true)
             panel.alphaValue = 0
@@ -142,6 +191,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         if appearing || panel.alphaValue < 0.99 {
             let dest = targetPanelFrame ?? panel.frame
             isUpdatingFrame = true
+            store.setStreamUISuspended(true)
             if appearing {
                 frameAnimator.syncFromPanel()
             }
@@ -149,19 +199,30 @@ final class OverlayController: NSObject, NSWindowDelegate {
                 self?.finishFrameAnimation()
             }
             frameAnimator.retarget(frame: dest, alpha: 1)
+        } else {
+            store.setStreamUISuspended(false)
         }
         store.requestFocus()
-        store.refreshCatalog()
+        OverlayPulse.shared.onNextFrame { [weak self] in
+            self?.store.refreshCatalog()
+        }
         Task { @MainActor in
             await connectIfNeeded()
         }
     }
 
     func hide(animated: Bool = true) {
+        hide(animated: animated, returningFocusTo: nil)
+    }
+
+    private func hide(animated: Bool, returningFocusTo application: NSRunningApplication?) {
+        commandReturnApplication = nil
+        store.setStreamUISuspended(true)
         ImageZoomController.shared.close()
         MermaidZoomController.shared.close()
         guard panel.isVisible else {
             panel.orderOut(nil)
+            application?.activate(options: [])
             return
         }
         guard animated else {
@@ -169,6 +230,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
             frameAnimator.cancel()
             panel.alphaValue = 1
             panel.orderOut(nil)
+            application?.activate(options: [])
             return
         }
         if isHiding { return }
@@ -178,7 +240,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         isUpdatingFrame = true
         panel.ignoresMouseEvents = true
         var dest = panel.frame
-        dest.origin.y -= 8
+        dest.origin.y -= 14
         frameAnimator.syncFromPanel()
         frameAnimator.onSettled = { [weak self] in
             guard let self, self.hideGeneration == generation, self.isHiding else { return }
@@ -193,6 +255,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
             }
             self.isHiding = false
             self.finishFrameAnimation()
+            application?.activate(options: [])
         }
         frameAnimator.retarget(frame: dest, alpha: 0)
     }
@@ -208,6 +271,19 @@ final class OverlayController: NSObject, NSWindowDelegate {
         store.onHideOverlay = { [weak self] in
             self?.hide()
         }
+        store.onWorkspacePanePresentationRequested = { [weak self] in
+            self?.requestWorkspacePaneReveal()
+        }
+        store.onSideStageChromePresentationRequested = { [weak self] in
+            self?.requestSideStageChromeReveal()
+            self?.position()
+        }
+        store.onSideStageChromeDismissalRequested = { [weak self] in
+            self?.requestSideStageChromeHide()
+        }
+        store.onSideStageChromeInvalidated = { [weak self] in
+            self?.invalidateSideStageChrome()
+        }
         let root = OverlayView(
             store: store,
             onEscape: { [weak self] in self?.hide() },
@@ -217,6 +293,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
             self?.scheduleApply(layout)
         }
         let hosting = NSHostingView(rootView: root)
+        hostingView = hosting
         hosting.wantsLayer = true
         hosting.safeAreaRegions = []
         hosting.layer?.backgroundColor = NSColor.clear.cgColor
@@ -242,7 +319,10 @@ final class OverlayController: NSObject, NSWindowDelegate {
                 NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
             },
             onClose: { [weak self] in
-                self?.store.closeMarkdownPreview()
+                self?.store.closeSideStage()
+            },
+            onBack: { [weak self] in
+                self?.store.returnToWorkspaceStage()
             }
         )
         panel.contentView = rootView
@@ -256,6 +336,26 @@ final class OverlayController: NSObject, NSWindowDelegate {
     }
 
     private func scheduleApply(_ layout: OverlayLayout) {
+        guard OverlayRenderPolicy.layoutNeedsApply(previous: lastAppliedLayout, next: layout) else {
+            return
+        }
+        let previousPreviewWidth = lastAppliedLayout?.previewWidth ?? 0
+        if !OverlayRenderPolicy.shouldDeferLayoutPulse(
+            previousPreviewWidth: previousPreviewWidth,
+            nextPreviewWidth: layout.previewWidth
+        ) {
+            pendingLayout = nil
+            apply(layout)
+            return
+        }
+        if !OverlayRenderPolicy.shouldAnimateSideStageResize(
+            previousPreviewWidth: previousPreviewWidth,
+            nextPreviewWidth: layout.previewWidth
+        ) {
+            pendingLayout = nil
+            apply(layout)
+            return
+        }
         pendingLayout = layout
         guard !layoutQueued else { return }
         layoutQueued = true
@@ -275,9 +375,9 @@ final class OverlayController: NSObject, NSWindowDelegate {
         let hasTranscript = layout.transcriptHeight > 1
             || !store.visibleItems.isEmpty
             || store.isStartingSession
-            || store.markdownPreview != nil
+            || store.sideStagePresented
         let chatWidth = hasTranscript
-            ? OverlayMetrics.transcriptWidth(wide: store.transcriptWide)
+            ? layout.transcriptWidth
             : OverlayMetrics.inputWidth
         let previewExtra = OverlayLayoutPolicy.previewExtraWidth(
             layout.previewWidth,
@@ -310,18 +410,34 @@ final class OverlayController: NSObject, NSWindowDelegate {
                 || abs(panel.frame.width - frame.width) > 0.5
                 || abs(panel.frame.origin.x - frame.origin.x) > 0.5
         )
-        if destChanged {
-            updatePanelFrame(frame, animated: panel.isVisible)
-        }
-        applyMask(layout: OverlayLayout(
+        let applied = OverlayLayout(
             totalHeight: height,
             transcriptHeight: layout.transcriptHeight,
             pickerHeight: layout.pickerHeight,
             commandPaletteHeight: layout.commandPaletteHeight,
             transcriptWidth: chatWidth,
             composerHeight: layout.composerHeight,
-            previewWidth: layout.previewWidth
-        ), width: chatWidth)
+            previewWidth: layout.previewWidth,
+            chromeVisible: layout.chromeVisible
+        )
+        let animateFrame = panel.isVisible && OverlayRenderPolicy.shouldAnimatePanelFrame(
+            previous: lastAppliedLayout,
+            next: applied
+        )
+        let needsMask = OverlayRenderPolicy.maskNeedsApply(previous: lastAppliedLayout, next: applied)
+        if destChanged, !animateFrame, needsMask {
+            applyMask(layout: applied, width: chatWidth)
+        }
+        if destChanged {
+            updatePanelFrame(frame, animated: animateFrame)
+        }
+        if needsMask, !destChanged || animateFrame {
+            applyMask(layout: applied, width: chatWidth)
+        }
+        lastAppliedLayout = applied
+        if workspaceRevealPending, layout.previewWidth > 0, !destChanged {
+            scheduleWorkspacePaneRevealOnNextFrame()
+        }
     }
 
     private func position() {
@@ -329,23 +445,23 @@ final class OverlayController: NSObject, NSWindowDelegate {
             OverlayMetrics.minHeight,
             panel.frame.height - OverlayMetrics.shadowInset * 2
         )
+        let previewWidth = currentPreviewWidth
+        let transcriptWidth = OverlayMetrics.fittedTranscriptWidth(
+            wide: store.transcriptWide,
+            sideStageWidth: previewWidth,
+            visibleWidth: store.visibleScreenWidth
+        )
         apply(OverlayLayout(
             totalHeight: contentHeight,
-            transcriptHeight: (store.visibleItems.isEmpty && !store.isStartingSession && store.markdownPreview == nil)
+            transcriptHeight: (store.visibleItems.isEmpty && !store.isStartingSession && !store.sideStagePresented)
                 ? 0
                 : max(0, contentHeight - OverlayMetrics.minHeight - OverlayMetrics.stackSpacing),
             pickerHeight: store.showAvatarPicker ? OverlayMetrics.pickerHeight : 0,
-            commandPaletteHeight: store.slashPaletteHeight,
-            transcriptWidth: OverlayMetrics.transcriptWidth(wide: store.transcriptWide),
-            composerHeight: OverlayComposer.composerHeight(
-                draft: store.draft,
-                minHeight: OverlayMetrics.minHeight,
-                avatarSize: OverlayMetrics.avatarSize,
-                workspaceChip: store.activeWorkspaceBrief?.isActive == true,
-                chipHeight: OverlayMetrics.chipHeight,
-                attachmentCount: store.draftClips.count + store.draftImages.count
-            ),
-            previewWidth: currentPreviewWidth
+            commandPaletteHeight: store.slashPaletteChromeHeight,
+            transcriptWidth: transcriptWidth,
+            composerHeight: store.composerChromeHeight,
+            previewWidth: previewWidth,
+            chromeVisible: store.sideStageChromeVisible
         ))
     }
 
@@ -356,7 +472,12 @@ final class OverlayController: NSObject, NSWindowDelegate {
             commandPaletteHeight: layout.commandPaletteHeight,
             transcriptWidth: layout.transcriptWidth,
             composerHeight: layout.composerHeight,
-            previewWidth: layout.previewWidth
+            previewWidth: SideStageChromePolicy.hitPreviewWidth(
+                chromeVisible: store.sideStageChromeVisible,
+                previewWidth: layout.previewWidth
+            ),
+            previewIsMarkdown: store.markdownPreview != nil,
+            previewHasBack: store.canReturnToWorkspace
         )
     }
 
@@ -419,6 +540,8 @@ final class OverlayController: NSObject, NSWindowDelegate {
             return
         }
 
+        store.setStreamUISuspended(true)
+
         frameAnimator.onSettled = { [weak self] in
             self?.finishFrameAnimation()
         }
@@ -435,10 +558,99 @@ final class OverlayController: NSObject, NSWindowDelegate {
         }
         targetPanelFrame = nil
         isUpdatingFrame = false
+        if workspaceRevealPending,
+           OverlayRenderPolicy.shouldRefreshHostingSurfaceAfterFrameSettle {
+            hostingView?.needsDisplay = true
+        }
+        scheduleWorkspacePaneRevealOnNextFrame()
+        if !workspaceRevealPending,
+           OverlayRenderPolicy.shouldResumeStream(
+            panelVisible: panel.isVisible,
+            isMoving: isHiding || frameAnimator.isAnimating
+        ) {
+            store.setStreamUISuspended(false)
+        }
+    }
+
+    private func requestWorkspacePaneReveal() {
+        workspaceRevealPending = true
+        workspaceRevealGeneration += 1
+        store.setStreamUISuspended(true)
+        if (lastAppliedLayout?.previewWidth ?? 0) > 0,
+           !isUpdatingFrame,
+           !frameAnimator.isAnimating {
+            scheduleWorkspacePaneRevealOnNextFrame()
+        }
+    }
+
+    private func requestSideStageChromeReveal() {
+        chromeHideGeneration += 1
+        chromeRevealGeneration += 1
+        let generation = chromeRevealGeneration
+        chromeRevealPending = true
+        OverlayPulse.shared.onNextFrame { [weak self] in
+            guard let self,
+                  generation == self.chromeRevealGeneration,
+                  self.chromeRevealPending else { return }
+            self.chromeRevealPending = false
+            self.store.revealSideStageChrome()
+        }
+    }
+
+    private func requestSideStageChromeHide() {
+        chromeRevealPending = false
+        chromeRevealGeneration += 1
+        chromeHideGeneration += 1
+        let generation = chromeHideGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + SideStageChromePolicy.hideDuration) { [weak self] in
+            guard let self, generation == self.chromeHideGeneration else { return }
+            self.store.collapseSideStage()
+        }
+    }
+
+    private func invalidateSideStageChrome() {
+        chromeRevealPending = false
+        chromeRevealGeneration += 1
+        chromeHideGeneration += 1
+    }
+
+    private func scheduleWorkspacePaneRevealOnNextFrame() {
+        guard workspaceRevealPending else { return }
+        let generation = workspaceRevealGeneration
+        OverlayPulse.shared.onNextFrame { [weak self] in
+            guard let self,
+                  generation == self.workspaceRevealGeneration,
+                  self.workspaceRevealPending,
+                  !self.isUpdatingFrame,
+                  !self.frameAnimator.isAnimating else { return }
+            self.workspaceRevealPending = false
+            self.store.revealWorkspacePaneContent()
+            OverlayPulse.shared.onNextFrame { [weak self] in
+                guard let self,
+                      generation == self.workspaceRevealGeneration,
+                      !self.workspaceRevealPending else { return }
+                OverlayPulse.shared.onNextFrame { [weak self] in
+                    guard let self,
+                          generation == self.workspaceRevealGeneration else { return }
+                    self.store.uncoverWorkspacePane()
+                    if OverlayRenderPolicy.shouldResumeStream(
+                        panelVisible: self.panel.isVisible,
+                        isMoving: self.isHiding || self.frameAnimator.isAnimating
+                    ) {
+                        self.store.setStreamUISuspended(false)
+                    }
+                }
+            }
+        }
     }
 
     private var currentPreviewWidth: CGFloat {
-        store.markdownPreview == nil ? 0 : OverlayMetrics.previewWidth
+        SideStagePolicy.width(
+            showingMarkdown: store.markdownPreview != nil,
+            showingWorkspace: store.workspaceStage != nil,
+            markdownWidth: OverlayMetrics.previewWidth,
+            workspaceWidth: OverlayMetrics.previewWidth
+        )
     }
 
     private func rememberRestPosition(_ frame: NSRect) {
@@ -455,7 +667,12 @@ final class OverlayController: NSObject, NSWindowDelegate {
 
         var frame = targetPanelFrame ?? panel.frame
         let centerX = restCenterX ?? frame.midX
-        let targetWidth = OverlayMetrics.transcriptWidth(wide: targetWide)
+        syncVisibleScreenWidth()
+        let targetWidth = OverlayMetrics.fittedTranscriptWidth(
+            wide: targetWide,
+            sideStageWidth: currentPreviewWidth,
+            visibleWidth: store.visibleScreenWidth
+        )
         let previewExtra = OverlayLayoutPolicy.previewExtraWidth(
             currentPreviewWidth,
             gap: OverlayMetrics.stackSpacing
@@ -503,6 +720,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
     }
 
     func windowDidMove(_ notification: Notification) {
+        syncVisibleScreenWidth()
         guard panel.isVisible, !isUpdatingFrame, !isHiding else { return }
         rememberRestPosition(panel.frame)
         let defaults = UserDefaults.standard
@@ -523,17 +741,37 @@ final class OverlayController: NSObject, NSWindowDelegate {
     }
 
     private func currentVisibleFrame() -> NSRect? {
+        if let screen = panel.screen {
+            return screen.visibleFrame
+        }
+        let panelCenter = NSPoint(x: panel.frame.midX, y: panel.frame.midY)
+        if let screen = NSScreen.screens.first(where: { NSMouseInRect(panelCenter, $0.frame, false) }) {
+            return screen.visibleFrame
+        }
         let mouse = NSEvent.mouseLocation
         let screen = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) } ?? NSScreen.main
         return screen?.visibleFrame
     }
 
+    private func syncVisibleScreenWidth() {
+        let width = currentVisibleFrame()?.width ?? 1512
+        if abs(store.visibleScreenWidth - width) > 0.5 {
+            store.visibleScreenWidth = width
+        }
+    }
+
     private func hideIfClickOutside() {
         guard panel.isVisible, !isHiding, !store.overlayPinned else { return }
-        if MermaidZoomController.shared.containsMouse() || ImageZoomController.shared.containsMouse() {
+        if MermaidZoomController.shared.containsMouse()
+            || ImageZoomController.shared.containsMouse()
+            || FileChangeDiffController.shared.containsMouse() {
             return
         }
-        if !panel.frame.contains(NSEvent.mouseLocation) {
+        let click = NSEvent.mouseLocation
+        if OverlayHitTestPolicy.shouldHide(
+            panelContainsClick: panel.frame.contains(click),
+            visibleCardContainsClick: rootView.containsVisibleCard(atScreenPoint: click)
+        ) {
             hide()
         }
     }
@@ -582,8 +820,11 @@ final class OverlayController: NSObject, NSWindowDelegate {
             ImageZoomController.shared.close()
             return
         }
-        if store.markdownPreview != nil {
-            store.closeMarkdownPreview()
+        if FileChangeDiffController.shared.isVisible {
+            FileChangeDiffController.shared.close()
+            return
+        }
+        if store.handleSideStageEscape() {
             return
         }
         if MermaidZoomController.shared.isVisible {

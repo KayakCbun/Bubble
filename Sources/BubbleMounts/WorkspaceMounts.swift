@@ -9,6 +9,7 @@ public enum WorkspaceStatus: String, Codable, Equatable, Sendable {
 }
 
 public struct WorkspaceBrief: Codable, Equatable, Sendable {
+    public var runId: String?
     public var path: String
     public var name: String
     public var status: WorkspaceStatus
@@ -18,6 +19,7 @@ public struct WorkspaceBrief: Codable, Equatable, Sendable {
     public var changedPaths: [String]
 
     public init(
+        runId: String? = nil,
         path: String,
         name: String,
         status: WorkspaceStatus,
@@ -26,6 +28,7 @@ public struct WorkspaceBrief: Codable, Equatable, Sendable {
         question: String? = nil,
         changedPaths: [String] = []
     ) {
+        self.runId = runId
         self.path = path
         self.name = name
         self.status = status
@@ -38,6 +41,24 @@ public struct WorkspaceBrief: Codable, Equatable, Sendable {
     public var isActive: Bool {
         status == .running || status == .waiting
     }
+}
+
+public struct WorkspaceRelayRecord: Equatable, Sendable {
+    public var brief: WorkspaceBrief
+    public var sessionId: String?
+    public var anchorEntryId: String?
+
+    public init(brief: WorkspaceBrief, sessionId: String? = nil, anchorEntryId: String? = nil) {
+        self.brief = brief
+        self.sessionId = sessionId
+        self.anchorEntryId = anchorEntryId
+    }
+}
+
+private struct WorkspaceRelayPayloadV1: Codable {
+    var brief: WorkspaceBrief
+    var sessionId: String?
+    var anchorEntryId: String?
 }
 
 public struct WorkspaceMount: Codable, Equatable, Sendable {
@@ -204,6 +225,15 @@ public enum WorkspaceRegistry {
         let normalized = normalize(path)
         if let index = store.mounts.firstIndex(where: { $0.path == normalized }) {
             store.mounts[index].sessionId = sessionId
+        }
+    }
+
+    public static func resetSessions(in store: inout WorkspaceStoreFile) {
+        for index in store.mounts.indices {
+            store.mounts[index].sessionId = nil
+        }
+        for index in store.recent.indices {
+            store.recent[index].sessionId = nil
         }
     }
 
@@ -440,7 +470,12 @@ public enum WorkspaceRegistry {
         """
     }
 
-    public static func injectionPrompt(_ brief: WorkspaceBrief, home: String) -> String {
+    public static func injectionPrompt(
+        _ brief: WorkspaceBrief,
+        home: String,
+        sessionId: String? = nil,
+        anchorEntryId: String? = nil
+    ) -> String {
         var lines = [
             "The workspace run already finished. Summarize the result for the user in your own voice, then stop.",
             "Do not call workspace_run, mount_workspace, bash, or any other tool.",
@@ -450,6 +485,11 @@ public enum WorkspaceRegistry {
             "status: \(brief.status.rawValue)",
             "goal: \(brief.goal)",
         ]
+        let payload = WorkspaceRelayPayloadV1(
+            brief: brief,
+            sessionId: sessionId,
+            anchorEntryId: anchorEntryId
+        )
         if !brief.summary.isEmpty {
             lines.append("summary: \(clip(brief.summary, maxSummaryChars))")
         }
@@ -459,7 +499,72 @@ public enum WorkspaceRegistry {
         if !brief.changedPaths.isEmpty {
             lines.append("changed_paths: \(brief.changedPaths.prefix(maxChangedPaths).joined(separator: ", "))")
         }
+        if let data = try? JSONEncoder().encode(payload) {
+            lines.append("bubble_workspace_relay_v1: \(data.base64EncodedString())")
+        }
         return lines.joined(separator: "\n")
+    }
+
+    public static func parseInjectionPrompt(_ prompt: String, home: String) -> WorkspaceRelayRecord? {
+        let signature = """
+        The workspace run already finished. Summarize the result for the user in your own voice, then stop.
+        Do not call workspace_run, mount_workspace, bash, or any other tool.
+        Do not greet. Do not repeat the goal. Do not paste this block verbatim.
+        """
+        guard prompt.hasPrefix(signature + "\n") else { return nil }
+
+        if let encoded = prompt.split(separator: "\n").first(where: {
+            $0.hasPrefix("bubble_workspace_relay_v1: ")
+        })?.dropFirst("bubble_workspace_relay_v1: ".count),
+           let data = Data(base64Encoded: String(encoded)),
+           let payload = try? JSONDecoder().decode(WorkspaceRelayPayloadV1.self, from: data) {
+            return WorkspaceRelayRecord(
+                brief: payload.brief,
+                sessionId: payload.sessionId,
+                anchorEntryId: payload.anchorEntryId
+            )
+        }
+
+        let labels = ["name", "path", "status", "goal", "summary", "question", "changed_paths"]
+        func value(_ label: String) -> String? {
+            let marker = "\n\(label): "
+            guard let start = prompt.range(of: marker) else { return nil }
+            let valueStart = start.upperBound
+            let end = labels
+                .filter { $0 != label }
+                .compactMap { next in
+                    prompt.range(of: "\n\(next): ", range: valueStart..<prompt.endIndex)?.lowerBound
+                }
+                .min() ?? prompt.endIndex
+            return String(prompt[valueStart..<end]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        guard let name = value("name"), !name.isEmpty,
+              let shownPath = value("path"), !shownPath.isEmpty,
+              let statusText = value("status"), let status = WorkspaceStatus(rawValue: statusText),
+              let goal = value("goal") else { return nil }
+        let changedPaths = value("changed_paths")?.split(separator: ",").map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        } ?? []
+        return WorkspaceRelayRecord(
+            brief: WorkspaceBrief(
+                path: expandPath(shownPath, home: URL(fileURLWithPath: home)),
+                name: name,
+                status: status,
+                goal: goal,
+                summary: value("summary") ?? "",
+                question: value("question"),
+                changedPaths: changedPaths
+            )
+        )
+    }
+
+    public static func canMatchLegacyRelay(
+        cardRunId: String?,
+        structuredRelayRunIds: Set<String>
+    ) -> Bool {
+        guard let cardRunId, !cardRunId.isEmpty else { return true }
+        return !structuredRelayRunIds.contains(cardRunId)
     }
 
     public static func inferWaiting(from summary: String) -> String? {

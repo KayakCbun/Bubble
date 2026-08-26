@@ -55,17 +55,23 @@ enum PiSessions {
         return turns
     }
 
+    static func conversationTree(sessionId: String, cwd: URL) -> ConversationTreeSnapshot? {
+        guard let file = exactFile(for: sessionId, cwd: cwd),
+              let text = try? String(contentsOf: file, encoding: .utf8) else { return nil }
+        return ConversationTreeSnapshot(jsonl: text)
+    }
+
     static func treeHelp(sessionId: String? = nil) -> String {
         let turns = userTurns(sessionId: sessionId)
         if turns.isEmpty {
-            return "No user turns in this Pi session yet.\n/tree shows the session tree so you can copy an earlier prompt.\nPi’s interactive branch switch is a Terminal picker; Bubble copies the turn into the composer instead."
+            return "No user turns in this Pi session yet.\n/tree shows branch points after the first prompt."
         }
         var lines = ["Session tree (user turns)"]
         for turn in turns.suffix(30) {
             lines.append("\(turn.index). \(turn.text)")
         }
         lines.append("")
-        lines.append("Type /tree 3 to copy that prompt into the composer.")
+        lines.append("Choose a turn to edit it into a new in-session branch.")
         return lines.joined(separator: "\n")
     }
 
@@ -92,6 +98,15 @@ enum PiSessions {
             return folder.appendingPathComponent(match)
         }
         return list(cwd: cwd).first.map { URL(fileURLWithPath: $0.path) }
+    }
+
+    private static func exactFile(for sessionId: String, cwd: URL) -> URL? {
+        let folder = directory(for: cwd)
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []
+        guard let match = names.first(where: {
+            $0.contains(sessionId) && $0.hasSuffix(".jsonl")
+        }) else { return nil }
+        return folder.appendingPathComponent(match)
     }
 
     private static func summary(from url: URL) -> PiSessionInfo? {

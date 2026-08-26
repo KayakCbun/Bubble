@@ -26,6 +26,166 @@ struct OverlayLayoutCheck {
                "an open preview grows the panel by width plus gap")
         expect(OverlayLayoutPolicy.contentWidth(chatWidth: 760, previewWidth: 440, gap: 8) == 1208,
                "content width is conversation plus preview extra")
+        expect(OverlayLayoutPolicy.previewExtraWidth(760, gap: 8) == 768,
+               "a workspace session pane grows the panel by default transcript width plus gap")
+        expect(OverlayLayoutPolicy.contentWidth(chatWidth: 760, previewWidth: 760, gap: 8) == 1528,
+               "workspace session stage sits beside the main transcript at default width")
+        let fittedDefault = OverlayLayoutPolicy.fittedChatWidth(
+            desired: 760,
+            sideStageWidth: 560,
+            visibleWidth: 1512,
+            gap: 8,
+            bleed: 36,
+            minimum: 520
+        )
+        expect(fittedDefault == 760,
+               "the default transcript stays full width on a 14-inch display")
+        let fittedWide = OverlayLayoutPolicy.fittedChatWidth(
+            desired: 1060,
+            sideStageWidth: 560,
+            visibleWidth: 1512,
+            gap: 8,
+            bleed: 36,
+            minimum: 520
+        )
+        expect(fittedWide == 872,
+               "wide mode contracts while a side stage is open")
+        expect(
+            OverlayLayoutPolicy.contentWidth(chatWidth: fittedWide, previewWidth: 560, gap: 8) + 72 <= 1512,
+            "a unified side stage fits entirely on a 14-inch display"
+        )
+
+        let chrome = OverlayLayout(
+            totalHeight: 614,
+            transcriptHeight: 560,
+            pickerHeight: 0,
+            commandPaletteHeight: 0,
+            transcriptWidth: 760,
+            composerHeight: 46,
+            previewWidth: 0
+        )
+        expect(!OverlayRenderPolicy.layoutNeedsApply(previous: chrome, next: chrome),
+               "identical chrome must not retarget the panel")
+        expect(OverlayRenderPolicy.layoutNeedsApply(previous: nil, next: chrome),
+               "the first layout must apply")
+        var grown = chrome
+        grown.composerHeight = 66
+        expect(OverlayRenderPolicy.layoutNeedsApply(previous: chrome, next: grown),
+               "composer growth still resizes the panel")
+        var revealed = chrome
+        revealed.chromeVisible = true
+        expect(OverlayRenderPolicy.layoutNeedsApply(previous: chrome, next: revealed),
+               "chrome visibility must refresh the card mask")
+        expect(OverlayRenderPolicy.maskNeedsApply(previous: chrome, next: revealed),
+               "fading the extra card updates hit testing without resizing")
+        expect(!OverlayRenderPolicy.shouldPersistStreamChunk(isBusy: true, childBusy: false),
+               "a live main turn must not write transcript.json on every token")
+        expect(!OverlayRenderPolicy.shouldPersistStreamChunk(isBusy: false, childBusy: true),
+               "a live workspace run must not write transcript.json on every tool")
+        expect(OverlayRenderPolicy.shouldPersistStreamChunk(isBusy: false, childBusy: false),
+               "idle turns still persist")
+        expect(!OverlayRenderPolicy.shouldFlushStreamToUI(overlayVisible: false, isHiding: false),
+               "hidden overlay must not rebuild SwiftUI on tokens")
+        expect(!OverlayRenderPolicy.shouldFlushStreamToUI(overlayVisible: true, isHiding: true),
+               "hide animation must not rebuild SwiftUI on tokens")
+        expect(OverlayRenderPolicy.shouldFlushStreamToUI(overlayVisible: true, isHiding: false),
+               "a visible overlay still streams")
+        expect(OverlayRenderPolicy.streamFlushInterval(renderedBytes: 20_000) < 0.01,
+               "ordinary replies retain display-rate streaming")
+        expect(OverlayRenderPolicy.streamFlushInterval(renderedBytes: 1_000_000) >= 0.05,
+               "very large structured replies use a bounded streaming cadence")
+        let longThought = String(repeating: "reasoning ", count: 2_000)
+        let liveThought = ThoughtDisplayPolicy.chunks(longThought, streaming: true)
+        expect(liveThought.count == 1 && liveThought[0].count == ThoughtDisplayPolicy.liveTailCharacters,
+               "a live thought renders only its bounded tail")
+        expect(ThoughtDisplayPolicy.isTailTruncated(longThought),
+               "a large live thought advertises its virtualized prefix")
+        expect(ThoughtDisplayPolicy.chunks(longThought, streaming: false).count > 1,
+               "a completed large thought uses lazy display chunks")
+        expect(!OverlayRenderPolicy.shouldResumeStream(panelVisible: true, isMoving: true),
+               "show animation keeps accumulated stream work suspended")
+        expect(OverlayRenderPolicy.shouldResumeStream(panelVisible: true, isMoving: false),
+               "settled visible panel resumes accumulated stream work")
+        expect(
+            OverlayRenderPolicy.shouldAnimateSideStageResize(previousPreviewWidth: 0, nextPreviewWidth: 560),
+            "opening a side stage uses the high-refresh panel animator"
+        )
+        expect(
+            OverlayRenderPolicy.shouldAnimateSideStageResize(previousPreviewWidth: 560, nextPreviewWidth: 0),
+            "closing a side stage uses the high-refresh panel animator"
+        )
+        expect(
+            !OverlayRenderPolicy.shouldAnimateSideStageResize(previousPreviewWidth: 560, nextPreviewWidth: 560),
+            "same-width settled layouts skip the high-refresh panel animator"
+        )
+        expect(
+            OverlayLayoutPolicy.fittedTranscriptHeight(
+                base: 560,
+                composerHeight: 96,
+                restingComposerHeight: 46
+            ) == 510,
+            "quote chrome eats transcript height instead of growing the overlay"
+        )
+        expect(
+            OverlayLayoutPolicy.fittedTranscriptHeight(
+                base: 0,
+                composerHeight: 96,
+                restingComposerHeight: 46
+            ) == 0,
+            "an empty conversation still lets the composer own the panel height"
+        )
+        expect(
+            OverlayLayoutPolicy.fittedTranscriptHeight(
+                base: 560,
+                composerHeight: 46,
+                restingComposerHeight: 46
+            ) == 560,
+            "resting composer keeps the default transcript height"
+        )
+        expect(
+            !OverlayRenderPolicy.shouldDeferLayoutPulse(previousPreviewWidth: 0, nextPreviewWidth: 560),
+            "opening a side stage must apply layout in the click's turn"
+        )
+        expect(
+            !OverlayRenderPolicy.shouldDeferLayoutPulse(previousPreviewWidth: 560, nextPreviewWidth: 0),
+            "closing a side stage must apply layout without waiting a display pulse"
+        )
+        expect(
+            OverlayRenderPolicy.shouldDeferLayoutPulse(previousPreviewWidth: 560, nextPreviewWidth: 560),
+            "ordinary chrome layout can still batch on the next pulse"
+        )
+        expect(
+            OverlayLayoutPolicy.extraPaneOriginX(conversationWidth: 760, gap: 8) == 768,
+            "the extra card sits beside the conversation and does not share its layout width"
+        )
+        expect(
+            !OverlayRenderPolicy.shouldAnimateSideStageContentLayout,
+            "AppKit owns side-stage geometry so SwiftUI must not rescale transcript text"
+        )
+        expect(
+            OverlayRenderPolicy.shouldRefreshHostingSurfaceAfterFrameSettle,
+            "pixel-aligned frame settle refreshes the hosting surface for crisp text"
+        )
+        expect(
+            OverlayRenderPolicy.pinsConversationToLeadingEdge,
+            "the conversation stays pinned to the current panel while width animates"
+        )
+        expect(
+            OverlayLayoutPolicy.conversationLeadingClip(
+                currentContentWidth: 760,
+                stackWidth: 1328,
+                pinToLeading: false
+            ) == 284,
+            "centering the target stack in a smaller panel chops the conversation's left edge"
+        )
+        expect(
+            OverlayLayoutPolicy.conversationLeadingClip(
+                currentContentWidth: 760,
+                stackWidth: 1328,
+                pinToLeading: true
+            ) == 0,
+            "leading-pinned conversation stays fully visible while the panel grows"
+        )
         let closedOrigin = OverlayLayoutPolicy.panelOriginX(centerX: 500, contentWidth: 760, bleed: 16)
         let openOrigin = OverlayLayoutPolicy.panelOriginX(centerX: 500, contentWidth: 760 + 448, bleed: 16)
         expect(closedOrigin == 500 - (760 + 32) / 2, "closed panel is centered on the composer")
@@ -33,6 +193,28 @@ struct OverlayLayoutCheck {
         expect(
             openOrigin + (760 + 448 + 32) / 2 == closedOrigin + (760 + 32) / 2,
             "opening a preview must keep the visual center"
+        )
+        let closedComposerX = OverlayLayoutPolicy.composerOriginX(
+            panelWidth: 760 + 32,
+            composerWidth: 520,
+            bleed: 16
+        )
+        let openComposerX = OverlayLayoutPolicy.composerOriginX(
+            panelWidth: 760 + 448 + 32,
+            composerWidth: 520,
+            bleed: 16
+        )
+        let midComposerX = OverlayLayoutPolicy.composerOriginX(
+            panelWidth: 1000,
+            composerWidth: 520,
+            bleed: 16
+        )
+        expect(closedComposerX == 16 + (760 - 520) / 2, "closed composer is centered under the conversation")
+        expect(openComposerX == 16 + (760 + 448 - 520) / 2, "open composer stays at the combined visual center")
+        expect(midComposerX == 16 + (1000 - 32 - 520) / 2, "composer tracks the current panel while it slides")
+        expect(
+            closedOrigin + closedComposerX + 260 == openOrigin + openComposerX + 260,
+            "composer screen position is unchanged when the side stage opens"
         )
 
         let mainVisibleFrame = CGRect(x: 0, y: 62, width: 2048, height: 1060)
@@ -58,10 +240,33 @@ struct OverlayLayoutCheck {
         expect(OverlayPixel.align(100.25, scale: 2) == 100.5, "2x snaps to half points")
         expect(OverlayPixel.align(100.24, scale: 2) == 100, "2x rounds 0.24 down")
         expect(OverlayPixel.align(100.3, scale: 1) == 100, "1x snaps to whole points")
+        expect(
+            OverlayHitTestPolicy.shouldHide(
+                panelContainsClick: true,
+                visibleCardContainsClick: false
+            ),
+            "visual whitespace inside the transparent panel dismisses Bubble"
+        )
+        expect(
+            !OverlayHitTestPolicy.shouldHide(
+                panelContainsClick: true,
+                visibleCardContainsClick: true
+            ),
+            "clicking a visible Bubble card keeps Bubble open"
+        )
+        let roundedInput = OverlayCardHitRegion(
+            rect: CGRect(x: 0, y: 0, width: 520, height: 46),
+            cornerRadius: 22
+        )
+        expect(roundedInput.contains(CGPoint(x: 260, y: 23)), "composer center is interactive")
+        expect(!roundedInput.contains(CGPoint(x: 1, y: 1)), "transparent rounded corner dismisses Bubble")
         let snapped = OverlayPixel.align(CGRect(x: 12.25, y: 8.75, width: 760, height: 46), scale: 2)
         expect(snapped.origin.x == 12.5 && snapped.origin.y == 9, "rect origin follows backing scale")
         expect(snapped.size.width == 760 && snapped.size.height == 46, "integer sizes stay put")
 
+        expect(OverlaySpring.panelResponse <= 0.24, "panel motion uses a short spring")
+        expect(OverlaySpring.panelDamping < 0.92, "panel motion keeps a little spring instead of a long critically damped tail")
+        expect(OverlaySpring.fadeResponse < OverlaySpring.panelResponse, "opacity reaches the target ahead of the window travel")
         var value: CGFloat = 0
         var velocity: CGFloat = 0
         OverlaySpring.step(value: &value, velocity: &velocity, target: 100, dt: 1.0 / 120.0)
@@ -72,6 +277,79 @@ struct OverlayLayoutCheck {
         }
         expect(OverlaySpring.settled(value: value, velocity: velocity, target: 100), "spring settles within two seconds at 120Hz")
         expect(abs(value - 100) < 0.5, "settled value is on the target")
+
+        let sweepStart = RunningSweepPolicy.progress(at: 0)
+        let sweepQuarter = RunningSweepPolicy.progress(at: RunningSweepPolicy.cycleDuration / 4)
+        let sweepHalf = RunningSweepPolicy.progress(at: RunningSweepPolicy.cycleDuration / 2)
+        expect(sweepStart == 0, "running highlight starts at the leading edge")
+        expect(sweepQuarter > sweepStart && sweepHalf > sweepQuarter,
+               "running highlight advances continuously from left to right")
+        expect(
+            RunningSweepPolicy.progress(at: RunningSweepPolicy.cycleDuration) == 0,
+            "running highlight loops without accumulating animation state"
+        )
+        expect(
+            RunningSweepPolicy.minimumFrameInterval <= 1.0 / 120.0,
+            "running highlight is eligible to follow a 120 Hz display"
+        )
+
+        expect(
+            !OverlayPalettePolicy.needsScroll(items: 1, isMount: false),
+            "a single command does not scroll"
+        )
+        expect(
+            OverlayPalettePolicy.listHeight(items: 1, isMount: false)
+                == OverlayPalettePolicy.rowHeight,
+            "one command sizes the list to a single row"
+        )
+        expect(
+            OverlayPalettePolicy.chromeHeight(items: 1, isMount: false, hasSearch: false)
+                > OverlayPalettePolicy.listHeight(items: 1, isMount: false),
+            "chrome includes caption padding around the command list"
+        )
+        expect(
+            OverlayPalettePolicy.needsScroll(items: OverlayPalettePolicy.commandVisibleLimit + 1, isMount: false),
+            "command lists longer than the visible window can scroll"
+        )
+        expect(
+            OverlayPalettePolicy.visibleRowCount(items: 20, isMount: false)
+                == OverlayPalettePolicy.commandVisibleLimit,
+            "command lists cap the visible window"
+        )
+
+        let idle = OverlayLayout(
+            totalHeight: 640,
+            transcriptHeight: 560,
+            pickerHeight: 0,
+            commandPaletteHeight: 0,
+            transcriptWidth: 760,
+            composerHeight: 46,
+            previewWidth: 0,
+            chromeVisible: false
+        )
+        var quoted = idle
+        quoted.composerHeight = 96
+        quoted.transcriptHeight = OverlayLayoutPolicy.fittedTranscriptHeight(
+            base: idle.transcriptHeight,
+            composerHeight: quoted.composerHeight,
+            restingComposerHeight: idle.composerHeight
+        )
+        quoted.totalHeight = quoted.transcriptHeight + 8 + quoted.composerHeight
+        expect(
+            quoted.transcriptHeight + quoted.composerHeight
+                == idle.transcriptHeight + idle.composerHeight,
+            "adding a quote keeps conversation height stable"
+        )
+        expect(
+            !OverlayRenderPolicy.shouldAnimatePanelFrame(previous: idle, next: quoted),
+            "adding a quote must not spring the whole overlay"
+        )
+        var stage = idle
+        stage.previewWidth = 560
+        expect(
+            OverlayRenderPolicy.shouldAnimatePanelFrame(previous: idle, next: stage),
+            "opening the extra pane still springs the panel"
+        )
 
         print("PASS: overlay layout policy")
     }

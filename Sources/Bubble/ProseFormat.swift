@@ -1,5 +1,141 @@
 import Foundation
 
+enum PathChipKind: Equatable {
+    case code
+    case file(String)
+    case folder
+    case url
+
+    var isMonospaced: Bool {
+        switch self {
+        case .code, .file, .folder: return true
+        case .url: return false
+        }
+    }
+
+    var isFilePath: Bool {
+        if case .file = self { return true }
+        return false
+    }
+}
+
+enum CodeDisplayChunker {
+    static let targetCharacters = 6_000
+
+    private static let cache: NSCache<NSString, CodeDisplayChunksBox> = {
+        let cache = NSCache<NSString, CodeDisplayChunksBox>()
+        cache.countLimit = 48
+        cache.totalCostLimit = 8 * 1_024 * 1_024
+        return cache
+    }()
+
+    static func chunks(_ text: String, target: Int = targetCharacters) -> [String] {
+        guard text.count > target else { return [text] }
+        let key = "\(target):\(text)" as NSString
+        if let cached = cache.object(forKey: key) {
+            return cached.chunks
+        }
+        let hardLimit = max(target + 1, target * 5 / 4)
+        var chunks: [String] = []
+        var start = text.startIndex
+        var index = start
+        var count = 0
+        while index < text.endIndex {
+            let character = text[index]
+            index = text.index(after: index)
+            count += 1
+            if count >= target, character == "\n" || count >= hardLimit {
+                chunks.append(String(text[start..<index]))
+                start = index
+                count = 0
+            }
+        }
+        if start < text.endIndex {
+            chunks.append(String(text[start...]))
+        }
+        let result = chunks.isEmpty ? [text] : chunks
+        cache.setObject(CodeDisplayChunksBox(result), forKey: key, cost: text.utf8.count)
+        return result
+    }
+}
+
+private final class CodeDisplayChunksBox {
+    let chunks: [String]
+
+    init(_ chunks: [String]) {
+        self.chunks = chunks
+    }
+}
+
+enum InlineRun: Equatable {
+    case text(String)
+    case strong(String)
+    case chip(String, PathChipKind)
+
+    func replacingText(with text: String) -> InlineRun {
+        switch self {
+        case .text:
+            return .text(text)
+        case .strong:
+            return .strong(text)
+        case .chip:
+            return self
+        }
+    }
+
+    static func usesNativeTextLayout(_ runs: [InlineRun]) -> Bool {
+        runs.allSatisfy { run in
+            guard case .chip(_, let kind) = run else { return true }
+            return kind == .code
+        }
+    }
+}
+
+enum MarkdownEmphasis {
+    struct Span: Equatable {
+        var inner: String
+        var remainder: String
+    }
+
+    struct Boundaries: Equatable {
+        var leading: String
+        var core: String
+        var trailing: String
+    }
+
+    static func boundaries(in text: String) -> Boundaries {
+        let leading = text.prefix { $0.isWhitespace }
+        let withoutLeading = text.dropFirst(leading.count)
+        let trailing = withoutLeading.reversed().prefix { $0.isWhitespace }
+        let core = withoutLeading.dropLast(trailing.count)
+        return Boundaries(
+            leading: String(leading),
+            core: String(core),
+            trailing: String(trailing.reversed())
+        )
+    }
+
+    static func runs(for text: String) -> [InlineRun] {
+        let parts = boundaries(in: text)
+        guard !parts.core.isEmpty else { return [.text("**" + text + "**")] }
+        var runs: [InlineRun] = []
+        if !parts.leading.isEmpty { runs.append(.text(parts.leading)) }
+        runs.append(.strong(parts.core))
+        if !parts.trailing.isEmpty { runs.append(.text(parts.trailing)) }
+        return runs
+    }
+
+    static func consumeLeading(in text: String) -> Span? {
+        guard text.hasPrefix("**") else { return nil }
+        let body = String(text.dropFirst(2))
+        guard let end = body.range(of: "**") else { return nil }
+        return Span(
+            inner: String(body[..<end.lowerBound]),
+            remainder: String(body[end.upperBound...])
+        )
+    }
+}
+
 enum CodeToken {
     static func looksLike(_ raw: String) -> Bool {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -204,6 +340,175 @@ enum ProseWrap {
     }
 }
 
+enum MarkdownMath {
+    enum Part: Equatable {
+        case text(String)
+        case display(String)
+    }
+
+    static func blockExpression(from raw: String) -> String? {
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let delimiters = [("\\[", "\\]"), ("$$", "$$")]
+        for (opening, closing) in delimiters where text.hasPrefix(opening) && text.hasSuffix(closing) {
+            guard text.count >= opening.count + closing.count else { continue }
+            let bodyStart = text.index(text.startIndex, offsetBy: opening.count)
+            let bodyEnd = text.index(text.endIndex, offsetBy: -closing.count)
+            let expression = text[bodyStart..<bodyEnd]
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return expression.isEmpty ? nil : expression
+        }
+        return nil
+    }
+
+    static func splitBlocks(_ raw: String) -> [Part] {
+        let lines = raw.replacingOccurrences(of: "\r\n", with: "\n")
+            .components(separatedBy: "\n")
+        var parts: [Part] = []
+        var prose: [String] = []
+        var math: [String] = []
+        var closing: String?
+        var opening: String?
+
+        func flushProse() {
+            let text = prose.joined(separator: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !text.isEmpty { parts.append(.text(text)) }
+            prose.removeAll(keepingCapacity: true)
+        }
+
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if let expectedClose = closing {
+                if trimmed == expectedClose {
+                    let expression = math.joined(separator: "\n")
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !expression.isEmpty { parts.append(.display(expression)) }
+                    math.removeAll(keepingCapacity: true)
+                    opening = nil
+                    closing = nil
+                } else {
+                    math.append(line)
+                }
+                continue
+            }
+            if trimmed == "\\[" || trimmed == "$$" {
+                flushProse()
+                opening = trimmed
+                closing = trimmed == "\\[" ? "\\]" : "$$"
+                continue
+            }
+            if let expression = blockExpression(from: trimmed), trimmed != "\\[", trimmed != "$$" {
+                flushProse()
+                parts.append(.display(expression))
+                continue
+            }
+            prose.append(line)
+        }
+
+        if let opening {
+            prose.append(opening)
+            prose.append(contentsOf: math)
+        }
+        flushProse()
+        return parts.isEmpty ? [.text(raw)] : parts
+    }
+
+    static func typesetExpression(_ raw: String) -> String {
+        var result = ""
+        var cjk = ""
+        var index = raw.startIndex
+
+        func flushCJK() {
+            guard !cjk.isEmpty else { return }
+            result += "\\text{" + cjk + "}"
+            cjk.removeAll(keepingCapacity: true)
+        }
+
+        while index < raw.endIndex {
+            if raw[index...].hasPrefix("\\text{") {
+                flushCJK()
+                var depth = 0
+                var sawBrace = false
+                repeat {
+                    let character = raw[index]
+                    result.append(character)
+                    if character == "{" {
+                        sawBrace = true
+                        depth += 1
+                    }
+                    if character == "}" { depth -= 1 }
+                    index = raw.index(after: index)
+                } while index < raw.endIndex && (!sawBrace || depth > 0)
+                continue
+            }
+            let character = raw[index]
+            if CodeToken.isCJK(character) {
+                cjk.append(character)
+            } else {
+                flushCJK()
+                result.append(character)
+            }
+            index = raw.index(after: index)
+        }
+        flushCJK()
+        return result
+    }
+
+    static func nativeExpression(_ raw: String) -> String? {
+        let operators = [
+            "\\approx": "≈", "\\times": "×", "\\cdot": "·", "\\leq": "≤",
+            "\\le": "≤", "\\geq": "≥", "\\ge": "≥", "\\neq": "≠",
+            "\\pm": "±", "\\to": "→", "\\infty": "∞", "\\%": "%",
+            "\\,": "", "\\;": " ",
+        ]
+        var text = raw
+        for (latex, rendered) in operators {
+            text = text.replacingOccurrences(of: latex, with: rendered)
+        }
+        guard !text.contains("\\") else { return nil }
+
+        let superscripts: [Character: Character] = [
+            "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴",
+            "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹",
+            "+": "⁺", "-": "⁻", "=": "⁼", "(": "⁽", ")": "⁾",
+        ]
+        let subscripts: [Character: Character] = [
+            "0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄",
+            "5": "₅", "6": "₆", "7": "₇", "8": "₈", "9": "₉",
+            "+": "₊", "-": "₋", "=": "₌", "(": "₍", ")": "₎",
+        ]
+        var rendered = ""
+        var index = text.startIndex
+        while index < text.endIndex {
+            let character = text[index]
+            if character == "^" || character == "_" {
+                let glyphs = character == "^" ? superscripts : subscripts
+                let contentStart = text.index(after: index)
+                guard contentStart < text.endIndex else { return nil }
+                let content: Substring
+                if text[contentStart] == "{" {
+                    let valueStart = text.index(after: contentStart)
+                    guard let close = text[valueStart...].firstIndex(of: "}") else { return nil }
+                    content = text[valueStart..<close]
+                    index = text.index(after: close)
+                } else {
+                    content = text[contentStart...contentStart]
+                    index = text.index(after: contentStart)
+                }
+                for value in content {
+                    guard let glyph = glyphs[value] else { return nil }
+                    rendered.append(glyph)
+                }
+                continue
+            }
+            guard character != "{" && character != "}" else { return nil }
+            rendered.append(character)
+            index = text.index(after: index)
+        }
+        return rendered.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
 enum ProseReflow {
     private static let headingSuffixes = [
         "现象", "链路", "方案", "原因", "结论", "现状", "背景", "步骤",
@@ -336,7 +641,8 @@ enum ProseReflow {
     }
 
     private static func matchHeading(_ text: String, from start: String.Index) -> Piece? {
-        if let prev = prevCharacter(text, before: start),
+        let previous = prevCharacter(text, before: start)
+        if let prev = previous,
            !prev.isWhitespace, !prev.isNewline, !isBreakBoundary(prev) {
             return nil
         }
@@ -351,6 +657,15 @@ enum ProseReflow {
         let next = text[index]
         guard next.isWhitespace || next.isLetter || CodeToken.isCJK(next) else { return nil }
         while index < text.endIndex, text[index] == " " { index = text.index(after: index) }
+        if previous == nil || previous?.isNewline == true {
+            let lineEnd = text[index...].firstIndex(of: "\n") ?? text.endIndex
+            let title = text[index..<lineEnd].trimmingCharacters(in: .whitespaces)
+            guard !title.isEmpty else { return nil }
+            return Piece(
+                markup: String(repeating: "#", count: level) + " " + title,
+                next: lineEnd
+            )
+        }
         let (title, bodyStart) = headingTitle(text, from: index)
         guard !title.isEmpty else { return nil }
         return Piece(markup: String(repeating: "#", count: level) + " " + title, next: bodyStart)
@@ -404,6 +719,10 @@ enum ProseReflow {
         let window = String(text.prefix(36))
         if let numbered = window.range(of: #"\d{1,2}\.\s"#, options: .regularExpression) {
             if window.distance(from: window.startIndex, to: numbered.lowerBound) <= 24 {
+                let prefix = window[..<numbered.lowerBound]
+                if prefix.hasSuffix("**") {
+                    return window.index(numbered.lowerBound, offsetBy: -2)
+                }
                 return numbered.lowerBound
             }
         }
@@ -422,7 +741,10 @@ enum ProseReflow {
 
     private static func matchNumbered(_ text: String, from start: String.Index, lineStart: Bool) -> Piece? {
         var index = start
-        if text[index] == "*" {
+        let boldTitle = peek(text, from: start, count: 2) == "**"
+        if boldTitle {
+            index = text.index(index, offsetBy: 2)
+        } else if text[index] == "*" {
             while index < text.endIndex, text[index] == "*" {
                 index = text.index(after: index)
             }
@@ -447,7 +769,7 @@ enum ProseReflow {
         if consumed < text.endIndex, text[consumed] == " " {
             consumed = text.index(after: consumed)
         }
-        return Piece(markup: "\(digits). ", next: consumed)
+        return Piece(markup: "\(digits). \(boldTitle ? "**" : "")", next: consumed)
     }
 
     private static func matchBullet(_ text: String, from start: String.Index, lineStart: Bool) -> Piece? {

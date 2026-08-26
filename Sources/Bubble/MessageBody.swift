@@ -2,38 +2,67 @@ import AppKit
 import SwiftUI
 import MarkdownUI
 import BeautifulMermaid
+import BubbleDiagramSupport
 import WebKit
 
 struct MessageBody: View {
     var text: String
     var streaming: Bool = false
+    /// The outer transcript planner may split one large structured block into
+    /// bounded rows. Make the local copy affordance explicit in that case.
+    var virtualizedChunk: Bool = false
     /// File previews always go through MarkdownUI. Chat bubbles stay on ProseDocument
     /// unless the slice is a table or a leading fence MarkdownUI already owns.
     var preferClassicMarkdown: Bool = false
 
+    @ViewBuilder
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            ForEach(Array(MessagePart.displayParts(text).enumerated()), id: \.offset) { _, part in
-                switch part {
-                case .markdown(let markdown):
-                    if preferClassicMarkdown || PathChipStyle.needsClassicMarkdown(markdown) {
-                        Markdown(markdown)
-                            .markdownTheme(.overlay)
-                            .markdownTextStyle(\.text) {
-                                FontSize(OverlayMetrics.fontSize)
-                                FontWeight(.regular)
-                            }
-                            .font(OverlayMetrics.bodyFont)
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    } else {
-                        ProseDocument(text: markdown)
-                    }
-                case .code(let language, let body):
-                    CodeBlockView(language: language, source: body)
-                case .mermaid(let source):
-                    MermaidView(source: MessagePart.normalizeMermaid(source), streaming: streaming)
+        if preferClassicMarkdown {
+            LazyVStack(alignment: .leading, spacing: 16) {
+                messageParts
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 16) {
+                messageParts
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var messageParts: some View {
+        ForEach(Array(MessagePart.displayParts(text).enumerated()), id: \.offset) { _, part in
+            switch part {
+            case .markdown(let markdown):
+                if preferClassicMarkdown || PathChipStyle.needsClassicMarkdown(markdown) {
+                    Markdown(markdown)
+                        .markdownTheme(.overlay)
+                        .markdownTextStyle(\.text) {
+                            FontSize(OverlayMetrics.fontSize)
+                            FontWeight(.regular)
+                        }
+                        .font(OverlayMetrics.bodyFont)
+                        .bubbleTextSelection()
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    ProseDocument(text: markdown)
                 }
+            case .code(let language, let body):
+                CodeBlockView(
+                    language: language,
+                    source: body,
+                    streaming: streaming,
+                    virtualizedChunk: virtualizedChunk
+                )
+            case .mermaid(let source):
+                MermaidView(source: MessagePart.normalizeMermaid(source), streaming: streaming)
+            case .math(let expression):
+                Text(MarkdownMath.nativeExpression(expression) ?? expression)
+                    .font(.system(size: OverlayMetrics.fontSize + 2, design: .serif))
+                    .foregroundStyle(OverlaySurface.conversationInk)
+                    .bubbleTextSelection()
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 4)
+                    .accessibilityLabel(expression)
             }
         }
     }
@@ -43,16 +72,39 @@ enum MessagePart {
     case markdown(String)
     case code(language: String, body: String)
     case mermaid(String)
+    case math(String)
 
     static func displayParts(_ text: String) -> [MessagePart] {
+        MessagePartCache.shared.parts(for: text) {
+            parseDisplayParts(text)
+        }
+    }
+
+    static func prewarmDisplay(_ text: String) {
+        for part in displayParts(text) {
+            if case .markdown(let markdown) = part,
+               !PathChipStyle.needsClassicMarkdown(markdown) {
+                _ = ProseParser.blocks(in: markdown)
+            }
+        }
+    }
+
+    private static func parseDisplayParts(_ text: String) -> [MessagePart] {
         var parts: [MessagePart] = []
         for part in split(text) {
             switch part {
-            case .mermaid, .code:
+            case .mermaid, .code, .math:
                 parts.append(part)
             case .markdown(let markdown):
                 let normalized = normalizeMarkdown(markdown)
-                parts.append(contentsOf: splitTables(normalized))
+                for mathPart in MarkdownMath.splitBlocks(normalized) {
+                    switch mathPart {
+                    case .text(let text):
+                        parts.append(contentsOf: splitTables(text))
+                    case .display(let expression):
+                        parts.append(.math(expression))
+                    }
+                }
             }
         }
         return parts.isEmpty ? [.markdown(text)] : parts
@@ -142,7 +194,7 @@ enum MessagePart {
     private static func appendSplitUnfenced(_ raw: String, into parts: inout [MessagePart]) {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
-        guard let match = firstMermaidRange(in: text) else {
+        guard let match = MermaidTextDetector.firstRange(in: text) else {
             parts.append(.markdown(text))
             return
         }
@@ -156,22 +208,6 @@ enum MessagePart {
         if !split.after.isEmpty {
             parts.append(.markdown(split.after))
         }
-    }
-
-    private static func firstMermaidRange(in text: String) -> Range<String.Index>? {
-        let pattern = #"(?i)(?:^|[\n：:]|\s)(?:mermaid[\s_]*)?(flowchart|graph(?:\s+[TDLRBA]{1,3})?|sequenceDiagram|classDiagram|stateDiagram(?:-v2)?|erDiagram|journey|gantt|pie|mindmap|gitGraph|xychart(?:-beta)?)\b"#
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.anchorsMatchLines]) else { return nil }
-        let ns = text as NSString
-        guard let match = regex.firstMatch(in: text, range: NSRange(location: 0, length: ns.length)),
-              match.numberOfRanges > 1,
-              let range = Range(match.range(at: 1), in: text) else {
-            return nil
-        }
-        if let mermaid = text[..<range.lowerBound].range(of: "mermaid", options: [.backwards, .caseInsensitive]),
-           text[mermaid.upperBound..<range.lowerBound].allSatisfy({ $0.isWhitespace || $0 == "_" }) {
-            return mermaid.lowerBound..<range.upperBound
-        }
-        return range
     }
 
     private static func splitMermaidTail(_ text: String) -> (diagram: String, after: String) {
@@ -282,7 +318,7 @@ enum MessagePart {
     }
 
     private static func looksLikeMermaid(_ body: String) -> Bool {
-        firstMermaidRange(in: body) != nil
+        MermaidTextDetector.firstRange(in: body) != nil
     }
 
     private static func newlineCount(_ text: String) -> Int {
@@ -322,7 +358,9 @@ enum MessagePart {
             }
             if !extra.isEmpty { break }
         }
-        return joinDirectionLine(insertMermaidNewlines(kept.joined(separator: "\n")))
+        return MermaidSource.normalize(
+            joinDirectionLine(insertMermaidNewlines(kept.joined(separator: "\n")))
+        )
     }
 
     private static func joinDirectionLine(_ source: String) -> String {
@@ -422,9 +460,22 @@ enum MessagePart {
         }
 
         func flushTable() {
-            let text = table.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-            if !text.isEmpty {
-                parts.append(.markdown(text))
+            let rowsPerPart = 20
+            if table.count > rowsPerPart + 2,
+               table.count >= 2,
+               isSeparatorLine(table[1]) {
+                let header = Array(table.prefix(2))
+                var bodyStart = 2
+                while bodyStart < table.count {
+                    let bodyEnd = min(table.count, bodyStart + rowsPerPart)
+                    parts.append(.markdown((header + Array(table[bodyStart..<bodyEnd])).joined(separator: "\n")))
+                    bodyStart = bodyEnd
+                }
+            } else {
+                let text = table.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+                if !text.isEmpty {
+                    parts.append(.markdown(text))
+                }
             }
             table.removeAll()
         }
@@ -621,49 +672,78 @@ enum MessagePart {
     }
 }
 
+private final class MessagePartBox {
+    let parts: [MessagePart]
+
+    init(_ parts: [MessagePart]) {
+        self.parts = parts
+    }
+}
+
+private final class MessagePartCache {
+    static let shared = MessagePartCache()
+
+    private let cache: NSCache<NSString, MessagePartBox> = {
+        let cache = NSCache<NSString, MessagePartBox>()
+        cache.countLimit = 256
+        cache.totalCostLimit = 8 * 1_024 * 1_024
+        return cache
+    }()
+
+    func parts(for text: String, build: () -> [MessagePart]) -> [MessagePart] {
+        let key = text as NSString
+        if let cached = cache.object(forKey: key) {
+            return cached.parts
+        }
+        let parts = build()
+        cache.setObject(MessagePartBox(parts), forKey: key, cost: text.utf8.count)
+        return parts
+    }
+}
+
 private extension Theme {
     static let overlay = Theme.gitHub
         .text {
             FontSize(OverlayMetrics.fontSize)
             FontWeight(.regular)
-            ForegroundColor(OverlayMetrics.ink)
+            ForegroundColor(OverlaySurface.conversationInk)
         }
         .code {
             FontFamilyVariant(.monospaced)
             FontSize(OverlayMetrics.chipSize)
             FontWeight(.regular)
-            ForegroundColor(OverlayMetrics.ink.opacity(0.82))
-            BackgroundColor(Color.primary.opacity(0.06))
+            ForegroundColor(OverlaySurface.conversationInk)
+            BackgroundColor(OverlaySurface.chipFill)
         }
         .heading1 { configuration in
             configuration.label
-                .relativeLineSpacing(.em(0.28))
-                .markdownTextStyle { FontWeight(.medium); FontSize(OverlayMetrics.heading1Size) }
-                .markdownMargin(top: 14, bottom: 8)
+                .relativeLineSpacing(.em(OverlaySurface.proseHeadingLineSpacingEm))
+                .markdownTextStyle { FontWeight(.semibold); FontSize(OverlayMetrics.heading1Size) }
+                .markdownMargin(top: 20, bottom: 8)
         }
         .heading2 { configuration in
             configuration.label
-                .relativeLineSpacing(.em(0.28))
-                .markdownTextStyle { FontWeight(.medium); FontSize(OverlayMetrics.heading2Size) }
-                .markdownMargin(top: 12, bottom: 6)
+                .relativeLineSpacing(.em(OverlaySurface.proseHeadingLineSpacingEm))
+                .markdownTextStyle { FontWeight(.semibold); FontSize(OverlayMetrics.heading2Size) }
+                .markdownMargin(top: 20, bottom: 8)
         }
         .heading3 { configuration in
             configuration.label
-                .relativeLineSpacing(.em(0.3))
-                .markdownTextStyle { FontWeight(.medium); FontSize(OverlayMetrics.heading3Size) }
-                .markdownMargin(top: 10, bottom: 6)
+                .relativeLineSpacing(.em(OverlaySurface.proseHeadingLineSpacingEm))
+                .markdownTextStyle { FontWeight(.semibold); FontSize(OverlayMetrics.heading3Size) }
+                .markdownMargin(top: 16, bottom: 8)
         }
         .paragraph { configuration in
             configuration.label
                 .fixedSize(horizontal: false, vertical: true)
-                .relativeLineSpacing(.em(0.55))
-                .markdownMargin(top: 0, bottom: 16)
+                .relativeLineSpacing(.em(OverlaySurface.proseLineSpacingEm))
+                .markdownMargin(top: 0, bottom: OverlaySurface.proseBlockSpacing)
         }
         .listItem { configuration in
             configuration.label
                 .fixedSize(horizontal: false, vertical: true)
-                .relativeLineSpacing(.em(0.55))
-                .markdownMargin(top: 8, bottom: 0)
+                .relativeLineSpacing(.em(OverlaySurface.proseLineSpacingEm))
+                .markdownMargin(top: 10, bottom: 0)
         }
         .codeBlock { configuration in
             CodeBlockView(language: configuration.language ?? "", source: configuration.content)
@@ -693,13 +773,15 @@ private extension Theme {
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.vertical, 8)
                 .padding(.horizontal, 12)
-                .relativeLineSpacing(.em(0.35))
+                .relativeLineSpacing(.em(0.40))
         }
 }
 
 struct CodeBlockView: View {
     var language: String
     var source: String
+    var streaming = false
+    var virtualizedChunk = false
 
     @State private var copied = false
     @State private var wrap = true
@@ -707,7 +789,7 @@ struct CodeBlockView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                Text(displayLanguage)
+                Text(virtualizedChunk ? "\(displayLanguage) · section" : displayLanguage)
                     .font(.system(size: 11, weight: .regular, design: .monospaced))
                     .foregroundStyle(.tertiary)
                 Spacer(minLength: 8)
@@ -718,36 +800,72 @@ struct CodeBlockView: View {
                 codeChromeButton(copied ? "checkmark" : "square.on.square") {
                     copy()
                 }
-                .help("Copy")
+                .help(virtualizedChunk ? "Copy this virtualized section" : "Copy")
             }
             Group {
-                if wrap {
-                    Text(source)
-                        .font(.system(size: OverlayMetrics.codeSize, weight: .regular, design: .monospaced))
-                        .foregroundStyle(OverlayMetrics.ink.opacity(0.88))
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .fixedSize(horizontal: false, vertical: true)
+                if streaming {
+                    let tail = source.suffix(CodeDisplayChunker.targetCharacters)
+                    VStack(alignment: .leading, spacing: 6) {
+                        if tail.startIndex != source.startIndex {
+                            Text("Earlier code stays virtualized while this block streams…")
+                                .font(.system(size: 10.5, weight: .regular))
+                                .foregroundStyle(.tertiary)
+                        }
+                        Text(String(tail))
+                            .font(.system(size: OverlayMetrics.codeSize, weight: .regular, design: .monospaced))
+                            .foregroundStyle(OverlayMetrics.ink.opacity(0.88))
+                            .bubbleTextSelection()
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                } else if wrap {
+                    wrappedCode
                 } else {
                     ScrollView(.horizontal, showsIndicators: false) {
                         Text(source)
                             .font(.system(size: OverlayMetrics.codeSize, weight: .regular, design: .monospaced))
                             .foregroundStyle(OverlayMetrics.ink.opacity(0.88))
-                            .textSelection(.enabled)
+                            .bubbleTextSelection()
                             .fixedSize(horizontal: true, vertical: true)
                     }
                 }
             }
         }
-        .padding(12)
+        .padding(14)
         .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Color.primary.opacity(0.035))
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(OverlaySurface.cardFill)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(OverlaySurface.chipStroke, lineWidth: 0.5)
         )
+    }
+
+    @ViewBuilder
+    private var wrappedCode: some View {
+        let chunks = CodeDisplayChunker.chunks(source)
+        if source.count > CodeDisplayChunker.targetCharacters {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                codeChunks(chunks)
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 0) {
+                codeChunks(chunks)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func codeChunks(_ chunks: [String]) -> some View {
+        ForEach(Array(chunks.enumerated()), id: \.offset) { _, chunk in
+            Text(chunk.hasSuffix("\n") ? String(chunk.dropLast()) : chunk)
+                .font(.system(size: OverlayMetrics.codeSize, weight: .regular, design: .monospaced))
+                .foregroundStyle(OverlayMetrics.ink.opacity(0.88))
+                .bubbleTextSelection()
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     private var displayLanguage: String {
@@ -834,7 +952,7 @@ struct MermaidView: View {
             } else {
                 Text(source)
                     .font(.system(size: 12, weight: .regular, design: .monospaced))
-                    .textSelection(.enabled)
+                    .bubbleTextSelection()
                     .padding(10)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(
@@ -869,6 +987,7 @@ struct MermaidView: View {
         .help("Click to enlarge")
         .onAppear { enqueueRender() }
         .onChange(of: source) { _, _ in enqueueRender() }
+        .onChange(of: streaming) { _, _ in enqueueRender() }
         .onChange(of: colorScheme) { _, _ in enqueueRender() }
         .onChange(of: webFailed) { _, failed in
             if failed, image == nil, !streaming {
@@ -881,41 +1000,43 @@ struct MermaidView: View {
         let token = UUID()
         renderID = token
         webFailed = false
+        if streaming {
+            image = nil
+            useWeb = false
+            return
+        }
         if useWeb {
             return
         }
         let src = source
         let dark = colorScheme == .dark
-        let delay = streaming ? 0.08 : 0
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+        DispatchQueue.main.async {
             guard renderID == token else { return }
             renderNative(src, dark: dark, token: token)
         }
     }
 
     private func renderNative(_ src: String, dark: Bool, token: UUID) {
-        DispatchQueue.global(qos: .userInitiated).async {
-            var theme = dark ? DiagramTheme.zincDark : DiagramTheme.zincLight
-            theme.transparent = true
-            let native = MessagePart.nativeMermaidSource(src)
-            do {
-                let rendered = try MermaidRenderer.renderImage(source: native, theme: theme, scale: 2.0)
-                DispatchQueue.main.async {
-                    guard renderID == token else { return }
-                    if let rendered {
-                        image = MermaidImageFix.upright(rendered)
-                        useWeb = false
-                    } else {
-                        OverlayLog.write("beautiful-mermaid returned nil, falling back to mermaid.js")
-                        useWeb = true
-                    }
-                }
-            } catch {
-                OverlayLog.write("beautiful-mermaid failed: \(error.localizedDescription)")
-                DispatchQueue.main.async {
-                    guard renderID == token else { return }
+        var theme = dark ? DiagramTheme.zincDark : DiagramTheme.zincLight
+        theme.transparent = true
+        MermaidImageRenderer.render(
+            source: MessagePart.nativeMermaidSource(src),
+            theme: theme,
+            scale: 2.0
+        ) { result in
+            guard renderID == token else { return }
+            switch result {
+            case .success(let upright):
+                if let upright {
+                    image = upright
+                    useWeb = false
+                } else {
+                    OverlayLog.write("beautiful-mermaid returned nil, falling back to mermaid.js")
                     useWeb = true
                 }
+            case .failure(let error):
+                OverlayLog.write("beautiful-mermaid failed: \(error.localizedDescription)")
+                useWeb = true
             }
         }
     }
@@ -927,6 +1048,7 @@ struct MermaidWKView: NSViewRepresentable {
     @Binding var failed: Bool
     var interactive: Bool = false
     var maxHeight: CGFloat = 2400
+    var opaqueBackground = false
 
     func makeCoordinator() -> Coordinator {
         let coordinator = Coordinator(source: source, height: $height, failed: $failed)
@@ -939,8 +1061,8 @@ struct MermaidWKView: NSViewRepresentable {
         config.websiteDataStore = .nonPersistent()
         config.userContentController.add(context.coordinator, name: "mermaidReady")
         let webView = MermaidWebView(frame: .zero, configuration: config)
-        webView.setValue(false, forKey: "drawsBackground")
-        webView.underPageBackgroundColor = .clear
+        webView.setValue(opaqueBackground, forKey: "drawsBackground")
+        webView.underPageBackgroundColor = opaqueBackground ? .white : .clear
         webView.allowsMagnification = interactive
         webView.navigationDelegate = context.coordinator
         context.coordinator.webView = webView
@@ -1063,6 +1185,34 @@ enum MermaidImageFix {
         ctx.scaleBy(x: 1, y: -1)
         ctx.draw(cgImage, in: CGRect(origin: .zero, size: size))
         return flipped
+    }
+}
+
+enum MermaidImageRenderer {
+    private static let queue = DispatchQueue(
+        label: "local.bubble.mermaid-render",
+        qos: .userInitiated,
+        autoreleaseFrequency: .workItem
+    )
+
+    static func render(
+        source: String,
+        theme: DiagramTheme,
+        scale: CGFloat,
+        completion: @escaping (Result<NSImage?, Error>) -> Void
+    ) {
+        queue.async {
+            let result: Result<NSImage?, Error>
+            do {
+                let image = try MermaidRenderer.renderImage(source: source, theme: theme, scale: scale)
+                result = .success(image.map(MermaidImageFix.upright))
+            } catch {
+                result = .failure(error)
+            }
+            DispatchQueue.main.async {
+                completion(result)
+            }
+        }
     }
 }
 

@@ -43,8 +43,11 @@ final class AcpClient: @unchecked Sendable {
             if process?.isRunning == true { return }
             OverlayPaths.bootstrap()
 
-            guard OverlayPaths.resolveCommand("pi") != nil else {
+            guard BubblePiRuntimePatch.isApplied(runtime: OverlayPaths.runtime) else {
                 throw RPCError(code: -1, message: "pi not found. Type /setup to install it into ~/.bubble/runtime.")
+            }
+            guard BubblePiAcpPatch.isApplied(runtime: OverlayPaths.runtime) else {
+                throw RPCError(code: -1, message: "Bubble's branch adapter is missing. Type /setup to install it into ~/.bubble/runtime.")
             }
             guard let launch = OverlayPaths.resolveAgentLaunch() else {
                 throw RPCError(code: -1, message: "pi-acp not found. Type /setup to install it into ~/.bubble/runtime.")
@@ -215,6 +218,53 @@ final class AcpClient: @unchecked Sendable {
         return object.string("stopReason") ?? "end_turn"
     }
 
+    func conversationTree(sessionId override: String? = nil) async throws -> ConversationTreeSnapshot {
+        guard let sessionId = override ?? sessionId else {
+            throw RPCError(code: -4, message: "no session")
+        }
+        let result = try await request("_bubble/session/tree", params: [
+            "sessionId": sessionId,
+        ])
+        guard let snapshot = ConversationTreeSnapshot(response: result) else {
+            throw RPCError(code: -7, message: "Pi returned an unreadable conversation tree.")
+        }
+        return snapshot
+    }
+
+    func navigateConversation(
+        to targetID: String,
+        sessionId override: String? = nil
+    ) async throws -> ConversationTreeSnapshot {
+        guard let sessionId = override ?? sessionId else {
+            throw RPCError(code: -4, message: "no session")
+        }
+        let result = try await request("_bubble/session/navigate_tree", params: [
+            "sessionId": sessionId,
+            "targetId": targetID,
+        ])
+        guard let snapshot = ConversationTreeSnapshot(response: result) else {
+            throw RPCError(code: -7, message: "Pi returned an unreadable conversation tree.")
+        }
+        return snapshot
+    }
+
+    func selectConversationLeaf(
+        _ targetID: String,
+        sessionId override: String? = nil
+    ) async throws -> ConversationTreeSnapshot {
+        guard let sessionId = override ?? sessionId else {
+            throw RPCError(code: -4, message: "no session")
+        }
+        let result = try await request("_bubble/session/select_leaf", params: [
+            "sessionId": sessionId,
+            "targetId": targetID,
+        ])
+        guard let snapshot = ConversationTreeSnapshot(response: result) else {
+            throw RPCError(code: -7, message: "Pi returned an unreadable conversation tree.")
+        }
+        return snapshot
+    }
+
     func cancel(sessionId override: String? = nil) {
         guard let sessionId = override ?? sessionId else { return }
         queue.async { [weak self] in
@@ -230,6 +280,13 @@ final class AcpClient: @unchecked Sendable {
                 continuation.resume(returning: ["stopReason": "cancelled"])
             }
         }
+    }
+
+    func steer(_ text: String, images: [PromptImage] = []) async throws {
+        guard let sessionId else {
+            throw RPCError(code: -4, message: "no session")
+        }
+        try await SteeringControlClient.send(sessionId: sessionId, text: text, images: images)
     }
 
     func createSession(cwd: URL) async throws -> String {

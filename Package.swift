@@ -19,10 +19,15 @@ let package = Package(
             name: "BubbleMounts",
             path: "Sources/BubbleMounts"
         ),
+        .target(
+            name: "BubbleDiagramSupport",
+            path: "Sources/BubbleDiagramSupport"
+        ),
         .executableTarget(
             name: "Bubble",
             dependencies: [
                 "BubbleMounts",
+                "BubbleDiagramSupport",
                 .product(name: "MarkdownUI", package: "swift-markdown-ui"),
                 .product(name: "BeautifulMermaid", package: "beautiful-mermaid-swift"),
             ],
@@ -37,6 +42,14 @@ let package = Package(
                 .linkedFramework("WebKit"),
                 .linkedFramework("Network"),
             ]
+        ),
+        .executableTarget(
+            name: "DiagramChecks",
+            dependencies: [
+                "BubbleDiagramSupport",
+                .product(name: "BeautifulMermaid", package: "beautiful-mermaid-swift"),
+            ],
+            path: "Tests/DiagramChecks"
         ),
     ]
 )

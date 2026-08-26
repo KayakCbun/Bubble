@@ -2,12 +2,19 @@ import CoreGraphics
 import Foundation
 
 struct DraftClip: Equatable, Identifiable {
+    enum Kind: Equatable {
+        case paste
+        case quote
+    }
+
     var id: UUID
     var text: String
+    var kind: Kind
 
-    init(id: UUID = UUID(), text: String) {
+    init(id: UUID = UUID(), text: String, kind: Kind = .paste) {
         self.id = id
         self.text = text
+        self.kind = kind
     }
 }
 
@@ -52,16 +59,25 @@ enum OverlayComposer {
     }
 
     static let defaultFieldWidth: CGFloat = 420
-    static let defaultFontSize: CGFloat = 13
+    static let defaultFontSize: CGFloat = 14
+
+    static let trailingControlSize: CGFloat = 28
 
     static func fieldWidth(
         inputWidth: CGFloat,
         avatarSize: CGFloat,
-        buttonSize: CGFloat = 28,
+        buttonSize: CGFloat = trailingControlSize,
         spacing: CGFloat = 8,
         horizontalPadding: CGFloat = 12
     ) -> CGFloat {
         max(80, inputWidth - horizontalPadding * 2 - avatarSize - buttonSize - spacing * 2)
+    }
+
+    static func attachmentChipMaxWidth(
+        inputWidth: CGFloat = 520,
+        horizontalPadding: CGFloat = 12
+    ) -> CGFloat {
+        max(120, inputWidth - horizontalPadding * 2)
     }
 
     static func visibleLineCount(
@@ -132,6 +148,10 @@ enum OverlayComposer {
         return verticalPadding * 2 + row + extra
     }
 
+    static func chromeHeightNeedsUpdate(previous: CGFloat, next: CGFloat) -> Bool {
+        abs(previous - next) > 0.5
+    }
+
     static func intake(text: String, imagePNG: Data?, fileURLs: [URL] = []) -> PasteIntake {
         var result = PasteIntake()
         if let png = imagePNG, png.count <= maxImageBytes {
@@ -161,7 +181,7 @@ enum OverlayComposer {
         return result
     }
 
-    static func sendPayload(draft: String, clips: [String], imageCount: Int) -> (display: String, prompt: String) {
+    static func sendPayload(draft: String, clips: [DraftClip], imageCount: Int) -> (display: String, prompt: String) {
         var display: [String] = []
         var prompt: [String] = []
         let caption = draft.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -170,10 +190,15 @@ enum OverlayComposer {
             prompt.append(caption)
         }
         for clip in clips {
-            let body = clip.trimmingCharacters(in: .whitespacesAndNewlines)
+            let body = clip.text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !body.isEmpty else { continue }
-            prompt.append(body)
-            display.append(clipPreview(body))
+            prompt.append(promptFragment(for: clip))
+            switch clip.kind {
+            case .quote:
+                display.append(clipLabel(clip))
+            case .paste:
+                display.append(clipPreview(body))
+            }
         }
         if imageCount == 1 {
             prompt.append("[Image attached]")
@@ -196,11 +221,35 @@ enum OverlayComposer {
     }
 
     static func clipLabel(_ text: String) -> String {
-        let count = text.trimmingCharacters(in: .whitespacesAndNewlines).count
-        let formatter = NumberFormatter()
-        formatter.numberStyle = .decimal
-        let shown = formatter.string(from: NSNumber(value: count)) ?? "\(count)"
-        return "Pasted text · \(shown) characters"
+        clipLabel(DraftClip(text: text, kind: .paste))
+    }
+
+    static func clipLabel(_ clip: DraftClip) -> String {
+        let body = clip.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch clip.kind {
+        case .quote:
+            let compact = body.replacingOccurrences(of: "\n", with: " ")
+            if compact.count <= 42 {
+                return "Quote · \(compact)"
+            }
+            return "Quote · \(compact.prefix(41))…"
+        case .paste:
+            let count = body.count
+            let formatter = NumberFormatter()
+            formatter.numberStyle = .decimal
+            let shown = formatter.string(from: NSNumber(value: count)) ?? "\(count)"
+            return "Pasted text · \(shown) characters"
+        }
+    }
+
+    static func promptFragment(for clip: DraftClip) -> String {
+        let body = clip.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch clip.kind {
+        case .paste:
+            return body
+        case .quote:
+            return "Quoted from the conversation:\n\(body)"
+        }
     }
 
     private static func isPathOnly(_ text: String, files: [URL]) -> Bool {

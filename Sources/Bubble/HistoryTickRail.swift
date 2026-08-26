@@ -1,7 +1,6 @@
 import SwiftUI
 
 enum HistoryLimits {
-    static let maxTurns = 30
     static let maxTitleChars = 32
     static let maxBodyChars = 80
     static let rawScanChars = 2000
@@ -12,15 +11,38 @@ struct HistoryTick: Identifiable, Equatable {
     var id: UUID
     var title: String
     var body: String
+    var branchCount: Int = 1
 }
 
 enum HistoryPreview {
+    private final class CacheEntry: NSObject {
+        var text: String
+        var preview: (title: String, body: String)
+
+        init(text: String, preview: (title: String, body: String)) {
+            self.text = text
+            self.preview = preview
+        }
+    }
+
+    private static let cache: NSCache<NSUUID, CacheEntry> = {
+        let cache = NSCache<NSUUID, CacheEntry>()
+        cache.countLimit = 4_096
+        return cache
+    }()
+
     static func ticks(from items: [ChatItem]) -> [HistoryTick] {
         items
             .filter { $0.kind == .user }
-            .suffix(HistoryLimits.maxTurns)
             .compactMap { item in
-                let preview = make(from: item.text)
+                let key = NSUUID(uuidString: item.id.uuidString)!
+                let preview: (title: String, body: String)
+                if let cached = cache.object(forKey: key), cached.text == item.text {
+                    preview = cached.preview
+                } else {
+                    preview = make(from: item.text)
+                    cache.setObject(CacheEntry(text: item.text, preview: preview), forKey: key)
+                }
                 guard !preview.title.isEmpty else { return nil }
                 return HistoryTick(id: item.id, title: preview.title, body: preview.body)
             }
@@ -82,52 +104,78 @@ struct HistoryTickRail: View {
     var viewportHeight: CGFloat
     var onSelect: (UUID) -> Void
 
-    @State private var hovered: UUID?
+    @State private var hoveredIndex: Int?
+    @State private var animatedHoverPosition: CGFloat = 0
+    @State private var visibleRowIDs: Set<String> = []
     @State private var hoverClear: DispatchWorkItem?
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         let height = max(viewportHeight, 24)
-        let layout = TickLayout(count: ticks.count, height: height)
+        let layout = HistoryRailLayout(count: ticks.count, viewportHeight: height)
         ZStack(alignment: .topLeading) {
-            VStack(alignment: .leading, spacing: layout.gap) {
-                ForEach(Array(ticks.enumerated()), id: \.element.id) { index, tick in
-                    tickMark(tick, isLast: index == ticks.count - 1)
+            HistoryRailMarks(
+                ticks: ticks,
+                layout: layout,
+                visibleRowIDs: visibleRowIDs,
+                hoverPosition: animatedHoverPosition,
+                isHovering: hoveredIndex != nil
+            )
+            .frame(width: HistoryLimits.gutter, height: height)
+            .contentShape(Rectangle())
+            .onContinuousHover { phase in
+                switch phase {
+                case .active(let location):
+                    updateHover(at: location.y, layout: layout)
+                case .ended:
+                    setHovered(nil)
                 }
             }
-            .padding(.leading, 6)
-            .frame(height: height, alignment: .center)
+            .simultaneousGesture(
+                SpatialTapGesture().onEnded { event in
+                    guard let index = layout.index(at: event.location.y),
+                          ticks.indices.contains(index) else { return }
+                    onSelect(ticks[index].id)
+                }
+            )
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Conversation history")
+            .accessibilityValue(accessibilityValue)
+            .accessibilityHint("Adjust to preview turns, then activate to jump")
+            .accessibilityAdjustableAction { direction in
+                let current = hoveredIndex ?? max(ticks.count - 1, 0)
+                switch direction {
+                case .increment:
+                    setHovered(min(current + 1, ticks.count - 1))
+                case .decrement:
+                    setHovered(max(current - 1, 0))
+                @unknown default:
+                    break
+                }
+            }
+            .accessibilityAction {
+                guard let index = hoveredIndex, ticks.indices.contains(index) else { return }
+                onSelect(ticks[index].id)
+            }
 
-            if let hovered, let index = ticks.firstIndex(where: { $0.id == hovered }) {
+            if let index = hoveredIndex, ticks.indices.contains(index) {
                 previewCard(ticks[index])
                     .offset(
                         x: 20,
                         y: clampedCardY(
-                            tickY: layout.y(index: index),
+                            tickY: layout.y(for: index),
                             height: height
                         )
                     )
+                    .transition(.opacity.combined(with: .scale(scale: 0.97, anchor: .leading)))
                     .zIndex(2)
             }
         }
         .frame(height: height, alignment: .leading)
-        .animation(OverlayMotion.quick, value: hovered)
-    }
-
-    private func tickMark(_ tick: HistoryTick, isLast: Bool) -> some View {
-        let active = hovered == tick.id
-        return Button {
-            onSelect(tick.id)
-        } label: {
-            Capsule(style: .continuous)
-                .fill(Color.primary.opacity(active ? 0.82 : (isLast ? 0.45 : 0.22)))
-                .frame(width: active ? 16 : (isLast ? 12 : 10), height: active ? 3 : 1.5)
-                .frame(width: 18, height: 8, alignment: .leading)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .onHover { inside in
-            setHovered(inside ? tick.id : nil)
+        .animation(OverlayMotion.quick, value: hoveredIndex)
+        .onReceive(NotificationCenter.default.publisher(for: .transcriptViewportChanged)) { note in
+            guard let ids = note.userInfo?[TranscriptViewportUserInfoKey.visibleRowIDs] as? [String] else { return }
+            visibleRowIDs = Set(ids)
         }
     }
 
@@ -144,6 +192,11 @@ struct HistoryTickRail: View {
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            if tick.branchCount > 1 {
+                Text("\(tick.branchCount) conversation paths")
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(.tertiary)
+            }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
@@ -158,24 +211,48 @@ struct HistoryTickRail: View {
                 .stroke(Color.primary.opacity(0.08), lineWidth: 1)
         )
         .onHover { inside in
-            setHovered(inside ? tick.id : nil)
+            if inside, let index = ticks.firstIndex(where: { $0.id == tick.id }) {
+                setHovered(index)
+            } else {
+                setHovered(nil)
+            }
         }
     }
 
     private var cardFill: Color {
         colorScheme == .dark
-            ? Color(white: 0.16).opacity(0.8)
-            : Color.white.opacity(0.8)
+            ? Color(white: 0.16)
+            : Color.white
     }
 
-    private func setHovered(_ id: UUID?) {
+    private var accessibilityValue: String {
+        guard let index = hoveredIndex, ticks.indices.contains(index) else {
+            return "\(ticks.count) turns"
+        }
+        return "Turn \(index + 1) of \(ticks.count): \(ticks[index].title)"
+    }
+
+    private func updateHover(at y: CGFloat, layout: HistoryRailLayout) {
+        guard let index = layout.index(at: y), index != hoveredIndex else { return }
+        setHovered(index)
+    }
+
+    private func setHovered(_ index: Int?) {
         hoverClear?.cancel()
-        if let id {
-            hovered = id
+        if let index {
+            let wasHovering = hoveredIndex != nil
+            hoveredIndex = index
+            if wasHovering {
+                withAnimation(OverlayMotion.quick) {
+                    animatedHoverPosition = CGFloat(index)
+                }
+            } else {
+                animatedHoverPosition = CGFloat(index)
+            }
             return
         }
         let work = DispatchWorkItem {
-            hovered = nil
+            hoveredIndex = nil
         }
         hoverClear = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: work)
@@ -187,29 +264,48 @@ struct HistoryTickRail: View {
     }
 }
 
-private struct TickLayout {
-    var gap: CGFloat
-    var step: CGFloat
-    var originY: CGFloat
+private struct HistoryRailMarks: View, Animatable {
+    var ticks: [HistoryTick]
+    var layout: HistoryRailLayout
+    var visibleRowIDs: Set<String>
+    var hoverPosition: CGFloat
+    var isHovering: Bool
 
-    init(count: Int, height: CGFloat) {
-        let inset: CGFloat = 10
-        let usable = max(height - inset * 2, 24)
-        let n = max(count, 1)
-        let tick: CGFloat = 8
-        let preferred: CGFloat = 5
-        let natural = CGFloat(n) * tick + CGFloat(max(n - 1, 0)) * preferred
-        if natural <= usable {
-            gap = preferred
-            originY = ((height - natural) / 2).rounded()
-        } else {
-            gap = max(2, (usable - CGFloat(n) * tick) / CGFloat(max(n - 1, 1)))
-            originY = inset
-        }
-        step = tick + gap
+    var animatableData: CGFloat {
+        get { hoverPosition }
+        set { hoverPosition = newValue }
     }
 
-    func y(index: Int) -> CGFloat {
-        originY + CGFloat(index) * step
+    var body: some View {
+        Canvas { context, _ in
+            for (index, tick) in ticks.enumerated() {
+                let hoveredDistance = isHovering ? abs(CGFloat(index) - hoverPosition) : .infinity
+                let inViewport = visibleRowIDs.contains(tick.id.uuidString)
+                let isLatest = index == ticks.count - 1
+                let width = hoveredDistance < 3
+                    ? HistoryRailPolicy.width(distance: hoveredDistance)
+                    : (inViewport ? 11 : (isLatest ? 9 : 7))
+                let height: CGFloat = hoveredDistance < 0.55 ? 3 : (inViewport ? 2.5 : 2)
+                let opacity = hoveredDistance < 3
+                    ? 0.88
+                    : (inViewport ? 0.72 : (isLatest ? 0.46 : 0.20))
+                let rect = CGRect(x: 6, y: layout.y(for: index) - height / 2, width: width, height: height)
+                context.fill(
+                    Path(roundedRect: rect, cornerRadius: height / 2),
+                    with: .color(Color.primary.opacity(opacity))
+                )
+
+                if tick.branchCount > 1 {
+                    var branch = Path()
+                    branch.move(to: CGPoint(x: rect.maxX - 1, y: rect.midY))
+                    branch.addLine(to: CGPoint(x: min(rect.maxX + 5, 21), y: rect.midY - 3))
+                    context.stroke(
+                        branch,
+                        with: .color(Color.primary.opacity(max(opacity - 0.12, 0.18))),
+                        lineWidth: 1.5
+                    )
+                }
+            }
+        }
     }
 }

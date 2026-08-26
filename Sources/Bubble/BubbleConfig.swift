@@ -117,7 +117,7 @@ enum BubbleConfig {
 
     You run on Pi coding-agent through `pi-acp`. cwd is `~/.bubble/workspace`. Credentials and the model catalog live in `~/.pi/agent/`. Bubble's model and thinking live in `~/.bubble/config.json`. Do not rewrite Pi TUI settings to change your model. Use `/model` and `/thinking`.
 
-    If Pi is missing: `curl -fsSL https://pi.dev/install.sh | sh`. If `pi-acp` is missing: `npm install -g pi-acp` (Node 22+). If the model list is empty, nobody is signed in. Use `/login` or run `pi` in Terminal.
+    If Pi or Bubble's ACP adapter is missing, tell the user to type `/setup` (Node 22+). If the model list is empty, nobody is signed in. Use `/login` or run `pi` in Terminal.
 
     Skills or the workspace extension not loading usually means this workspace is untrusted. `~/.pi/agent/trust.json` must include `~/.bubble/workspace`. Logs are `~/.bubble/overlay.log`.
 
@@ -269,6 +269,116 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import crypto from "node:crypto";
+
+let steeringServer: net.Server | undefined;
+let steeringControlFile: string | undefined;
+let steeringToken = "";
+let steeringBusy = false;
+let steeringGeneration = 0;
+let boundSteeringSessionId = "";
+
+function removeSteeringControl() {
+  if (!steeringControlFile) return;
+  try { fs.unlinkSync(steeringControlFile); } catch {}
+}
+
+function sessionIdFromFile(file: string | undefined): string | undefined {
+  if (!file) return undefined;
+  const match = path.basename(file).match(/_([^_]+)\.jsonl$/);
+  return match?.[1];
+}
+
+function publishSteeringControl() {
+  const address = steeringServer?.address();
+  if (!steeringBusy || !steeringControlFile || !address || typeof address === "string") return;
+  fs.writeFileSync(
+    steeringControlFile,
+    JSON.stringify({ port: address.port, token: steeringToken, generation: steeringGeneration }),
+    { mode: 0o600 },
+  );
+}
+
+function eventSessionId(ctx: any): string | undefined {
+  return sessionIdFromFile(ctx?.sessionManager?.getSessionFile?.());
+}
+
+function isBoundSteeringSession(ctx: any): boolean {
+  const sessionId = eventSessionId(ctx);
+  if (sessionId && boundSteeringSessionId && sessionId !== boundSteeringSessionId) return false;
+  return true;
+}
+
+function startSteeringControl(pi: ExtensionAPI, sessionFile: string | undefined) {
+  const sessionId = sessionIdFromFile(sessionFile);
+  if (!sessionId) return;
+  if (boundSteeringSessionId && sessionId !== boundSteeringSessionId) return;
+  boundSteeringSessionId = sessionId;
+  removeSteeringControl();
+  const directory = path.join(os.homedir(), ".bubble", "steering");
+  fs.mkdirSync(directory, { recursive: true });
+  steeringControlFile = path.join(directory, `${sessionId}.json`);
+
+  if (!steeringServer) {
+    steeringServer = net.createServer((socket) => {
+      let buffer = "";
+      let handling = false;
+      let replied = false;
+      const reply = (payload: unknown) => {
+        if (replied || socket.destroyed || socket.writableEnded) return;
+        replied = true;
+        socket.end(JSON.stringify(payload) + "\n");
+      };
+      socket.setTimeout(5000);
+      socket.on("timeout", () => socket.destroy());
+      socket.on("error", () => {});
+      socket.on("data", async (chunk) => {
+        if (handling) return;
+        buffer += chunk.toString("utf8");
+        const newline = buffer.indexOf("\n");
+        if (newline < 0) return;
+        handling = true;
+        try {
+          const request = JSON.parse(buffer.slice(0, newline)) as {
+            token?: string;
+            generation?: number;
+            text?: string;
+            images?: Array<{ mimeType?: string; data?: string }>;
+          };
+          if (request.token !== steeringToken || request.generation !== steeringGeneration) {
+            throw new Error("steer-stale");
+          }
+          if (!steeringBusy) throw new Error("steer-unavailable");
+          const text = String(request.text ?? "").trim();
+          const images = (request.images ?? [])
+            .filter((image) => image.mimeType && image.data)
+            .map((image) => ({
+              type: "image" as const,
+              source: {
+                type: "base64" as const,
+                mediaType: image.mimeType!,
+                data: image.data!,
+              },
+            }));
+          if (!text && images.length === 0) throw new Error("empty steering message");
+          const content = images.length === 0
+            ? text
+            : [{ type: "text" as const, text }, ...images];
+          await pi.sendUserMessage(content, { deliverAs: "steer" });
+          reply({ ok: true });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          reply({ ok: false, error: message });
+        }
+      });
+    });
+    steeringServer.listen(0, "127.0.0.1", () => {
+      publishSteeringControl();
+    });
+  } else {
+    publishSteeringControl();
+  }
+}
 
 function controlConfig() {
   const file = path.join(os.homedir(), ".bubble", "control.json");
@@ -281,8 +391,11 @@ function call(method: string, params: Record<string, unknown>): Promise<unknown>
   return new Promise((resolve, reject) => {
     const socket = net.connect({ host: "127.0.0.1", port: cfg.port });
     let buf = "";
+    let settled = false;
     const finish = (err: Error | null, value?: unknown) => {
-      socket.end();
+      if (settled) return;
+      settled = true;
+      socket.destroy();
       if (err) reject(err);
       else resolve(value);
     };
@@ -313,6 +426,42 @@ async function textResult(method: string, params: Record<string, unknown>) {
 }
 
 export default function (pi: ExtensionAPI) {
+  pi.registerCommand("bubble-navigate", {
+    description: "Move Bubble to a conversation-tree entry",
+    async handler(args, ctx) {
+      const targetId = args.trim();
+      if (!targetId) throw new Error("target entry is required");
+      const result = await ctx.navigateTree(targetId, { summarize: false });
+      if (result.cancelled) throw new Error("branch navigation was cancelled");
+    },
+  });
+
+  pi.on("session_start", (_event, ctx) => {
+    startSteeringControl(pi, ctx.sessionManager.getSessionFile());
+  });
+  pi.on("agent_start", (_event, ctx) => {
+    if (!isBoundSteeringSession(ctx)) return;
+    steeringBusy = true;
+    steeringGeneration += 1;
+    steeringToken = crypto.randomUUID();
+    publishSteeringControl();
+  });
+  pi.on("agent_settled", (_event, ctx) => {
+    if (!isBoundSteeringSession(ctx)) return;
+    steeringBusy = false;
+    steeringToken = crypto.randomUUID();
+    removeSteeringControl();
+  });
+  pi.on("session_shutdown", (_event, ctx) => {
+    if (!isBoundSteeringSession(ctx)) return;
+    steeringBusy = false;
+    removeSteeringControl();
+    steeringControlFile = undefined;
+    boundSteeringSessionId = "";
+    steeringServer?.close();
+    steeringServer = undefined;
+  });
+
   pi.registerTool({
     name: "workspace_run",
     label: "Workspace Run",

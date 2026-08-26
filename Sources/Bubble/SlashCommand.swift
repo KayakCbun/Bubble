@@ -62,7 +62,7 @@ struct SlashCommand: Identifiable, Equatable {
         .init(name: "login", description: "Sign in a Pi provider (API key or Terminal)", hint: "provider [api-key]", local: true),
         .init(name: "logout", description: "Remove a saved Pi provider", hint: "provider", local: true),
         .init(name: "resume", description: "Resume a previous Bubble session", hint: "session-id", local: true),
-        .init(name: "tree", description: "Show this session's user turns", hint: "n", local: true),
+        .init(name: "tree", description: "Edit an earlier message and branch from it", hint: "message", local: true),
         .init(name: "reload", description: "Reconnect Pi and refresh commands", local: true),
         .init(name: "model", description: "Set Bubble's model (does not change Pi TUI)", hint: "provider/id", local: true),
         .init(name: "thinking", description: "Set Bubble's thinking level", hint: "off|minimal|low|medium|high|xhigh", local: true),

@@ -14,9 +14,14 @@ func expectContains(_ haystack: String, _ needle: String, _ message: String) {
 @main
 struct PiSetupCheck {
     static func main() {
+        if ProcessInfo.processInfo.environment["BUBBLE_WRITE_EXTENSION"] == "1" {
+            BubbleConfig.ensureWorkspaceExtension()
+        }
         testParseNodeVersion()
         testNodeVersionAtLeast()
         testSetupCard()
+        testSteeringExtension()
+        testBranchExtension()
         print("PASS: pi setup diagnose")
     }
 
@@ -85,5 +90,32 @@ struct PiSetupCheck {
         expectContains(installCard, "~/.bubble/runtime", "install target is ~/.bubble/runtime")
         expectContains(installCard, "Type /setup to install Pi", "ready-to-install card is one command")
         expect(!installCard.contains("Install Node first"), "supported node does not ask to install Node")
+    }
+
+    static func testSteeringExtension() {
+        let source = BubbleConfig.workspaceExtensionSource
+        expectContains(source, "pi.sendUserMessage(content, { deliverAs: \"steer\" })", "extension uses native steering")
+        expectContains(source, "await pi.sendUserMessage(content, { deliverAs: \"steer\" })", "steering reply waits for delivery")
+        expectContains(source, "let handling = false", "steering socket handles one request")
+        expectContains(source, "let replied = false", "steering socket sends one reply")
+        expectContains(source, "socket.on(\"error\", () => {})", "steering socket errors cannot crash Pi RPC")
+        expectContains(source, "let settled = false", "workspace control call settles once")
+        expectContains(source, "socket.destroy()", "workspace control closes the socket once")
+        expectContains(source, "if (!steeringBusy) throw new Error(\"steer-unavailable\")", "extension rejects closed steering windows")
+        expectContains(source, "path.join(os.homedir(), \".bubble\", \"steering\")", "extension publishes a session-local endpoint")
+        expectContains(source, "request.token !== steeringToken || request.generation !== steeringGeneration", "steering endpoint is bound to one turn")
+        expectContains(source, "steeringGeneration += 1", "each active turn gets a new steering generation")
+        expectContains(source, "boundSteeringSessionId", "steering stays bound to the main session")
+        expectContains(
+            source,
+            "if (boundSteeringSessionId && sessionId !== boundSteeringSessionId) return",
+            "workspace child sessions must not replace the main steering endpoint"
+        )
+    }
+
+    static func testBranchExtension() {
+        let source = BubbleConfig.workspaceExtensionSource
+        expectContains(source, "pi.registerCommand(\"bubble-navigate\"", "extension owns hidden branch navigation")
+        expectContains(source, "ctx.navigateTree(targetId, { summarize: false })", "branch navigation keeps the current Pi session")
     }
 }
