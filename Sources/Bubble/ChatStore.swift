@@ -2658,7 +2658,7 @@ final class ChatStore {
         switch resolution {
         case .side(let sessionID):
             if let ordinal = onResumeInSideSession?(sessionID) {
-                presentSessionMessage("Opened session \(sessionID) in Side Session \(ordinal).")
+                presentSessionMessage("Opening session \(sessionID) in Side Session \(ordinal).")
             }
         case .replaceCurrent(let sessionID):
             resumeReplacingCurrent(sessionID)

@@ -362,18 +362,7 @@ struct OverlayView: View {
             Rectangle()
                 .fill(OverlaySurface.hairline)
                 .frame(height: 0.5)
-            VStack(spacing: 12) {
-                Image(nsImage: NSApp.applicationIconImage)
-                    .resizable()
-                    .interpolation(.high)
-                    .scaledToFit()
-                    .frame(width: 46, height: 46)
-                    .opacity(0.72)
-                Text("Opening workspace…")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.tertiary)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            BubbleOpeningPlaceholder(text: "Opening workspace…")
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -2906,21 +2895,29 @@ private struct SessionSwitchLoadingMask: View {
         ZStack {
             Rectangle()
                 .fill(.regularMaterial)
-
-            VStack(spacing: 12) {
-                Image(nsImage: NSApp.applicationIconImage)
-                    .resizable()
-                    .interpolation(.high)
-                    .scaledToFit()
-                    .frame(width: 46, height: 46)
-                    .opacity(0.72)
-                Text("Opening session…")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.tertiary)
-            }
+            BubbleOpeningPlaceholder(text: "Opening session…")
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Opening session")
+    }
+}
+
+private struct BubbleOpeningPlaceholder: View {
+    let text: String
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(nsImage: NSApp.applicationIconImage)
+                .resizable()
+                .interpolation(.high)
+                .scaledToFit()
+                .frame(width: 46, height: 46)
+                .opacity(0.72)
+            Text(text)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.tertiary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
