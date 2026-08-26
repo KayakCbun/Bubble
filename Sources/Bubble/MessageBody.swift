@@ -1,7 +1,6 @@
 import AppKit
 import SwiftUI
 import MarkdownUI
-import LaTeXSwiftUI
 import BeautifulMermaid
 import BubbleDiagramSupport
 import WebKit
@@ -57,23 +56,13 @@ struct MessageBody: View {
             case .mermaid(let source):
                 MermaidView(source: MessagePart.normalizeMermaid(source), streaming: streaming)
             case .math(let expression):
-                if let native = MarkdownMath.nativeExpression(expression) {
-                    Text(native)
-                        .font(.system(size: OverlayMetrics.fontSize + 2, design: .serif))
-                        .foregroundStyle(OverlaySurface.conversationInk)
-                        .bubbleTextSelection()
-                        .frame(maxWidth: .infinity, alignment: .center)
-                        .padding(.vertical, 4)
-                        .accessibilityLabel(expression)
-                } else {
-                    LaTeX("$$\(MarkdownMath.typesetExpression(expression))$$")
-                        .renderingStyle(.redactedOriginal)
-                        .font(.system(size: OverlayMetrics.fontSize + 2, design: .serif))
-                        .foregroundStyle(OverlaySurface.conversationInk)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                        .padding(.vertical, 4)
-                        .accessibilityLabel(expression)
-                }
+                Text(MarkdownMath.nativeExpression(expression) ?? expression)
+                    .font(.system(size: OverlayMetrics.fontSize + 2, design: .serif))
+                    .foregroundStyle(OverlaySurface.conversationInk)
+                    .bubbleTextSelection()
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 4)
+                    .accessibilityLabel(expression)
             }
         }
     }

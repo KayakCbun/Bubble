@@ -101,11 +101,6 @@ rm -rf "$APP" "$ROOT/dist/FxOverlay.app"
 mkdir -p "$MACOS" "$RES"
 cp "$BIN" "$MACOS/Bubble"
 cp "$ROOT/Resources/Info.plist" "$APP/Contents/Info.plist"
-for bundle in MathJaxSwift_MathJaxSwift.bundle LaTeXSwiftUI_LaTeXSwiftUI.bundle; do
-  if [[ -d "$(dirname "$BIN")/$bundle" ]]; then
-    cp -R "$(dirname "$BIN")/$bundle" "$APP/$bundle"
-  fi
-done
 mkdir -p "$RES/Avatar" "$RES/Mermaid"
 cp -R "$ROOT/Resources/Avatar/." "$RES/Avatar/"
 cp -R "$ROOT/Resources/Mermaid/." "$RES/Mermaid/"
