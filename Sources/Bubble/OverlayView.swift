@@ -764,31 +764,10 @@ struct OverlayView: View {
             }
             .overlay(alignment: .bottom) {
                 if followState.showsScrollToEnd {
-                    Button {
+                    ScrollToEndChip {
                         scrollToTranscriptEnd(proxy)
-                    } label: {
-                        HStack(spacing: 8) {
-                            Image(systemName: "chevron.down")
-                                .font(.system(size: 11, weight: .semibold))
-                            Text("Scroll to end")
-                                .font(.system(size: 13.5, weight: .medium))
-                        }
-                        .foregroundStyle(.primary)
-                        .padding(.horizontal, 15)
-                        .padding(.vertical, 9)
-                        .background(
-                            Capsule(style: .continuous)
-                                .fill(OverlaySurface.userCardFill)
-                                .shadow(color: .black.opacity(0.14), radius: 7, y: 3)
-                        )
-                        .overlay(
-                            Capsule(style: .continuous)
-                                .stroke(Color.primary.opacity(0.10), lineWidth: 1)
-                        )
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Scroll to end")
-                    .padding(.bottom, 12)
+                    .padding(.bottom, 10)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             }
@@ -2725,6 +2704,51 @@ private struct PreviewChromeButton: View {
         .animation(OverlayMotion.quick, value: hovered)
         .onHover { hovered = $0 }
         .help(help)
+    }
+}
+
+private struct ScrollToEndChip: View {
+    var action: () -> Void
+
+    @State private var hovered = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 9.5, weight: .semibold))
+                Text("Scroll to end")
+                    .font(.system(size: OverlayMetrics.chipSize, weight: .medium))
+            }
+            .foregroundStyle(OverlayMetrics.ink.opacity(hovered ? 0.82 : 0.48))
+            .padding(.horizontal, 11)
+            .padding(.vertical, 6)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(OverlaySurface.userCardFill.opacity(0.84))
+                    .shadow(
+                        color: .black.opacity(0.07),
+                        radius: 4,
+                        y: 2
+                    )
+            )
+            .overlay(
+                Capsule(style: .continuous)
+                    .stroke(Color.primary.opacity(0.07), lineWidth: 1)
+            )
+            .contentShape(Capsule(style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Scroll to end")
+        .onHover { hovering in
+            hovered = hovering
+            if hovering {
+                NSCursor.pointingHand.set()
+            } else {
+                NSCursor.arrow.set()
+            }
+        }
+        .animation(OverlayMotion.quick, value: hovered)
     }
 }
 
