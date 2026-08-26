@@ -92,10 +92,9 @@ private enum TranscriptRenderPlanCheck {
         expect(unicodeChunks.joined() == unicode, "UTF-8 chunking must be lossless")
         let longCode = "```swift\n" + Array(repeating: "let value = 1", count: 1_200).joined(separator: "\n") + "\n```"
         let codeChunks = WorkspaceTranscriptChunker.chunks(longCode, identity: "long-code")
-        expect(codeChunks.count > 4, "a giant fenced code block virtualizes into independently valid fences")
         expect(
-            codeChunks.allSatisfy { $0.hasPrefix("```swift\n") && $0.hasSuffix("```") },
-            "every virtual code row preserves fenced-code semantics"
+            codeChunks == [longCode],
+            "one fenced code block must remain one transcript row; its code view owns internal virtualization"
         )
         let giantTable = "| A | B |\n|---|---|\n" + Array(repeating: "| 1 | 2 |", count: 12_000).joined(separator: "\n")
         let tableChunks = WorkspaceTranscriptChunker.chunks(giantTable, identity: "giant-table")
@@ -155,11 +154,10 @@ private enum TranscriptRenderPlanCheck {
         let structuredElapsed = structuredStart.duration(to: .now)
         let structuredMilliseconds = Double(structuredElapsed.components.seconds) * 1_000
             + Double(structuredElapsed.components.attoseconds) / 1_000_000_000_000_000
-        expect(structuredAfter.units.count > 20, "100k+ streaming code is split into bounded render rows")
+        expect(structuredAfter.units.count == 1, "100k+ streaming code remains one transcript row")
         expect(
-            Array(structuredAfter.units.map(\.id).prefix(structuredBefore.units.count))
-                == structuredBefore.units.map(\.id),
-            "structured stream growth preserves every existing row identity"
+            structuredAfter.units.first?.id == structuredBefore.units.first?.id,
+            "structured stream growth preserves the transcript row identity"
         )
         expect(structuredMilliseconds < 20, "100k+ structured stream planning must stay near one frame, got \(structuredMilliseconds)ms")
         let tablePlanner = TranscriptRenderPlanner()

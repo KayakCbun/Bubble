@@ -44,7 +44,7 @@ enum WorkspaceTranscriptChunker {
         let bytes = Array(text.utf8)
         guard bytes.count > target else { return [text] }
         if containsASCII(bytes, "```") || containsASCII(bytes, "~~~") {
-            return fencedCodeChunks(text, target: target) ?? [text]
+            return [text]
         }
         if let tableChunks = mixedGFMTableChunks(text, target: target), tableChunks.count > 1 {
             return tableChunks
@@ -120,67 +120,6 @@ enum WorkspaceTranscriptChunker {
             return chunks
         }
         return nil
-    }
-
-    private static func fencedCodeChunks(_ text: String, target: Int) -> [String]? {
-        let markers = ["```", "~~~"]
-        guard let opening = markers.compactMap({ marker in
-            text.range(of: marker).map { (marker, $0) }
-        }).min(by: { $0.1.lowerBound < $1.1.lowerBound }) else { return nil }
-        guard let openingLineEnd = text[opening.1.upperBound...].firstIndex(of: "\n") else { return nil }
-        let openingLine = String(text[opening.1.lowerBound...openingLineEnd])
-        if openingLine.lowercased().contains("mermaid") { return nil }
-
-        let bodyStart = text.index(after: openingLineEnd)
-        let closing = text[bodyStart...].range(of: opening.0)
-        let bodyEnd = closing?.lowerBound ?? text.endIndex
-        let body = String(text[bodyStart..<bodyEnd])
-        let bodyChunks = boundedTextChunks(body, target: target)
-        guard bodyChunks.count > 1 else { return nil }
-
-        var result: [String] = []
-        let prefix = String(text[..<opening.1.lowerBound])
-        if !prefix.isEmpty {
-            result.append(contentsOf: buildChunks(prefix, target: target))
-        }
-        for chunk in bodyChunks {
-            var rendered = openingLine + chunk
-            if !rendered.hasSuffix("\n") { rendered.append("\n") }
-            rendered += opening.0
-            result.append(rendered)
-        }
-        if let closing {
-            let suffix = String(text[closing.upperBound...])
-            if !suffix.isEmpty {
-                result.append(contentsOf: buildChunks(suffix, target: target))
-            }
-        }
-        return result
-    }
-
-    private static func boundedTextChunks(_ text: String, target: Int) -> [String] {
-        let bytes = Array(text.utf8)
-        guard bytes.count > target else { return [text] }
-        var chunks: [String] = []
-        var start = 0
-        var index = min(target, bytes.count)
-        while start < bytes.count {
-            if index < bytes.count {
-                var boundary = index
-                while boundary < min(bytes.count, index + target / 4), bytes[boundary] != 10 {
-                    boundary += 1
-                }
-                if boundary < bytes.count { index = boundary + 1 }
-            }
-            while index < bytes.count, index > start, (bytes[index] & 0b1100_0000) == 0b1000_0000 {
-                index -= 1
-            }
-            if index <= start { index = min(bytes.count, start + target) }
-            chunks.append(String(decoding: bytes[start..<index], as: UTF8.self))
-            start = index
-            index = min(bytes.count, start + target)
-        }
-        return chunks
     }
 
     static func isParagraphLocal(_ text: String) -> Bool {
