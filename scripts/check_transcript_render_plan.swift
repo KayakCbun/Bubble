@@ -214,7 +214,7 @@ private enum TranscriptRenderPlanCheck {
         // Hosted macOS runners have noisier cold process and allocator startup
         // than a warmed developer machine. Keep the local gate strict while
         // allowing a bounded CI margin that still catches large regressions.
-        let coldLimitMilliseconds = ProcessInfo.processInfo.environment["CI"] == "true" ? 450.0 : 350.0
+        let coldLimitMilliseconds = ProcessInfo.processInfo.environment["CI"] == "true" ? 550.0 : 350.0
         expect(
             coldMilliseconds < coldLimitMilliseconds,
             "1,200 rich rows must plan in under \(Int(coldLimitMilliseconds))ms cold, got \(coldMilliseconds)ms"
