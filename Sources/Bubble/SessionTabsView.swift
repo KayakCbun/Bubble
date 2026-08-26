@@ -47,7 +47,6 @@ private struct SessionTabButton: View {
     let preview: String
     let select: () -> Void
     @State private var hovering = false
-    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         HStack(spacing: 2) {
@@ -71,7 +70,7 @@ private struct SessionTabButton: View {
                 )
                 .fill(
                     selected
-                        ? Color.accentColor.opacity(colorScheme == .dark ? 0.24 : 0.14)
+                        ? Color(nsColor: .controlBackgroundColor)
                         : Color(nsColor: hovering ? .controlBackgroundColor : .windowBackgroundColor)
                 )
                 .overlay {
