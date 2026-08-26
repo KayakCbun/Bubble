@@ -42,7 +42,7 @@ struct MessageBody: View {
                             FontWeight(.regular)
                         }
                         .font(OverlayMetrics.bodyFont)
-                        .textSelection(.enabled)
+                        .bubbleTextSelection()
                         .frame(maxWidth: .infinity, alignment: .leading)
                 } else {
                     ProseDocument(text: markdown)
@@ -61,7 +61,7 @@ struct MessageBody: View {
                     Text(native)
                         .font(.system(size: OverlayMetrics.fontSize + 2, design: .serif))
                         .foregroundStyle(OverlaySurface.conversationInk)
-                        .textSelection(.enabled)
+                        .bubbleTextSelection()
                         .frame(maxWidth: .infinity, alignment: .center)
                         .padding(.vertical, 4)
                         .accessibilityLabel(expression)
@@ -825,7 +825,7 @@ struct CodeBlockView: View {
                         Text(String(tail))
                             .font(.system(size: OverlayMetrics.codeSize, weight: .regular, design: .monospaced))
                             .foregroundStyle(OverlayMetrics.ink.opacity(0.88))
-                            .textSelection(.enabled)
+                            .bubbleTextSelection()
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -836,7 +836,7 @@ struct CodeBlockView: View {
                         Text(source)
                             .font(.system(size: OverlayMetrics.codeSize, weight: .regular, design: .monospaced))
                             .foregroundStyle(OverlayMetrics.ink.opacity(0.88))
-                            .textSelection(.enabled)
+                            .bubbleTextSelection()
                             .fixedSize(horizontal: true, vertical: true)
                     }
                 }
@@ -873,7 +873,7 @@ struct CodeBlockView: View {
             Text(chunk.hasSuffix("\n") ? String(chunk.dropLast()) : chunk)
                 .font(.system(size: OverlayMetrics.codeSize, weight: .regular, design: .monospaced))
                 .foregroundStyle(OverlayMetrics.ink.opacity(0.88))
-                .textSelection(.enabled)
+                .bubbleTextSelection()
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -963,7 +963,7 @@ struct MermaidView: View {
             } else {
                 Text(source)
                     .font(.system(size: 12, weight: .regular, design: .monospaced))
-                    .textSelection(.enabled)
+                    .bubbleTextSelection()
                     .padding(10)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(

@@ -36,6 +36,12 @@ enum TranscriptFollowPolicy {
     }
 }
 
+enum TranscriptTextSelectionPolicy {
+    static func isEnabled(isHovering: Bool, primaryButtonPressed: Bool) -> Bool {
+        isHovering || primaryButtonPressed
+    }
+}
+
 struct TranscriptFollowState: Equatable {
     private enum Mode: Equatable {
         case followingEnd

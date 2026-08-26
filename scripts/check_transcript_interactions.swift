@@ -66,6 +66,18 @@ private enum TranscriptInteractionCheck {
             "streaming content growth should continue following the latest response"
         )
         expect(
+            !TranscriptTextSelectionPolicy.isEnabled(isHovering: false, primaryButtonPressed: false),
+            "offscreen transcript rows must not retain SwiftUI selection overlays"
+        )
+        expect(
+            TranscriptTextSelectionPolicy.isEnabled(isHovering: true, primaryButtonPressed: false),
+            "hovering a transcript row enables quote selection"
+        )
+        expect(
+            TranscriptTextSelectionPolicy.isEnabled(isHovering: false, primaryButtonPressed: true),
+            "selection remains enabled while a drag leaves its source row"
+        )
+        expect(
             !TranscriptFollowPolicy.followsRevisionChange(isBusy: false),
             "idle transcript metadata writes must not yank the main conversation to the bottom"
         )

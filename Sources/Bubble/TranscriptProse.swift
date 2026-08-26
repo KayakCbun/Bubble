@@ -1,6 +1,36 @@
 import AppKit
 import SwiftUI
 
+private struct BubbleTextSelectionModifier: ViewModifier {
+    @Environment(\.bubbleTextSelectionEnabled) private var enabled
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if enabled {
+            content.textSelection(.enabled)
+        } else {
+            content
+        }
+    }
+}
+
+private struct BubbleTextSelectionEnabledKey: EnvironmentKey {
+    static let defaultValue = true
+}
+
+extension EnvironmentValues {
+    var bubbleTextSelectionEnabled: Bool {
+        get { self[BubbleTextSelectionEnabledKey.self] }
+        set { self[BubbleTextSelectionEnabledKey.self] = newValue }
+    }
+}
+
+extension View {
+    func bubbleTextSelection() -> some View {
+        modifier(BubbleTextSelectionModifier())
+    }
+}
+
 struct PathChipIcon: Equatable {
     var symbol: String
     var color: Color
@@ -648,7 +678,7 @@ struct ProseDocument: View {
                 .foregroundStyle(OverlaySurface.conversationInk)
                 .lineSpacing(OverlaySurface.proseLineSpacing)
                 .fixedSize(horizontal: false, vertical: true)
-                .textSelection(.enabled)
+                .bubbleTextSelection()
         } else {
             FlowWidthReader { width in
                 FlowLayout(horizontalSpacing: 5, verticalSpacing: OverlaySurface.proseLineSpacing) {
@@ -660,7 +690,7 @@ struct ProseDocument: View {
                                 .foregroundStyle(OverlaySurface.conversationInk)
                                 .lineLimit(1)
                                 .fixedSize(horizontal: true, vertical: true)
-                                .textSelection(.enabled)
+                                .bubbleTextSelection()
                         case .strong(let text):
                             Text(inlineMarkdown(text))
                                 .font(font)
@@ -668,7 +698,7 @@ struct ProseDocument: View {
                                 .foregroundStyle(OverlaySurface.conversationInk)
                                 .lineLimit(1)
                                 .fixedSize(horizontal: true, vertical: true)
-                                .textSelection(.enabled)
+                                .bubbleTextSelection()
                         case .chip(let text, let kind):
                             InlineChip(text: text, kind: kind)
                         }

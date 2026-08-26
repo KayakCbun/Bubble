@@ -159,7 +159,7 @@ private struct FileChangeDiffView: View {
                 ScrollView {
                     Text(diffText(current))
                         .font(.system(size: 12, design: .monospaced))
-                        .textSelection(.enabled)
+                        .bubbleTextSelection()
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(16)
                 }

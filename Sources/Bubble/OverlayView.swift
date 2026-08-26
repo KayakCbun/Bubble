@@ -596,7 +596,7 @@ struct OverlayView: View {
                     Text(document.path)
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundStyle(.tertiary)
-                        .textSelection(.enabled)
+                        .bubbleTextSelection()
                 }
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -696,10 +696,12 @@ struct OverlayView: View {
                         if row.startsAfterBranchPoint {
                             branchCutoverDivider
                         }
-                        EquatableSection(value: mainRowRenderKey(row)) {
-                            mainTranscriptRow(row)
+                        HoverSelectableTranscriptRow {
+                            EquatableSection(value: mainRowRenderKey(row)) {
+                                mainTranscriptRow(row)
+                            }
+                            .equatable()
                         }
-                        .equatable()
                         .id(row.id)
                         .background {
                             if row.id == row.historyTickID {
@@ -1813,7 +1815,7 @@ struct OverlayView: View {
                         .foregroundStyle(OverlaySurface.conversationInk)
                         .lineSpacing(OverlaySurface.proseLineSpacing)
                         .multilineTextAlignment(.leading)
-                        .textSelection(.enabled)
+                        .bubbleTextSelection()
                 }
                 if item.deliveryState == .steering {
                     Text("Steering")
@@ -2059,7 +2061,7 @@ struct OverlayView: View {
                     .font(.system(size: 12.5, weight: .regular))
                     .lineSpacing(OverlaySurface.proseLineSpacing)
                     .foregroundStyle(.secondary.opacity(0.88))
-                    .textSelection(.enabled)
+                    .bubbleTextSelection()
                     .padding(.leading, 18)
             }
         }
@@ -2140,7 +2142,7 @@ struct OverlayView: View {
                     .lineSpacing(OverlaySurface.proseLineSpacing)
                     .foregroundStyle(.secondary.opacity(0.88))
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
+                    .bubbleTextSelection()
             }
         }
     }
@@ -2304,7 +2306,7 @@ struct OverlayView: View {
                     .foregroundStyle(.tertiary)
                 Text(input)
                     .font(.system(size: 12, weight: .regular, design: .monospaced))
-                    .textSelection(.enabled)
+                    .bubbleTextSelection()
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             if !output.isEmpty {
@@ -2313,7 +2315,7 @@ struct OverlayView: View {
                     .foregroundStyle(.tertiary)
                 Text(output)
                     .font(.system(size: 12, weight: .regular, design: .monospaced))
-                    .textSelection(.enabled)
+                    .bubbleTextSelection()
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             if input.isEmpty && output.isEmpty {
@@ -2855,6 +2857,43 @@ private struct EquatableSection<Value: Equatable, Content: View>: View, Equatabl
 
     var body: some View {
         content
+    }
+}
+
+private struct HoverSelectableTranscriptRow<Content: View>: View {
+    @State private var selectionEnabled = false
+    @State private var releaseGeneration = 0
+    private let content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    var body: some View {
+        content
+            .environment(\.bubbleTextSelectionEnabled, selectionEnabled)
+            .onHover { hovering in
+                releaseGeneration += 1
+                let primaryButtonPressed = NSEvent.pressedMouseButtons & 1 != 0
+                selectionEnabled = TranscriptTextSelectionPolicy.isEnabled(
+                    isHovering: hovering,
+                    primaryButtonPressed: primaryButtonPressed
+                )
+                if !hovering, primaryButtonPressed {
+                    disarmAfterSelectionDrag(generation: releaseGeneration)
+                }
+            }
+    }
+
+    private func disarmAfterSelectionDrag(generation: Int) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            guard generation == releaseGeneration else { return }
+            if NSEvent.pressedMouseButtons & 1 == 0 {
+                selectionEnabled = false
+            } else {
+                disarmAfterSelectionDrag(generation: generation)
+            }
+        }
     }
 }
 
