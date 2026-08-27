@@ -14,7 +14,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         overlay.start()
         installStatusItem()
         OverlayLog.write("launched")
-        if ProcessInfo.processInfo.arguments.contains("--show") {
+        if ProcessInfo.processInfo.environment["BUBBLE_PRESENTATION_DIAGNOSTICS"] == "1" {
+            let cycles = ProcessInfo.processInfo.environment["BUBBLE_PRESENTATION_CYCLES"]
+                .flatMap(Int.init) ?? 30
+            overlay.runPresentationBenchmark(cycles: cycles)
+        } else if ProcessInfo.processInfo.arguments.contains("--show") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                 self.overlay.show()
             }
@@ -105,7 +109,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func rebuildConfigMenus() {
         let store = overlay.store
-        let models = store.availableModels.isEmpty ? BubbleConfig.catalogModels() : store.availableModels
+        let models = store.resolvedModelCatalog()
         modelMenu.removeAllItems()
         if models.isEmpty {
             let empty = NSMenuItem(title: "No models yet", action: nil, keyEquivalent: "")

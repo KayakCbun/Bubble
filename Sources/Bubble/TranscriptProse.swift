@@ -193,11 +193,11 @@ enum PathChipStyle {
         let last = (text as NSString).lastPathComponent
         guard last != text || last.contains(".") else { return nil }
         let ext = (last as NSString).pathExtension.lowercased()
-        let known: Set<String> = [
-            "md", "markdown", "txt", "swift", "json", "yml", "yaml", "ts", "js", "tsx", "jsx",
+        let known: Set<String> = PreviewFiles.supportedExtensions.union([
+            "swift", "yml", "yaml", "ts", "js", "tsx", "jsx",
             "py", "rb", "go", "rs", "html", "css", "pdf", "png", "jpg", "jpeg", "gif", "svg",
             "sh", "zsh", "toml", "xml", "plist", "mp4", "mov",
-        ]
+        ])
         return known.contains(ext) ? ext : nil
     }
 
@@ -299,7 +299,7 @@ enum ProseParser {
             }
             if let link = leadingMarkdownLink(remaining) {
                 remaining.removeFirst(link.consumed)
-                let target = MarkdownFiles.trimTrailingPunctuation(link.url)
+                let target = PreviewFiles.trimTrailingPunctuation(link.url)
                 let lowered = target.lowercased()
                 if lowered.hasPrefix("http://") || lowered.hasPrefix("https://") || lowered.hasPrefix("www.") {
                     runs.append(.chip(target, .url))
@@ -531,7 +531,7 @@ enum ProseParser {
                 if ch.isWhitespace || "，。、）)>]`".contains(ch) { break }
                 end = text.index(after: index)
             }
-            let value = MarkdownFiles.trimTrailingPunctuation(String(text[text.startIndex..<end]))
+            let value = PreviewFiles.trimTrailingPunctuation(String(text[text.startIndex..<end]))
             return PathChipStyle.isPath(value) || PathChipStyle.fileExtension(in: value) != nil ? value : nil
         }
         return nil
@@ -550,7 +550,7 @@ enum ProseParser {
             end = text.index(after: index)
         }
         guard slashes >= 1 else { return nil }
-        let value = MarkdownFiles.trimTrailingPunctuation(String(text[text.startIndex..<end]))
+        let value = PreviewFiles.trimTrailingPunctuation(String(text[text.startIndex..<end]))
         guard PathChipStyle.fileExtension(in: value) != nil else { return nil }
         let lowered = value.lowercased()
         if lowered.hasPrefix("http:") || lowered.hasPrefix("https:") { return nil }
@@ -849,7 +849,7 @@ struct ProseDocument: View {
 struct InlineChip: View {
     var text: String
     var kind: PathChipKind
-    @Environment(\.openMarkdownPreview) private var openMarkdownPreview
+    @Environment(\.openFilePreview) private var openFilePreview
     @State private var hovering = false
 
     var body: some View {
@@ -913,8 +913,8 @@ struct InlineChip: View {
 
     private var helpText: String {
         switch kind {
-        case .file(let ext) where MarkdownFiles.isMarkdown(ext: ext):
-            return "Preview markdown"
+        case .file(let ext) where PreviewFiles.isPreviewable(ext: ext):
+            return "Preview file"
         case .file, .folder:
             return "Show in Finder"
         case .url:
@@ -941,16 +941,17 @@ struct InlineChip: View {
         case .url:
             var raw = text
             if raw.lowercased().hasPrefix("www.") { raw = "https://" + raw }
-            if raw.lowercased().hasPrefix("file://"), MarkdownFiles.isMarkdown(path: MarkdownFiles.stripFileURL(raw)) {
-                openMarkdownPreview?(raw)
+            if raw.lowercased().hasPrefix("file://"),
+               PreviewFiles.isPreviewable(path: PreviewFiles.stripFileURL(raw)) {
+                openFilePreview?(raw)
                 return
             }
             if let url = URL(string: raw) {
                 NSWorkspace.shared.open(url)
             }
         case .file(let ext):
-            if MarkdownFiles.isMarkdown(ext: ext), let openMarkdownPreview {
-                openMarkdownPreview(text)
+            if PreviewFiles.isPreviewable(ext: ext), let openFilePreview {
+                openFilePreview(text)
                 return
             }
             revealInFinder()
@@ -970,14 +971,14 @@ struct InlineChip: View {
     }
 }
 
-private struct OpenMarkdownPreviewKey: EnvironmentKey {
+private struct OpenFilePreviewKey: EnvironmentKey {
     static let defaultValue: ((String) -> Void)? = nil
 }
 
 extension EnvironmentValues {
-    var openMarkdownPreview: ((String) -> Void)? {
-        get { self[OpenMarkdownPreviewKey.self] }
-        set { self[OpenMarkdownPreviewKey.self] = newValue }
+    var openFilePreview: ((String) -> Void)? {
+        get { self[OpenFilePreviewKey.self] }
+        set { self[OpenFilePreviewKey.self] = newValue }
     }
 }
 

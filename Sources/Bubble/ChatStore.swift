@@ -197,7 +197,7 @@ final class ChatStore {
     var selectedAvatarFile = AvatarSelection.file
     var transcriptWide = UserDefaults.standard.bool(forKey: "bubble.transcript.wide")
     var overlayPinned = UserDefaults.standard.bool(forKey: "bubble.overlay.pinned")
-    var markdownPreview: MarkdownDocument?
+    var filePreview: FilePreviewDocument?
     var workspaceStage: WorkspaceStage?
     var workspacePaneItems: [ChatItem] = []
     var workspacePaneStreamingAssistantId: UUID?
@@ -216,7 +216,6 @@ final class ChatStore {
     var prompts: [PiPrompt] = []
     var sessions: [PiSessionInfo] = []
     var workspaceFiles: [WorkspaceFile] = []
-    var availableModels: [AgentModel] = BubbleConfig.catalogModels()
     var currentModelId: String? = BubbleConfig.load().modelIdentity
     var thinkingLevels: [String] = BubbleConfig.defaultThinkingLevels
     var currentThinking: String? = BubbleConfig.load().thinking
@@ -245,6 +244,7 @@ final class ChatStore {
         didSet { onActivityChanged?(hasActiveWork) }
     }
     var streamUISuspended = true
+    var composerFocusSuspended = true
     var transcriptRevision: UInt64 = 0
     var transcriptHistoryTurnCapacity = TranscriptHistoryWindow.configuredInitialCapacity
     @ObservationIgnored private var resumeActionGeneration = 0
@@ -305,29 +305,29 @@ final class ChatStore {
         requestFocus()
     }
 
-    func openMarkdownPreview(_ raw: String, fromWorkspacePane: Bool = false) {
-        let path = MarkdownFiles.resolve(
+    func openFilePreview(_ raw: String, fromWorkspacePane: Bool = false) {
+        let path = PreviewFiles.resolve(
             raw,
             workspace: OverlayPaths.workspace.path,
-            extraRoots: markdownSearchRoots()
+            extraRoots: filePreviewSearchRoots()
         )
-        if markdownPreview?.path == path {
+        if filePreview?.path == path {
             if workspaceStage == nil {
                 closeSideStage()
             } else {
-                markdownPreview = nil
+                filePreview = nil
             }
             return
         }
         let wasPresented = sideStagePresented
-        if !SideStagePolicy.keepWorkspaceWhenOpeningMarkdown(fromWorkspacePane: fromWorkspacePane) {
+        if !SideStagePolicy.keepWorkspaceWhenOpeningFilePreview(fromWorkspacePane: fromWorkspacePane) {
             clearWorkspaceStage(keepingItems: false)
         }
-        markdownPreview = MarkdownFiles.load(path: path)
+        filePreview = PreviewFiles.load(path: path)
         applySideStageChromeOnOpen(wasPresented: wasPresented)
     }
 
-    private func markdownSearchRoots() -> [String] {
+    private func filePreviewSearchRoots() -> [String] {
         var seen = Set<String>()
         var roots: [String] = []
         func add(_ path: String) {
@@ -352,12 +352,12 @@ final class ChatStore {
         return roots
     }
 
-    func closeMarkdownPreview() {
+    func closeFilePreview() {
         if workspaceStage == nil {
             closeSideStage()
             return
         }
-        markdownPreview = nil
+        filePreview = nil
     }
 
     func closeSideStage(animated: Bool = true) {
@@ -374,7 +374,7 @@ final class ChatStore {
 
     func collapseSideStage() {
         onSideStageChromeInvalidated?()
-        markdownPreview = nil
+        filePreview = nil
         clearWorkspaceStage(keepingItems: false)
         sideStageChromeVisible = false
     }
@@ -385,7 +385,7 @@ final class ChatStore {
     }
 
     func returnToWorkspaceStage() {
-        markdownPreview = nil
+        filePreview = nil
         revealWorkspacePaneContent()
         uncoverWorkspacePane()
         workspacePaneScrollToken += 1
@@ -394,7 +394,7 @@ final class ChatStore {
     @discardableResult
     func handleSideStageEscape() -> Bool {
         switch SideStagePolicy.escapeAction(
-            showingMarkdown: markdownPreview != nil,
+            showingFilePreview: filePreview != nil,
             workspaceStacked: workspaceStage != nil,
             showingWorkspace: workspaceStage != nil
         ) {
@@ -411,21 +411,21 @@ final class ChatStore {
 
     var sideStagePresented: Bool {
         SideStagePolicy.isPresented(
-            showingMarkdown: markdownPreview != nil,
+            showingFilePreview: filePreview != nil,
             showingWorkspace: workspaceStage != nil
         )
     }
 
     var showsWorkspaceTranscript: Bool {
         SideStagePolicy.showsWorkspaceTranscript(
-            showingMarkdown: markdownPreview != nil,
+            showingFilePreview: filePreview != nil,
             showingWorkspace: workspaceStage != nil
         )
     }
 
     var canReturnToWorkspace: Bool {
         SideStagePolicy.canReturnToWorkspace(
-            showingMarkdown: markdownPreview != nil,
+            showingFilePreview: filePreview != nil,
             workspaceStacked: workspaceStage != nil
         )
     }
@@ -446,7 +446,7 @@ final class ChatStore {
         if let item = items.last(where: {
             $0.kind == .workspaceRun && $0.workspacePath == brief.path
         }) {
-            if workspaceStage?.cardId == item.id, markdownPreview == nil {
+            if workspaceStage?.cardId == item.id, filePreview == nil {
                 return
             }
             openWorkspaceStage(from: item)
@@ -455,9 +455,9 @@ final class ChatStore {
 
     func openWorkspaceStage(from item: ChatItem) {
         let wasPresented = sideStagePresented
-        let opensSideStage = workspaceStage == nil && markdownPreview == nil
+        let opensSideStage = workspaceStage == nil && filePreview == nil
         let changesWorkspace = workspaceStage?.cardId != item.id
-        markdownPreview = nil
+        filePreview = nil
         if opensSideStage || changesWorkspace {
             workspacePanePresentationPhase = .placeholder
             workspacePaneCoverVisible = true
@@ -465,9 +465,13 @@ final class ChatStore {
         let status = item.workspaceStatus
         let follow = SideStagePolicy.followLatest(status: status)
         let sessionId = follow
-            ? item.workspaceSessionId
-                ?? workspaceState.mounts.first(where: { $0.path == item.workspacePath })?.sessionId
-                ?? childSessionId
+            ? SideStagePolicy.preferredWorkspaceSessionId(
+                cardSessionId: item.workspaceSessionId,
+                mountedSessionId: WorkspaceRegistry.sessionId(
+                    forMountPath: item.workspacePath,
+                    in: workspaceState
+                )
+            )
             : item.workspaceSessionId
         let previousSessionId = workspaceStage?.sessionId
         let previousCardId = workspaceStage?.cardId
@@ -1158,6 +1162,8 @@ final class ChatStore {
     private static let workspacePaneLoadingText = "Loading workspace session…"
     private static let workspacePaneRunCacheLimit = 24
 
+    var isTranscriptRestorePending: Bool { transcriptRestorePending }
+
     init(
         runtimeID: UUID = UUID(),
         runtimeRole: SessionRuntimeRole = .main,
@@ -1373,10 +1379,7 @@ final class ChatStore {
     }
 
     var visiblePaletteItems: [PaletteItem] {
-        if isMountPalette {
-            return paletteItems
-        }
-        return Array(paletteItems.prefix(OverlayMetrics.paletteVisibleLimit))
+        paletteItems
     }
 
     var paletteCaption: String {
@@ -1605,12 +1608,12 @@ final class ChatStore {
     }
 
     private func modelPaletteItems(query: String) -> [PaletteItem] {
-        let models = availableModels.isEmpty ? BubbleConfig.catalogModels() : availableModels
+        let models = resolvedModelCatalog()
         let items = models.map { model in
             PaletteItem(
                 kind: .model,
-                title: model.identity,
-                subtitle: model.displayName,
+                title: model.displayName,
+                subtitle: model.identity,
                 insert: "/model \(model.identity)",
                 autoSend: true
             )
@@ -2845,14 +2848,9 @@ final class ChatStore {
     }
 
     private func handleReload() {
-        if let active = workspaceState.active, active.isActive {
-            interruptActiveWorkspaceRun(active)
-        } else {
-            clearActiveWorkspaceRun()
-        }
         isConnected = false
         status = "reloading"
-        client.stop()
+        client.stopForReload()
         items.append(ChatItem(kind: .system, text: "Reconnecting to Pi…"))
         persist(immediate: true)
         Task { @MainActor in
@@ -2984,9 +2982,6 @@ final class ChatStore {
     }
 
     private func syncSessionConfig() {
-        if !client.availableModels.isEmpty {
-            availableModels = client.availableModels
-        }
         if let model = client.currentModelId, !model.isEmpty {
             currentModelId = model
         }
@@ -3003,8 +2998,16 @@ final class ChatStore {
         NotificationCenter.default.post(name: .bubbleSessionConfigDidChange, object: nil)
     }
 
+    func resolvedModelCatalog() -> [AgentModel] {
+        ModelCatalogPolicy.merge(
+            sessionModels: client.availableModels,
+            installedModels: BubbleConfig.catalogModels(),
+            currentIdentity: currentModelId
+        )
+    }
+
     private func modelHelpText() -> String {
-        let models = availableModels.isEmpty ? BubbleConfig.catalogModels() : availableModels
+        let models = resolvedModelCatalog()
         if models.isEmpty {
             return "No models found. Run `pi` in Terminal to log in, then reopen Bubble."
         }
@@ -4322,6 +4325,7 @@ final class ChatStore {
         childBusy = true
         childAssistant = ""
         childChanged = []
+        followOpenWorkspaceStageIfNeeded(brief)
         Task { @MainActor in
             await self.prepareAndRunWorkspace(
                 brief: brief,
@@ -4375,6 +4379,15 @@ final class ChatStore {
             }) {
                 items[index].workspaceSessionId = sessionId
                 persist()
+                if SideStagePolicy.shouldRebindResolvedWorkspaceSession(
+                    currentMountPath: workspaceStage?.path,
+                    currentRunId: workspaceStage?.runId,
+                    showingFilePreview: filePreview != nil,
+                    resolvedMountPath: mount.path,
+                    resolvedRunId: runId
+                ) {
+                    openWorkspaceStage(from: items[index])
+                }
             }
             try? await client.applyBubblePreferences(sessionId: sessionId)
             guard WorkspaceRunLifecyclePolicy.acceptsCompletion(
@@ -4766,6 +4779,21 @@ final class ChatStore {
         upsertWorkspaceCard(active)
     }
 
+    private func followOpenWorkspaceStageIfNeeded(_ brief: WorkspaceBrief) {
+        guard SideStagePolicy.shouldFollowNewWorkspaceRun(
+            currentMountPath: workspaceStage?.path,
+            showingFilePreview: filePreview != nil,
+            nextMountPath: brief.path
+        ),
+        let runId = brief.runId,
+        let card = items.last(where: {
+            $0.kind == .workspaceRun
+                && $0.workspacePath == brief.path
+                && $0.workspaceRunId == runId
+        }) else { return }
+        openWorkspaceStage(from: card)
+    }
+
     private func upsertWorkspaceCard(_ brief: WorkspaceBrief) {
         let status = brief.status.rawValue
         if let index = items.lastIndex(where: { $0.kind == .workspaceRun && $0.workspacePath == brief.path }) {
@@ -4814,7 +4842,10 @@ final class ChatStore {
                 workspaceChangedPaths: brief.changedPaths,
                 workspaceChildren: [],
                 workspaceStartedAt: Date().timeIntervalSince1970,
-                workspaceSessionId: childSessionId
+                workspaceSessionId: WorkspaceRegistry.sessionId(
+                    forMountPath: brief.path,
+                    in: workspaceState
+                )
             )
         )
         persist()

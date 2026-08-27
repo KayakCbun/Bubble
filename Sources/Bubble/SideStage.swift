@@ -192,37 +192,37 @@ enum SideStagePolicy {
     }
 
     static func width(
-        showingMarkdown: Bool,
+        showingFilePreview: Bool,
         showingWorkspace: Bool,
-        markdownWidth: CGFloat,
+        filePreviewWidth: CGFloat,
         workspaceWidth: CGFloat
     ) -> CGFloat {
-        if showingMarkdown { return markdownWidth }
+        if showingFilePreview { return filePreviewWidth }
         if showingWorkspace { return workspaceWidth }
         return 0
     }
 
-    static func isPresented(showingMarkdown: Bool, showingWorkspace: Bool) -> Bool {
-        showingMarkdown || showingWorkspace
+    static func isPresented(showingFilePreview: Bool, showingWorkspace: Bool) -> Bool {
+        showingFilePreview || showingWorkspace
     }
 
-    static func showsWorkspaceTranscript(showingMarkdown: Bool, showingWorkspace: Bool) -> Bool {
-        showingWorkspace && !showingMarkdown
+    static func showsWorkspaceTranscript(showingFilePreview: Bool, showingWorkspace: Bool) -> Bool {
+        showingWorkspace && !showingFilePreview
     }
 
-    static func canReturnToWorkspace(showingMarkdown: Bool, workspaceStacked: Bool) -> Bool {
-        showingMarkdown && workspaceStacked
+    static func canReturnToWorkspace(showingFilePreview: Bool, workspaceStacked: Bool) -> Bool {
+        showingFilePreview && workspaceStacked
     }
 
     static func followLatest(status: String?) -> Bool {
         status == "running" || status == "waiting"
     }
 
-    static func escapeAction(showingMarkdown: Bool, workspaceStacked: Bool, showingWorkspace: Bool) -> SideStageEscape {
-        if showingMarkdown, workspaceStacked {
+    static func escapeAction(showingFilePreview: Bool, workspaceStacked: Bool, showingWorkspace: Bool) -> SideStageEscape {
+        if showingFilePreview, workspaceStacked {
             return .returnToWorkspace
         }
-        if showingMarkdown || showingWorkspace {
+        if showingFilePreview || showingWorkspace {
             return .closeStage
         }
         return .ignore
@@ -232,7 +232,35 @@ enum SideStagePolicy {
         openCardId == tappedCardId
     }
 
-    static func keepWorkspaceWhenOpeningMarkdown(fromWorkspacePane: Bool) -> Bool {
+    static func shouldFollowNewWorkspaceRun(
+        currentMountPath: String?,
+        showingFilePreview: Bool,
+        nextMountPath: String
+    ) -> Bool {
+        guard let currentMountPath, !showingFilePreview else { return false }
+        return currentMountPath != nextMountPath
+    }
+
+    static func preferredWorkspaceSessionId(
+        cardSessionId: String?,
+        mountedSessionId: String?
+    ) -> String? {
+        cardSessionId ?? mountedSessionId
+    }
+
+    static func shouldRebindResolvedWorkspaceSession(
+        currentMountPath: String?,
+        currentRunId: String?,
+        showingFilePreview: Bool,
+        resolvedMountPath: String,
+        resolvedRunId: String
+    ) -> Bool {
+        !showingFilePreview
+            && currentMountPath == resolvedMountPath
+            && currentRunId == resolvedRunId
+    }
+
+    static func keepWorkspaceWhenOpeningFilePreview(fromWorkspacePane: Bool) -> Bool {
         fromWorkspacePane
     }
 

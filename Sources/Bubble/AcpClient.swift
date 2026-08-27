@@ -102,11 +102,19 @@ final class AcpClient: @unchecked Sendable {
     }
 
     func stop() {
+        stop(for: .shutdown)
+    }
+
+    func stopForReload() {
+        stop(for: .reload)
+    }
+
+    private func stop(for intent: AcpStopIntent) {
         queue.sync {
             process?.terminationHandler = nil
             stdin = nil
             process?.terminate()
-            resetProcessLocked()
+            resetProcessLocked(for: intent)
             failAll(RPCError(code: -3, message: "stopped"))
         }
     }
@@ -644,7 +652,7 @@ final class AcpClient: @unchecked Sendable {
         }
     }
 
-    private func resetProcessLocked() {
+    private func resetProcessLocked(for intent: AcpStopIntent = .shutdown) {
         stdout?.readabilityHandler = nil
         stderr?.readabilityHandler = nil
         try? stdin?.close()
@@ -652,7 +660,10 @@ final class AcpClient: @unchecked Sendable {
         stdout = nil
         stderr = nil
         process = nil
-        sessionId = nil
+        sessionId = AcpSessionRetentionPolicy.sessionID(
+            afterResetting: sessionId,
+            for: intent
+        )
         buffer.removeAll()
         inFlightPrompt.removeAll()
     }

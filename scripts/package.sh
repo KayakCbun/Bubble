@@ -12,7 +12,7 @@ swiftc -parse-as-library Sources/Bubble/ProseFormat.swift scripts/check_prose.sw
 
 swiftc -O -parse-as-library \
   Sources/Bubble/ProseFormat.swift \
-  Sources/Bubble/MarkdownFiles.swift \
+  Sources/Bubble/PreviewFiles.swift \
   Sources/Bubble/OverlayLayoutPolicy.swift \
   Sources/Bubble/OverlaySurface.swift \
   Sources/Bubble/PierreFileIconCatalog.swift \
@@ -46,6 +46,9 @@ swiftc -parse-as-library Sources/Bubble/OverlayLayoutPolicy.swift Sources/Bubble
 swiftc -parse-as-library Sources/Bubble/SideStage.swift Sources/Bubble/WorkspaceTranscriptRenderPlan.swift scripts/check_side_stage.swift -o /tmp/bubble-check-side-stage
 /tmp/bubble-check-side-stage
 
+swiftc -parse-as-library Sources/Bubble/SessionReloadPolicy.swift scripts/check_session_reload.swift -o /tmp/bubble-check-session-reload
+/tmp/bubble-check-session-reload
+
 swiftc -parse-as-library Sources/Bubble/TranscriptInteractionPolicy.swift scripts/check_transcript_interactions.swift -o /tmp/bubble-check-transcript-interactions
 /tmp/bubble-check-transcript-interactions
 
@@ -77,13 +80,13 @@ swift run SessionTabsChecks
 swiftc -parse-as-library Sources/Bubble/MessageDelivery.swift scripts/check_message_delivery.swift -o /tmp/bubble-check-message-delivery
 /tmp/bubble-check-message-delivery
 
-swiftc -parse-as-library Sources/Bubble/MarkdownFiles.swift scripts/check_markdown.swift -o /tmp/bubble-check-markdown
-/tmp/bubble-check-markdown
+swiftc -parse-as-library Sources/Bubble/PreviewFiles.swift scripts/check_file_preview.swift -o /tmp/bubble-check-file-preview
+/tmp/bubble-check-file-preview
 
 swiftc -parse-as-library Sources/Bubble/CommandTapPolicy.swift scripts/check_command_tap.swift -o /tmp/bubble-check-tap
 /tmp/bubble-check-tap
 
-swiftc -parse-as-library Sources/Bubble/AssistantMessageContent.swift Sources/Bubble/ConversationTree.swift scripts/check_conversation_tree.swift -o /tmp/bubble-check-conversation-tree
+swiftc -parse-as-library Sources/BubbleMounts/WorkspaceMounts.swift Sources/Bubble/AssistantMessageContent.swift Sources/Bubble/ConversationTree.swift scripts/check_conversation_tree.swift -o /tmp/bubble-check-conversation-tree
 /tmp/bubble-check-conversation-tree
 
 swiftc -parse-as-library Sources/Bubble/BubblePiAcpPatch.swift scripts/check_pi_acp_patch.swift -o /tmp/bubble-check-pi-acp-patch

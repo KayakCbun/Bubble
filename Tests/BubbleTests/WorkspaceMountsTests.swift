@@ -24,6 +24,16 @@ struct WorkspaceMountsTests {
         #expect(store.recent[0].name == "oncall-watcher")
     }
 
+    @Test func sessionLookupUsesMountedWorkspaceIdentity() {
+        let store = WorkspaceStoreFile(
+            mounts: [WorkspaceMount(path: "/tmp/work-a", name: "work-a", sessionId: "child-a")],
+            recent: [WorkspaceMount(path: "/tmp/work-b", name: "work-b", sessionId: "child-b")]
+        )
+        #expect(WorkspaceRegistry.sessionId(forMountPath: "/tmp/./work-a", in: store) == "child-a")
+        #expect(WorkspaceRegistry.sessionId(forMountPath: "/tmp/work-b", in: store) == nil)
+        #expect(WorkspaceRegistry.sessionId(forMountPath: nil, in: store) == nil)
+    }
+
     @Test func cannotMountBubbleHome() {
         var store = WorkspaceStoreFile()
         #expect(throws: WorkspaceError.protectedPath) {

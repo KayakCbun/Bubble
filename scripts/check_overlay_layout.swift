@@ -405,6 +405,99 @@ struct OverlayLayoutCheck {
             "opening the extra pane still springs the panel"
         )
 
+        let restingWindowFrame = CGRect(x: 200, y: 120, width: 832, height: 932)
+        expect(
+            OverlayPresentationPolicy.windowFrame(
+                resting: restingWindowFrame,
+                visible: false
+            ) == restingWindowFrame,
+            "hiding Bubble must animate only the presentation surface, never the NSWindow frame"
+        )
+        expect(
+            OverlayPresentationPolicy.windowFrame(
+                resting: restingWindowFrame,
+                visible: true
+            ) == restingWindowFrame,
+            "showing Bubble must keep the NSWindow at its final resting frame"
+        )
+        expect(
+            OverlayPresentationPolicy.shouldBegin(
+                layoutSessionID: selectedSession,
+                selectedSessionID: selectedSession,
+                targetFramePending: false,
+                geometryAnimating: false,
+                transcriptRestorePending: false
+            ),
+            "a committed selected-session layout is ready for first-frame presentation"
+        )
+        expect(
+            !OverlayPresentationPolicy.shouldBegin(
+                layoutSessionID: previousSession,
+                selectedSessionID: selectedSession,
+                targetFramePending: false,
+                geometryAnimating: false,
+                transcriptRestorePending: false
+            ),
+            "a stale session layout cannot expose the presentation surface"
+        )
+        expect(
+            !OverlayPresentationPolicy.shouldBegin(
+                layoutSessionID: selectedSession,
+                selectedSessionID: selectedSession,
+                targetFramePending: true,
+                geometryAnimating: false,
+                transcriptRestorePending: false
+            ),
+            "Bubble stays invisible until its final window frame is committed"
+        )
+        expect(
+            !OverlayPresentationPolicy.shouldBegin(
+                layoutSessionID: selectedSession,
+                selectedSessionID: selectedSession,
+                targetFramePending: false,
+                geometryAnimating: false,
+                transcriptRestorePending: true
+            ),
+            "Bubble stays invisible until long transcript restoration completes"
+        )
+        expect(OverlayPresentationPolicy.showDuration <= 0.15,
+               "show presentation completes within a launcher-class interaction window")
+        expect(OverlayPresentationPolicy.hideDuration <= 0.11,
+               "hide presentation gets out of the user's way immediately")
+        expect(OverlayPresentationPolicy.defersNonCriticalWork(isTransitioning: true),
+               "catalog and reconnect work waits until presentation settles")
+        expect(!OverlayPresentationPolicy.defersNonCriticalWork(isTransitioning: false),
+               "settled Bubble may resume non-critical work")
+        expect(OverlayPresentationPolicy.nonCriticalWorkDelay >= 0.25,
+               "filesystem catalog and reconnect checks wait for an idle interaction window")
+        expect(OverlayPresentationPolicy.stablePreflightFrames >= 2,
+               "long transcripts render for consecutive stable frames before becoming visible")
+        expect(
+            !ComposerFocusPolicy.isSuspended(
+                panelVisible: true,
+                presentationTransitioning: false
+            ),
+            "a visible settled composer stays focusable while transcript rendering is suspended for resize"
+        )
+        expect(
+            ComposerFocusPolicy.isSuspended(
+                panelVisible: true,
+                presentationTransitioning: true
+            ),
+            "the composer waits only for the actual presentation transition"
+        )
+        expect(
+            ComposerFocusPolicy.isSuspended(
+                panelVisible: false,
+                presentationTransitioning: false
+            ),
+            "a hidden panel cannot request composer focus"
+        )
+        expect(!ComposerFocusPolicy.shouldRequestFocus(isSuspended: true),
+               "field-editor focus work cannot interrupt the presentation animation")
+        expect(ComposerFocusPolicy.shouldRequestFocus(isSuspended: false),
+               "the composer regains focus once Bubble is fully visible")
+
         print("PASS: overlay layout policy")
     }
 }

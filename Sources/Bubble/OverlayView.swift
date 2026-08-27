@@ -28,7 +28,6 @@ enum OverlayMetrics {
     static let chipSize: CGFloat = 12.5
     static var bodyFont: Font { .system(size: fontSize, weight: .regular) }
     static let slashRowHeight: CGFloat = 44
-    static let paletteVisibleLimit = 7
     static let mountPaletteVisibleRows = 9
     static var ink: Color { Color(nsColor: .textColor) }
     static var tertiaryInk: Color { Color(nsColor: .tertiaryLabelColor) }
@@ -64,6 +63,9 @@ enum OverlayMetrics {
 }
 
 struct OverlayView: View {
+    private static let inputDiagnosticExpected =
+        ProcessInfo.processInfo.environment["BUBBLE_INPUT_DIAGNOSTIC_EXPECTED"]
+
     @Bindable var store: ChatStore
     var onEscape: () -> Void
     var onToggleWidth: () -> Void
@@ -98,9 +100,9 @@ struct OverlayView: View {
 
     private var previewWidth: CGFloat {
         SideStagePolicy.width(
-            showingMarkdown: store.markdownPreview != nil,
+            showingFilePreview: store.filePreview != nil,
             showingWorkspace: store.workspaceStage != nil,
-            markdownWidth: OverlayMetrics.previewWidth,
+            filePreviewWidth: OverlayMetrics.previewWidth,
             workspaceWidth: OverlayMetrics.previewWidth
         )
     }
@@ -252,8 +254,8 @@ struct OverlayView: View {
         .overlay {
             QuoteChipLayer(store: store)
         }
-        .environment(\.openMarkdownPreview) { path in
-            store.openMarkdownPreview(path)
+        .environment(\.openFilePreview) { path in
+            store.openFilePreview(path)
         }
         .preference(key: OverlayLayoutKey.self, value: layout)
         .background(Color.clear)
@@ -269,6 +271,14 @@ struct OverlayView: View {
         }
         .onChange(of: store.items.count) { _, _ in
             restoreFocus()
+        }
+        .onChange(of: store.draft) { _, draft in
+            guard let expected = Self.inputDiagnosticExpected else {
+                return
+            }
+            OverlayLog.write(
+                "input physical benchmark characters=\(draft.count) matches=\(draft == expected ? 1 : 0)"
+            )
         }
         .onChange(of: store.runtimeID) { _, _ in
             resetSessionPresentationState()
@@ -322,18 +332,18 @@ struct OverlayView: View {
         ZStack {
             if let stage = store.workspaceStage {
                 workspaceStageContent(stage)
-                    .opacity(store.markdownPreview == nil ? 1 : 0)
-                    .allowsHitTesting(store.markdownPreview == nil)
+                    .opacity(store.filePreview == nil ? 1 : 0)
+                    .allowsHitTesting(store.filePreview == nil)
             }
-            if let preview = store.markdownPreview {
-                markdownPreviewPane(preview)
+            if let preview = store.filePreview {
+                filePreviewPane(preview)
             }
         }
         .frame(width: previewWidth, height: transcriptHeight)
         .frostedGlass(in: transcriptShape)
         .clipped()
-        .environment(\.openMarkdownPreview) { path in
-            store.openMarkdownPreview(path, fromWorkspacePane: store.workspaceStage != nil)
+        .environment(\.openFilePreview) { path in
+            store.openFilePreview(path, fromWorkspacePane: store.workspaceStage != nil)
         }
     }
 
@@ -585,7 +595,7 @@ struct OverlayView: View {
         }
     }
 
-    private func markdownPreviewPane(_ document: MarkdownDocument) -> some View {
+    private func filePreviewPane(_ document: FilePreviewDocument) -> some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 if store.canReturnToWorkspace {
@@ -593,7 +603,7 @@ struct OverlayView: View {
                         store.returnToWorkspaceStage()
                     }
                 }
-                MarkdownFileGlyph(pointSize: 14)
+                PierreFileIcon(path: document.path, size: 14)
                 Text(document.title)
                     .font(.system(size: 13, weight: .medium))
                     .lineLimit(1)
@@ -619,8 +629,14 @@ struct OverlayView: View {
                 .padding(16)
             } else {
                 ScrollView {
-                    MessageBody(text: document.source, preferClassicMarkdown: true)
-                        .padding(16)
+                    switch document.format {
+                    case .markdown:
+                        MessageBody(text: document.source, preferClassicMarkdown: true)
+                            .padding(16)
+                    case .plainText(let language):
+                        CodeBlockView(language: language, source: document.source)
+                            .padding(16)
+                    }
                 }
                 .scrollIndicators(.never)
             }
@@ -1740,15 +1756,24 @@ struct OverlayView: View {
     }
 
     private func restoreFocus() {
-        focused = true
+        guard ComposerFocusPolicy.shouldRequestFocus(
+            isSuspended: store.composerFocusSuspended
+        ) else { return }
+        applyFocusIfAllowed()
         DispatchQueue.main.async {
-            self.focused = true
-            self.activateFieldEditor()
+            self.applyFocusIfAllowed()
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) {
-            self.focused = true
-            self.activateFieldEditor()
+            self.applyFocusIfAllowed()
         }
+    }
+
+    private func applyFocusIfAllowed() {
+        guard ComposerFocusPolicy.shouldRequestFocus(
+            isSuspended: store.composerFocusSuspended
+        ) else { return }
+        focused = true
+        activateFieldEditor()
     }
 
     private func activateFieldEditor() {
@@ -2648,8 +2673,8 @@ struct OverlayView: View {
                 fallbackRoot: OverlayPaths.workspace.path
             )
         )
-        if MarkdownFiles.isMarkdown(path: url.path) {
-            store.openMarkdownPreview(url.path)
+        if PreviewFiles.isPreviewable(path: url.path) {
+            store.openFilePreview(url.path)
             return
         }
         NSWorkspace.shared.activateFileViewerSelecting([url])

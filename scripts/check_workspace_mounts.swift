@@ -45,6 +45,14 @@ struct WorkspaceMountsCheck {
             mounts: [WorkspaceMount(path: "/tmp/work-a", name: "work-a", sessionId: "child-old")],
             recent: [WorkspaceMount(path: "/tmp/work-b", name: "work-b", sessionId: "child-recent")]
         )
+        expect(
+            WorkspaceRegistry.sessionId(forMountPath: "/tmp/./work-a", in: sessionScoped) == "child-old",
+            "session lookup follows normalized mount identity"
+        )
+        expect(
+            WorkspaceRegistry.sessionId(forMountPath: "/tmp/work-b", in: sessionScoped) == nil,
+            "session lookup does not inherit a recent unmounted workspace"
+        )
         WorkspaceRegistry.resetSessions(in: &sessionScoped)
         expect(sessionScoped.mounts.count == 1, "new main session keeps mounted folders")
         expect(sessionScoped.mounts[0].sessionId == nil, "new main session creates fresh workspace sessions")
@@ -138,7 +146,8 @@ struct WorkspaceMountsCheck {
         expect(wrapped.contains("<bubble-workspace>"), "prompt wrap includes the block")
         expect(wrapped.contains("workspace_run"), "prompt wrap tells the model to dispatch")
         expect(wrapped.contains("birio-bitable"), "prompt wrap lists mount skills")
-        expect(wrapped.hasSuffix("hello"), "prompt wrap keeps user text")
+        expect(wrapped.hasPrefix("hello\n\n<bubble-workspace>"), "Pi session titles start from the user's request")
+        expect(wrapped.hasSuffix("</bubble-workspace>"), "workspace metadata follows the user request")
     }
 
     static func interruptActive() {

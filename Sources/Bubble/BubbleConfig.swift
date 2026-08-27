@@ -32,6 +32,26 @@ struct AgentModel: Identifiable, Equatable, Hashable {
     }
 }
 
+enum ModelCatalogPolicy {
+    static func merge(
+        sessionModels: [AgentModel],
+        installedModels: [AgentModel],
+        currentIdentity: String?
+    ) -> [AgentModel] {
+        var byIdentity: [String: AgentModel] = [:]
+        for model in sessionModels where !model.identity.isEmpty {
+            byIdentity[model.identity] = model
+        }
+        for model in installedModels where !model.identity.isEmpty {
+            byIdentity[model.identity] = model
+        }
+        if let currentIdentity, !currentIdentity.isEmpty, byIdentity[currentIdentity] == nil {
+            byIdentity[currentIdentity] = AgentModel.parse(currentIdentity)
+        }
+        return byIdentity.values.sorted { $0.identity < $1.identity }
+    }
+}
+
 struct BubbleSettings: Codable, Equatable {
     var provider: String?
     var model: String?
