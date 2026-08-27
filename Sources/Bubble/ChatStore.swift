@@ -1214,6 +1214,7 @@ final class ChatStore {
     }
 
     func prepareToQuit() {
+        finishTranscriptRestoreBeforeShutdown()
         closeSideStage(animated: false)
         WorkspaceRegistry.interruptActive(in: &workspaceState)
         if runtimeRole.persistsWorkspaceRegistry {
@@ -1231,7 +1232,7 @@ final class ChatStore {
     }
 
     func shutdownClosedTabRuntime() {
-        transcriptLoadGeneration &+= 1
+        finishTranscriptRestoreBeforeShutdown()
         cancelPendingResumeAction()
         writeTranscript()
         client.onUpdate = nil
@@ -2758,8 +2759,10 @@ final class ChatStore {
 
     func resumeReplacingCurrent(_ id: String) {
         transcriptLoadGeneration &+= 1
+        let loadGeneration = transcriptLoadGeneration
         transcriptRestorePending = false
         writeTranscript()
+        transcriptRestorePending = true
         let previousItems = items
         let previousRichRows = richTranscriptRows
         let previousTree = conversationTree
@@ -2778,12 +2781,9 @@ final class ChatStore {
                 _ = try await client.switchToSession(id, persistAsMain: runtimeRole.persistsAsMain)
                 onSessionIdentityChanged?()
                 let restored = await Self.loadTranscriptOffMain(sessionID: id)
-                items = restored.items
-                richTranscriptRows = [:]
-                for item in restored.richItems + restored.items {
-                    if let key = Self.richKey(item) { richTranscriptRows[key] = item }
-                }
-                Self.prewarmTranscriptChunks(Array(items[transcriptHistoryLowerBound...]))
+                guard transcriptLoadGeneration == loadGeneration else { return }
+                transcriptRestorePending = false
+                mergeRestoredTranscript(restored, removingSetupCards: false)
                 isConnected = true
                 status = "ready"
                 syncSessionConfig()
@@ -2794,6 +2794,8 @@ final class ChatStore {
                     persist(immediate: true)
                 }
             } catch {
+                guard transcriptLoadGeneration == loadGeneration else { return }
+                transcriptRestorePending = false
                 items = previousItems
                 richTranscriptRows = previousRichRows
                 conversationTree = previousTree
@@ -2802,6 +2804,7 @@ final class ChatStore {
                 items.append(ChatItem(kind: .system, text: friendly(error)))
                 persist(immediate: true)
             }
+            guard transcriptLoadGeneration == loadGeneration else { return }
             isStartingSession = false
             requestFocus()
         }
@@ -3742,19 +3745,42 @@ final class ChatStore {
             guard
                   self.client.sessionId == sessionID
                     || (self.client.sessionId == nil && PiSessions.currentId() == sessionID) else { return }
-            let restoredItems = restored.items.filter {
-                !StartupTranscriptPolicy.isSetupCard($0.text, isSystem: $0.kind == .system)
-            }
-            let liveItemIDs = Set(self.items.map(\.id))
-            self.items = restoredItems.filter { !liveItemIDs.contains($0.id) } + self.items
-            self.richTranscriptRows = [:]
-            for item in restored.richItems + restored.items {
-                if let key = Self.richKey(item) { self.richTranscriptRows[key] = item }
-            }
-            Self.prewarmTranscriptChunks(Array(self.items[self.transcriptHistoryLowerBound...]))
+            self.mergeRestoredTranscript(restored, removingSetupCards: true)
             self.writeTranscript()
             self.onTranscriptUpdated?()
         }
+    }
+
+    private func finishTranscriptRestoreBeforeShutdown() {
+        transcriptLoadGeneration &+= 1
+        guard transcriptRestorePending else { return }
+        transcriptRestorePending = false
+        guard let sessionID = client.sessionId ?? PiSessions.currentId() else { return }
+        mergeRestoredTranscript(
+            Self.loadTranscript(sessionID: sessionID),
+            removingSetupCards: runtimeRole.restoresSavedTranscript
+        )
+    }
+
+    private func mergeRestoredTranscript(
+        _ restored: TranscriptLoadResult,
+        removingSetupCards: Bool
+    ) {
+        let restoredItems = restored.items.filter { item in
+            !removingSetupCards
+                || !StartupTranscriptPolicy.isSetupCard(item.text, isSystem: item.kind == .system)
+        }
+        items = TranscriptRestoreMerge.merge(
+            restored: restoredItems,
+            live: items,
+            id: \.id,
+            stableKey: Self.richKey
+        )
+        richTranscriptRows = [:]
+        for item in restored.richItems + restored.items + items {
+            if let key = Self.richKey(item) { richTranscriptRows[key] = item }
+        }
+        Self.prewarmTranscriptChunks(Array(items[transcriptHistoryLowerBound...]))
     }
 
     private static func loadTranscriptOffMain(sessionID: String) async -> TranscriptLoadResult {

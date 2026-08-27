@@ -32,6 +32,7 @@ swiftc -O -parse-as-library \
 
 swiftc -parse-as-library \
   Sources/Bubble/TranscriptHistoryWindow.swift \
+  Sources/Bubble/TranscriptRestoreMerge.swift \
   scripts/check_transcript_history_window.swift \
   -o /tmp/bubble-check-transcript-history-window
 /tmp/bubble-check-transcript-history-window

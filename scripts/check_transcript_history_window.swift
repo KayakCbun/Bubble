@@ -14,6 +14,12 @@ private enum TranscriptHistoryWindowCheck {
         case output
     }
 
+    private struct RestoreRow: Equatable {
+        var id: Int
+        var sourceKey: String?
+        var text: String
+    }
+
     static func main() {
         var rows = [RowKind.output]
         for _ in 0..<45 {
@@ -64,6 +70,25 @@ private enum TranscriptHistoryWindowCheck {
         expect(
             TranscriptHistoryWindow.initialCapacity(environmentValue: "invalid") == 10,
             "invalid diagnostics keep the production ten-turn default"
+        )
+
+        let restored = [
+            RestoreRow(id: 1, sourceKey: "assistant:entry-1", text: "persisted"),
+            RestoreRow(id: 2, sourceKey: nil, text: "persisted local row"),
+        ]
+        let live = [
+            RestoreRow(id: 99, sourceKey: "assistant:entry-1", text: "richer live row"),
+            RestoreRow(id: 3, sourceKey: nil, text: "live local row"),
+        ]
+        let merged = TranscriptRestoreMerge.merge(
+            restored: restored,
+            live: live,
+            id: \.id,
+            stableKey: \.sourceKey
+        )
+        expect(
+            merged == [restored[1], live[0], live[1]],
+            "restore deduplicates source-backed rows by stable identity while preserving local rows"
         )
 
         print("PASS: transcript history window")

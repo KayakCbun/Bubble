@@ -7,6 +7,7 @@ TURNS="${BUBBLE_BENCHMARK_TURNS:-600}"
 MODE="${BUBBLE_BENCHMARK_MODE:-display}"
 MAX_P95_MS="${BUBBLE_BENCHMARK_MAX_P95_MS:-17}"
 MAX_P99_MS="${BUBBLE_BENCHMARK_MAX_P99_MS:-18}"
+MAX_READY_MS="${BUBBLE_BENCHMARK_MAX_READY_MS:-1000}"
 MAX_PEAK_ANCHORS="${BUBBLE_BENCHMARK_MAX_PEAK_ANCHORS:-250}"
 SCROLL_STEP="${BUBBLE_BENCHMARK_SCROLL_STEP:-32}"
 MAX_JUMP_BLANK_SAMPLES="${BUBBLE_BENCHMARK_MAX_JUMP_BLANK_SAMPLES:-6}"
@@ -122,8 +123,14 @@ fi
 peak_anchors="$(sed -E 's/.* peakAnchors=([0-9]+).*/\1/' <<<"$benchmark_line")"
 
 if [[ "$MODE" == "display" || "$MODE" == "wheel" ]]; then
+  ready="$(sed -E 's/.* ready=([0-9.]+)ms.*/\1/' <<<"$benchmark_line")"
   p95="$(sed -E 's/.* p95=([0-9.]+)ms.*/\1/' <<<"$benchmark_line")"
   p99="$(sed -E 's/.* p99=([0-9.]+)ms.*/\1/' <<<"$benchmark_line")"
+  if ! awk -v actual="$ready" -v limit="$MAX_READY_MS" 'BEGIN { exit !(actual <= limit) }'; then
+    echo "FAIL: first transcript window ${ready}ms exceeds ${MAX_READY_MS}ms" >&2
+    echo "$benchmark_line" >&2
+    exit 1
+  fi
   if ! awk -v actual="$p95" -v limit="$MAX_P95_MS" 'BEGIN { exit !(actual <= limit) }'; then
     echo "FAIL: scroll p95 ${p95}ms exceeds ${MAX_P95_MS}ms" >&2
     echo "$benchmark_line" >&2
