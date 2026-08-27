@@ -58,6 +58,21 @@ enum TranscriptStackPolicy {
     }
 }
 
+enum TranscriptScrollSequencePolicy {
+    static func suppressesEventAfterProgrammaticScroll(
+        isScrollWheel: Bool,
+        beginsNewGesture: Bool,
+        isDiscreteWheel: Bool,
+        isDirectChange: Bool,
+        hasMomentum: Bool
+    ) -> Bool {
+        guard isScrollWheel else { return false }
+        if beginsNewGesture || isDiscreteWheel { return false }
+        if isDirectChange, !hasMomentum { return false }
+        return true
+    }
+}
+
 struct TranscriptFollowState: Equatable {
     private enum Mode: Equatable {
         case followingEnd

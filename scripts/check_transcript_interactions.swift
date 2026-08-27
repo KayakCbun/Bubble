@@ -114,6 +114,26 @@ private enum TranscriptInteractionCheck {
             TranscriptFollowPolicy.followsRevisionChange(isBusy: true),
             "a live main turn still follows revision while streaming"
         )
+        expect(
+            !TranscriptScrollSequencePolicy.suppressesEventAfterProgrammaticScroll(
+                isScrollWheel: true,
+                beginsNewGesture: false,
+                isDiscreteWheel: false,
+                isDirectChange: true,
+                hasMomentum: false
+            ),
+            "direct wheel movement immediately interrupts a scroll-to-end animation"
+        )
+        expect(
+            TranscriptScrollSequencePolicy.suppressesEventAfterProgrammaticScroll(
+                isScrollWheel: true,
+                beginsNewGesture: false,
+                isDiscreteWheel: false,
+                isDirectChange: false,
+                hasMomentum: true
+            ),
+            "momentum tail events from the prior gesture stay suppressed"
+        )
         var follow = TranscriptFollowState()
         expect(follow.followsLatest, "a transcript starts pinned to the live edge")
         expect(!follow.showsScrollToEnd, "the jump chip stays hidden while already at the end")

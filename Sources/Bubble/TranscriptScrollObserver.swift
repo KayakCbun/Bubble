@@ -329,22 +329,23 @@ final class TranscriptScrollProbe: NSView {
     }
 
     /// Clicking the chip can happen before a trackpad gesture has emitted its
-    /// final changed/ended and momentum events. Those belong to the gesture
-    /// that preceded the click; only a new began phase (or a discrete wheel,
-    /// key, or drag event) is allowed to interrupt the return animation.
+    /// final ended and momentum events. Those belong to the gesture that
+    /// preceded the click. A direct changed event means the user is actively
+    /// moving the wheel/trackpad again and must interrupt the return animation
+    /// even when AppKit does not emit a fresh began phase.
     private func suppressesPriorScrollEvent(_ event: NSEvent) -> Bool {
         guard suppressingPriorScrollSequence else { return false }
-        guard event.type == .scrollWheel else {
+        let suppress = TranscriptScrollSequencePolicy.suppressesEventAfterProgrammaticScroll(
+            isScrollWheel: event.type == .scrollWheel,
+            beginsNewGesture: event.phase.contains(.began) || event.phase.contains(.mayBegin),
+            isDiscreteWheel: event.phase.isEmpty && event.momentumPhase.isEmpty,
+            isDirectChange: event.phase.contains(.changed),
+            hasMomentum: !event.momentumPhase.isEmpty
+        )
+        if !suppress {
             suppressingPriorScrollSequence = false
-            return false
         }
-        let beginsNewGesture = event.phase.contains(.began) || event.phase.contains(.mayBegin)
-        let isDiscreteWheel = event.phase.isEmpty && event.momentumPhase.isEmpty
-        if beginsNewGesture || isDiscreteWheel {
-            suppressingPriorScrollSequence = false
-            return false
-        }
-        return true
+        return suppress
     }
 
     private func prepareForProgrammaticScroll() {
