@@ -476,7 +476,6 @@ final class OverlayController: NSObject, NSWindowDelegate {
         }
         let root = SessionOverlayView(
             sessions: sessions,
-            onEscape: { [weak self] in self?.hide() },
             onToggleWidth: { [weak self] in self?.requestTranscriptWidthToggle() }
         )
         .onPreferenceChange(OverlayLayoutKey.self) { [weak self] layout in
@@ -1069,6 +1068,10 @@ final class OverlayController: NSObject, NSWindowDelegate {
     }
 
     private func handleEscape() {
+        if QuoteSelectionMonitor.shared.snapshot != nil {
+            QuoteSelectionMonitor.shared.dismiss()
+            return
+        }
         if ImageZoomController.shared.isVisible {
             ImageZoomController.shared.close()
             return
@@ -1084,14 +1087,27 @@ final class OverlayController: NSObject, NSWindowDelegate {
             MermaidZoomController.shared.close()
             return
         }
-        if store.slashMenuVisible {
+        let action = OverlayEscapePolicy.action(
+            slashMenuVisible: store.slashMenuVisible,
+            avatarPickerVisible: store.showAvatarPicker,
+            isBusy: store.isBusy
+        )
+        switch action {
+        case .dismissSlashMenu:
             store.dismissSlashMenu()
-        } else if store.showAvatarPicker {
+        case .dismissAvatarPicker:
             store.showAvatarPicker = false
-        } else if store.isBusy {
+        case .cancelTurn:
             store.cancel()
-        } else {
+        case .hideOverlay:
             hide()
+        }
+        if OverlayEscapePolicy.keepsOverlayVisible(after: action) {
+            panel.orderFront(nil)
+        }
+        if OverlayEscapePolicy.requestsComposerFocus(after: action) {
+            panel.makeKey()
+            store.requestFocus()
         }
     }
 

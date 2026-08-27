@@ -736,7 +736,7 @@ struct ProseDocument: View {
 
     private static func breakRuns(_ runs: [InlineRun], width: CGFloat) -> [InlineRun] {
         guard width > 48 else { return runs }
-        let font = NSFont.systemFont(ofSize: OverlayMetrics.fontSize)
+        let font = NSFont.systemFont(ofSize: OverlayMetrics.fontSize, weight: .regular)
         let chipFont = NSFont.monospacedSystemFont(ofSize: OverlayMetrics.chipSize, weight: .regular)
         let spacing: CGFloat = 5
         var result: [InlineRun] = []

@@ -48,6 +48,34 @@ enum ComposerFocusPolicy {
     }
 }
 
+enum OverlayEscapeAction: Equatable {
+    case dismissSlashMenu
+    case dismissAvatarPicker
+    case cancelTurn
+    case hideOverlay
+}
+
+enum OverlayEscapePolicy {
+    static func action(
+        slashMenuVisible: Bool,
+        avatarPickerVisible: Bool,
+        isBusy: Bool
+    ) -> OverlayEscapeAction {
+        if slashMenuVisible { return .dismissSlashMenu }
+        if avatarPickerVisible { return .dismissAvatarPicker }
+        if isBusy { return .cancelTurn }
+        return .hideOverlay
+    }
+
+    static func keepsOverlayVisible(after action: OverlayEscapeAction) -> Bool {
+        action != .hideOverlay
+    }
+
+    static func requestsComposerFocus(after action: OverlayEscapeAction) -> Bool {
+        action == .cancelTurn
+    }
+}
+
 enum OverlayRenderPolicy {
     /// AppKit's display-link animator owns side-stage geometry. Animating the
     /// SwiftUI HStack as well interpolates the transcript width at subpixels,

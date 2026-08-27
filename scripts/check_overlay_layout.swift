@@ -498,6 +498,26 @@ struct OverlayLayoutCheck {
         expect(ComposerFocusPolicy.shouldRequestFocus(isSuspended: false),
                "the composer regains focus once Bubble is fully visible")
 
+        let busyEscape = OverlayEscapePolicy.action(
+            slashMenuVisible: false,
+            avatarPickerVisible: false,
+            isBusy: true
+        )
+        expect(busyEscape == .cancelTurn,
+               "Escape during a model run cancels the turn")
+        expect(OverlayEscapePolicy.keepsOverlayVisible(after: busyEscape),
+               "aborting a turn keeps Bubble visible")
+        expect(OverlayEscapePolicy.requestsComposerFocus(after: busyEscape),
+               "aborting a turn restores the composer focus contract")
+        expect(
+            OverlayEscapePolicy.action(
+                slashMenuVisible: false,
+                avatarPickerVisible: false,
+                isBusy: false
+            ) == .hideOverlay,
+            "an idle Escape still dismisses Bubble"
+        )
+
         print("PASS: overlay layout policy")
     }
 }
