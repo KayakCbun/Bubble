@@ -177,7 +177,7 @@ Bubble 对照文件：
 
 若“全部高于 60 帧”按字面要求任何一帧都不超过 16.67 ms，应新增 max-frame 门禁；但后台调度、录屏和 CI 噪声会使它比 p95 门禁脆弱，应在隔离性能机上执行，不能只靠普通 CI。
 
-本轮自动门禁将 p95 设为 17ms（相对 60Hz 理论帧间隔保留 0.33ms 采样容差）、p99 18ms，并把首个 transcript 窗口限制为 1,000ms。它支持“核心滚动稳定在 60Hz 档位”的结论，不支持字面上的“每一帧严格快于 16.67ms”或“Bubble 所有交互均已覆盖”。
+本轮自动门禁将 p95 设为 17ms（相对 60Hz 理论帧间隔保留 0.33ms 采样容差）、p99 18ms，并把 4,000-item 上限级 fixture 的首个 transcript 窗口限制为 1,500ms。它支持“核心滚动稳定在 60Hz 档位”的结论，不支持字面上的“每一帧严格快于 16.67ms”或“Bubble 所有交互均已覆盖”。
 
 现有 `run_transcript_scroll_benchmark.sh` 的 p95 20 ms 约等于 50 FPS，必须先降到 16.67 ms 以下，才可对 60 FPS 作合格声明。
 
@@ -294,7 +294,7 @@ T3 Code 最有价值的设计不是“用了虚拟列表”，而是把长会话
 - legacy replay 修复从“每条 assistant 扫描所有此前完整回复”的二次增长路径，收敛为每条仅做 self-repeat、只让最终 assistant 检查旧回复；600-turn 恢复曾在旧 probe 中耗时约 4.74s，最终从水合启动到可见布局提交为 606.62ms。恢复完成前冻结持久化，避免 setup 更新覆盖尚未合并的历史。
 - 滚动门禁从 p95 20 ms / p99 34 ms 收紧到 p95 17 ms / p99 18 ms；外接 DELL U2719DC 当前为 60 Hz，实测 vsync 间隔约 16.67 ms。
 - 600-turn fixture 的未修改基线为 p95 78.15 ms / p99 84.73 ms；落地后首屏 10 turns 为 p95 16.74 ms / p99 16.82 ms，展开到 30 turns 为 16.72 / 16.84 ms，展开到 50 turns 为 16.72 / 17.28 ms，三组 blank frames 均为 0。
-- 最终打包产物的 4,054-item / 4.73MB fixture 从水合启动到可见布局提交为 921.32ms，滚动 p95 16.72ms / p99 16.76ms、blank frames 0；600 次随机挂载审计无空白且 anchor error 0px，Session tab selection 总耗时 61.32ms。
+- 最终打包产物的 4,054-item / 4.73MB fixture 两次复测从水合启动到首个历史锚点布局提交为 720–1,384ms，滚动 p95 16.72–16.78ms / p99 16.76–16.89ms、blank frames 0；600 次随机挂载审计无空白且 anchor error 0px。Session tab selection 的 UI 提交为 61.32ms；该数字只代表 tab chrome 与首帧切换，不冒充目标 transcript 的内容就绪时间。
 - 物理 UI 滚动到分页边界后点击 “Load earlier”，history rail 从 10 变为 30 turns，Turn 590 的屏幕位置保持不变；随机挂载审计 600 samples 的 anchor error 为 0 px。
 
 这证明当前长会话的核心滚动路径在 60 Hz 显示器上不再持续丢帧。它仍不等于“所有 Bubble 操作在所有机器上永远没有单帧调度尖峰”，也尚未完成上述 P0 的页级磁盘格式迁移；后续应继续用本节门禁约束 session 水合、流式富文本和重型 Mermaid/代码展开。

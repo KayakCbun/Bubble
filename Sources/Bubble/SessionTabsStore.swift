@@ -20,7 +20,11 @@ final class SessionTabsStore {
            let restoredState = try? SessionTabsState(snapshot: snapshot) {
             state = restoredState
             var restored: [UUID: ChatStore] = [:]
-            for entry in snapshot.entries {
+            let restoreOrder = snapshot.entries.sorted { left, right in
+                left.runtimeID == snapshot.selectedRuntimeID
+                    && right.runtimeID != snapshot.selectedRuntimeID
+            }
+            for entry in restoreOrder {
                 let role: SessionRuntimeRole = entry.role == .main ? .main : .side
                 restored[entry.runtimeID] = ChatStore(
                     runtimeID: entry.runtimeID,
@@ -146,6 +150,7 @@ final class SessionTabsStore {
               let tab = state.tabs.first(where: { $0.id == id }),
               tab.ordinal != 1,
               let closing = runtimes[id] else { return false }
+        guard !closing.isStartingSession else { return false }
         guard !tab.isBusy || stopIfBusy else { return false }
 
         selectionGeneration &+= 1

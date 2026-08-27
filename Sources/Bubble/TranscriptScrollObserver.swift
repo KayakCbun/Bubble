@@ -699,7 +699,7 @@ final class TranscriptScrollProbe: NSView {
             registerExistingAnchors(in: document)
             rebuildAnchorIndex()
         }
-        if anchorIndex.isEmpty,
+        if !anchorIndex.contains(where: { $0.historyTickID != nil }),
            let startedAt = diagnosticReadyStartedAt,
            ProcessInfo.processInfo.systemUptime - startedAt < 15 {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self, weak window] in
