@@ -37,3 +37,16 @@ enum TranscriptHistoryWindow {
         min(max(totalTurns, 0), max(current, 0) + earlierTurnPageSize)
     }
 }
+
+enum TranscriptHydrationTiming {
+    nonisolated(unsafe) private(set) static var diagnosticStartedAt: TimeInterval?
+
+    static func startIfDiagnosing() {
+        guard ProcessInfo.processInfo.environment["BUBBLE_SCROLL_DIAGNOSTICS"] != nil else { return }
+        diagnosticStartedAt = ProcessInfo.processInfo.systemUptime
+    }
+
+    static func clear() {
+        diagnosticStartedAt = nil
+    }
+}

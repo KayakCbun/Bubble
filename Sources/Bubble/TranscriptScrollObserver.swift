@@ -684,10 +684,11 @@ final class TranscriptScrollProbe: NSView {
         guard diagnosticFramesRemaining == 0,
               let window else { return }
         diagnosticFramesRemaining = -1
-        diagnosticReadyStartedAt = CACurrentMediaTime()
+        diagnosticReadyStartedAt = TranscriptHydrationTiming.diagnosticStartedAt
+            ?? ProcessInfo.processInfo.systemUptime
         NSRunningApplication.current.activate()
         window.makeKeyAndOrderFront(nil)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self, weak window] in
+        DispatchQueue.main.async { [weak self, weak window] in
             guard let self, let window else { return }
             self.beginDiagnosticDrive(in: window)
         }
@@ -700,15 +701,18 @@ final class TranscriptScrollProbe: NSView {
         }
         if anchorIndex.isEmpty,
            let startedAt = diagnosticReadyStartedAt,
-           CACurrentMediaTime() - startedAt < 15 {
+           ProcessInfo.processInfo.systemUptime - startedAt < 15 {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self, weak window] in
                 guard let self, let window else { return }
                 self.beginDiagnosticDrive(in: window)
             }
             return
         }
-        diagnosticReadyLatency = diagnosticReadyStartedAt.map { CACurrentMediaTime() - $0 } ?? 0
+        diagnosticReadyLatency = diagnosticReadyStartedAt.map {
+            ProcessInfo.processInfo.systemUptime - $0
+        } ?? 0
         diagnosticReadyStartedAt = nil
+        TranscriptHydrationTiming.clear()
         maintainsVisibleContent = true
         diagnosticFramesRemaining = 720
         diagnosticWheelBeginsGesture = true

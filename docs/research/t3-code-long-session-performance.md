@@ -291,10 +291,10 @@ T3 Code 最有价值的设计不是“用了虚拟列表”，而是把长会话
 - 主 transcript 首屏投影最近 10 个 user turns，顶部显式 “Load earlier”，每次扩展 20 turns；完整 `items`、持久化内容和 Pi session 上下文不被截断。
 - `EquatableSection` 改为保存延迟 row builder。此前 builder 在等值门判断前就构造完整 `mainTranscriptRow`，主线程采样显示 `NSHostingView.layout → AttributeGraph → ForEachChild.updateValue` 是主要热栈。
 - session transcript 的文件读取、JSON decode 和清理转到后台队列，UI 线程只原子发布当前 10-turn 窗口并预热该窗口；切换或新建 Session tab 会用 generation 丢弃陈旧恢复结果。
-- legacy replay 修复从“每条 assistant 扫描所有此前完整回复”的二次增长路径，收敛为每条仅做 self-repeat、只让最终 assistant 检查旧回复；600-turn 首窗就绪从约 4.74s 降到 307ms（含基准固定 300ms 等待）。恢复完成前冻结持久化，避免 setup 更新覆盖尚未合并的历史。
+- legacy replay 修复从“每条 assistant 扫描所有此前完整回复”的二次增长路径，收敛为每条仅做 self-repeat、只让最终 assistant 检查旧回复；600-turn 恢复曾在旧 probe 中耗时约 4.74s，最终从水合启动到可见布局提交为 606.62ms。恢复完成前冻结持久化，避免 setup 更新覆盖尚未合并的历史。
 - 滚动门禁从 p95 20 ms / p99 34 ms 收紧到 p95 17 ms / p99 18 ms；外接 DELL U2719DC 当前为 60 Hz，实测 vsync 间隔约 16.67 ms。
 - 600-turn fixture 的未修改基线为 p95 78.15 ms / p99 84.73 ms；落地后首屏 10 turns 为 p95 16.74 ms / p99 16.82 ms，展开到 30 turns 为 16.72 / 16.84 ms，展开到 50 turns 为 16.72 / 17.28 ms，三组 blank frames 均为 0。
-- 最终打包产物的 4,054-item / 4.73MB fixture 首窗为 478.26ms，滚动 p95 16.73ms / p99 16.81ms、blank frames 0；600 次随机挂载审计无空白且 anchor error 0px，Session tab selection 总耗时 94.42ms。
+- 最终打包产物的 4,054-item / 4.73MB fixture 从水合启动到可见布局提交为 921.32ms，滚动 p95 16.72ms / p99 16.76ms、blank frames 0；600 次随机挂载审计无空白且 anchor error 0px，Session tab selection 总耗时 61.32ms。
 - 物理 UI 滚动到分页边界后点击 “Load earlier”，history rail 从 10 变为 30 turns，Turn 590 的屏幕位置保持不变；随机挂载审计 600 samples 的 anchor error 为 0 px。
 
 这证明当前长会话的核心滚动路径在 60 Hz 显示器上不再持续丢帧。它仍不等于“所有 Bubble 操作在所有机器上永远没有单帧调度尖峰”，也尚未完成上述 P0 的页级磁盘格式迁移；后续应继续用本节门禁约束 session 水合、流式富文本和重型 Mermaid/代码展开。

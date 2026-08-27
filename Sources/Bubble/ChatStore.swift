@@ -1139,12 +1139,12 @@ final class ChatStore {
     private static let transcriptLoadQueue = DispatchQueue(
         label: "local.bubble.transcript-load",
         qos: .userInitiated,
-        attributes: .concurrent,
         autoreleaseFrequency: .workItem
     )
     private var persistWork: DispatchWorkItem?
     @ObservationIgnored private var transcriptLoadGeneration = 0
     @ObservationIgnored private var transcriptRestorePending = false
+    @ObservationIgnored private var transcriptRestoreTask: Task<Void, Never>?
     private var richTranscriptRows: [String: ChatItem] = [:]
     private var mountSkillRefreshGeneration = 0
     private var workspacePaneLoadGeneration = 0
@@ -1214,7 +1214,7 @@ final class ChatStore {
     }
 
     func prepareToQuit() {
-        finishTranscriptRestoreBeforeShutdown()
+        finishPendingTranscriptRestore()
         closeSideStage(animated: false)
         WorkspaceRegistry.interruptActive(in: &workspaceState)
         if runtimeRole.persistsWorkspaceRegistry {
@@ -1232,9 +1232,10 @@ final class ChatStore {
     }
 
     func shutdownClosedTabRuntime() {
-        finishTranscriptRestoreBeforeShutdown()
         cancelPendingResumeAction()
-        writeTranscript()
+        if !transcriptRestorePending {
+            writeTranscript()
+        }
         client.onUpdate = nil
         client.onLog = nil
         client.onExit = nil
@@ -1242,9 +1243,13 @@ final class ChatStore {
         control.handler = nil
         let client = client
         let control = control
-        DispatchQueue.global(qos: .utility).async {
-            control.stop()
-            client.stop()
+        let pendingRestore = transcriptRestoreTask
+        Task { @MainActor in
+            await pendingRestore?.value
+            DispatchQueue.global(qos: .utility).async {
+                control.stop()
+                client.stop()
+            }
         }
     }
 
@@ -2758,9 +2763,9 @@ final class ChatStore {
     }
 
     func resumeReplacingCurrent(_ id: String) {
+        finishPendingTranscriptRestore()
         transcriptLoadGeneration &+= 1
         let loadGeneration = transcriptLoadGeneration
-        transcriptRestorePending = false
         writeTranscript()
         transcriptRestorePending = true
         let previousItems = items
@@ -2873,8 +2878,8 @@ final class ChatStore {
     }
 
     private func startFreshConversation() {
+        finishPendingTranscriptRestore()
         transcriptLoadGeneration &+= 1
-        transcriptRestorePending = false
         writeTranscript()
         isStartingSession = true
         items = []
@@ -3737,10 +3742,17 @@ final class ChatStore {
     private func restoreTranscriptInBackground(sessionID: String) {
         transcriptLoadGeneration &+= 1
         transcriptRestorePending = true
+        TranscriptHydrationTiming.startIfDiagnosing()
         let generation = transcriptLoadGeneration
-        Task { @MainActor [weak self] in
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
             let restored = await Self.loadTranscriptOffMain(sessionID: sessionID)
-            guard let self, self.transcriptLoadGeneration == generation else { return }
+            defer {
+                if self.transcriptLoadGeneration == generation {
+                    self.transcriptRestoreTask = nil
+                }
+            }
+            guard self.transcriptLoadGeneration == generation else { return }
             self.transcriptRestorePending = false
             guard
                   self.client.sessionId == sessionID
@@ -3749,11 +3761,12 @@ final class ChatStore {
             self.writeTranscript()
             self.onTranscriptUpdated?()
         }
+        transcriptRestoreTask = task
     }
 
-    private func finishTranscriptRestoreBeforeShutdown() {
-        transcriptLoadGeneration &+= 1
+    private func finishPendingTranscriptRestore() {
         guard transcriptRestorePending else { return }
+        transcriptLoadGeneration &+= 1
         transcriptRestorePending = false
         guard let sessionID = client.sessionId ?? PiSessions.currentId() else { return }
         mergeRestoredTranscript(
