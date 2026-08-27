@@ -4,13 +4,11 @@ import SwiftUI
 
 struct SessionOverlayView: View {
     @Bindable var sessions: SessionTabsStore
-    var onEscape: () -> Void
     var onToggleWidth: () -> Void
 
     var body: some View {
         OverlayView(
             store: sessions.activeStore,
-            onEscape: onEscape,
             onToggleWidth: onToggleWidth,
             sessionTabCount: sessions.showsTabs ? sessions.tabs.count : 0,
             sessionSwitchLoading: sessions.isSwitchingSession

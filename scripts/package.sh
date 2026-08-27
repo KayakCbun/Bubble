@@ -40,6 +40,12 @@ swiftc -parse-as-library \
 swiftc -parse-as-library Sources/Bubble/TranscriptStream.swift Sources/Bubble/ProseFormat.swift scripts/check_transcript_stream.swift -o /tmp/bubble-check-stream
 /tmp/bubble-check-stream
 
+swiftc -parse-as-library scripts/check_escape_dispatch.swift -o /tmp/bubble-check-escape-dispatch
+/tmp/bubble-check-escape-dispatch
+
+swiftc -parse-as-library scripts/check_typography_contract.swift -o /tmp/bubble-check-typography-contract
+/tmp/bubble-check-typography-contract
+
 swiftc -parse-as-library Sources/Bubble/OverlayLayoutPolicy.swift Sources/Bubble/OverlayRenderPolicy.swift scripts/check_overlay_layout.swift -o /tmp/bubble-check-layout
 /tmp/bubble-check-layout
 

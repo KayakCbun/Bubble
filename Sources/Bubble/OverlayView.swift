@@ -26,7 +26,8 @@ enum OverlayMetrics {
     static let heading3Size: CGFloat = 14
     static let codeSize: CGFloat = 12.5
     static let chipSize: CGFloat = 12.5
-    static var bodyFont: Font { .system(size: fontSize, weight: .regular) }
+    static let bodyWeight: Font.Weight = .regular
+    static var bodyFont: Font { .system(size: fontSize, weight: bodyWeight) }
     static let slashRowHeight: CGFloat = 44
     static let mountPaletteVisibleRows = 9
     static var ink: Color { Color(nsColor: .textColor) }
@@ -67,7 +68,6 @@ struct OverlayView: View {
         ProcessInfo.processInfo.environment["BUBBLE_INPUT_DIAGNOSTIC_EXPECTED"]
 
     @Bindable var store: ChatStore
-    var onEscape: () -> Void
     var onToggleWidth: () -> Void
     var sessionTabCount: Int = 0
     var sessionSwitchLoading = false
@@ -284,37 +284,6 @@ struct OverlayView: View {
             resetSessionPresentationState()
         }
 
-        .onKeyPress(.escape) {
-            if QuoteSelectionMonitor.shared.snapshot != nil {
-                QuoteSelectionMonitor.shared.dismiss()
-                return .handled
-            }
-            if store.handleSideStageEscape() {
-                return .handled
-            }
-            if ImageZoomController.shared.isVisible {
-                ImageZoomController.shared.close()
-                return .handled
-            }
-            if FileChangeDiffController.shared.isVisible {
-                FileChangeDiffController.shared.close()
-                return .handled
-            }
-            if MermaidZoomController.shared.isVisible {
-                MermaidZoomController.shared.close()
-                return .handled
-            }
-            if store.slashMenuVisible {
-                store.dismissSlashMenu()
-            } else if store.showAvatarPicker {
-                store.showAvatarPicker = false
-            } else if store.isBusy {
-                store.cancel()
-            } else {
-                onEscape()
-            }
-            return .handled
-        }
     }
 
     private func resetSessionPresentationState() {
@@ -971,6 +940,8 @@ struct OverlayView: View {
             paletteRows(items)
         }
         .padding(8)
+        .font(OverlayMetrics.bodyFont)
+        .fontWeight(OverlayMetrics.bodyWeight)
         .frame(width: OverlayMetrics.inputWidth, alignment: .leading)
         .frostedGlass(in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
@@ -1417,6 +1388,7 @@ struct OverlayView: View {
                 TextField("", text: $store.draft, axis: .vertical)
                     .textFieldStyle(.plain)
                     .font(OverlayMetrics.bodyFont)
+                    .fontWeight(OverlayMetrics.bodyWeight)
                     .foregroundStyle(OverlayMetrics.ink)
                     .focused($focused)
                     .lineLimit(1...OverlayComposer.maxVisibleLines)
@@ -1944,7 +1916,7 @@ struct OverlayView: View {
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(.tertiary)
             }
-            .font(.system(size: OverlayMetrics.fontSize, weight: .regular))
+            .font(OverlayMetrics.bodyFont)
             .foregroundStyle(.secondary)
             Rectangle()
                 .fill(OverlaySurface.hairline)
@@ -3411,7 +3383,7 @@ private struct WorkingRow: View {
             HStack(spacing: 10) {
                 WorkingDots()
                 Text("Working for \(format(context.date.timeIntervalSince(startedAt)))")
-                    .font(.system(size: OverlayMetrics.fontSize, weight: .regular))
+                    .font(OverlayMetrics.bodyFont)
                     .foregroundStyle(.secondary)
             }
         }
@@ -3876,6 +3848,7 @@ private struct ComposerBar: View {
                 TextField("", text: $store.draft, axis: .vertical)
                     .textFieldStyle(.plain)
                     .font(OverlayMetrics.bodyFont)
+                    .fontWeight(OverlayMetrics.bodyWeight)
                     .foregroundStyle(OverlayMetrics.ink)
                     .focused($focused)
                     .lineLimit(1...OverlayComposer.maxVisibleLines)
