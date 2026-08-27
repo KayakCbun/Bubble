@@ -89,7 +89,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
             return event
         }
         localKeys = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            if event.keyCode == 53 {
+            if event.keyCode == OverlayKeyCode.escape {
                 self?.handleEscape()
                 return nil
             }
@@ -97,7 +97,8 @@ final class OverlayController: NSObject, NSWindowDelegate {
                OverlayEditCommands.handleCommandEditKey(event, paste: self?.panel.pasteAction) {
                 return nil
             }
-            if event.keyCode == 36 || event.keyCode == 76 {
+            if event.keyCode == OverlayKeyCode.returnKey
+                || event.keyCode == OverlayKeyCode.keypadEnter {
                 if let textView = self?.panel.firstResponder as? NSTextView, textView.hasMarkedText() {
                     return event
                 }
@@ -108,23 +109,23 @@ final class OverlayController: NSObject, NSWindowDelegate {
             }
             if self?.store.slashMenuVisible == true {
                 switch event.keyCode {
-                case 126:
+                case OverlayKeyCode.upArrow:
                     self?.store.moveSlashHighlight(-1)
                     return nil
-                case 125:
+                case OverlayKeyCode.downArrow:
                     self?.store.moveSlashHighlight(1)
                     return nil
-                case 123:
+                case OverlayKeyCode.leftArrow:
                     if self?.store.isMountPalette == true {
                         self?.store.leaveMountFolder()
                         return nil
                     }
-                case 124:
+                case OverlayKeyCode.rightArrow:
                     if self?.store.isMountPalette == true {
                         self?.store.completeHighlightedSlash()
                         return nil
                     }
-                case 36, 76:
+                case OverlayKeyCode.returnKey, OverlayKeyCode.keypadEnter:
                     if self?.store.isMountPalette == true {
                         if let textView = self?.panel.firstResponder as? NSTextView, textView.hasMarkedText() {
                             return event
@@ -132,12 +133,15 @@ final class OverlayController: NSObject, NSWindowDelegate {
                         self?.store.toggleHighlightedMount()
                         return nil
                     }
-                case 48:
+                case OverlayKeyCode.tab:
                     self?.store.completeHighlightedSlash()
                     return nil
                 default:
                     break
                 }
+            }
+            if self?.routeBusyComposerKey(event) == true {
+                return nil
             }
             return event
         }
@@ -1065,6 +1069,68 @@ final class OverlayController: NSObject, NSWindowDelegate {
                 firstResponder: panel.firstResponder
             )
         }
+    }
+
+    private func routeBusyComposerKey(_ event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let hasText = event.characters?.unicodeScalars.contains { scalar in
+            scalar.value >= 0x20
+                && scalar.value != 0x7f
+                && !(0xf700...0xf8ff).contains(scalar.value)
+        } == true
+        guard ComposerBusyKeyRoutingPolicy.shouldRoute(
+            isBusy: store.isBusy || store.childBusy,
+            hasText: hasText,
+            keyCode: event.keyCode,
+            commandModified: flags.contains(.command),
+            controlModified: flags.contains(.control)
+        ), let editor = ensureComposerFieldEditor() else {
+            return false
+        }
+        editor.interpretKeyEvents([event])
+        if !editor.hasMarkedText() {
+            store.draft = editor.string
+        }
+        return true
+    }
+
+    private func ensureComposerFieldEditor() -> NSTextView? {
+        panel.makeKey()
+        if let editor = panel.firstResponder as? NSTextView, editor.isEditable {
+            return isComposerEditor(editor) ? editor : nil
+        }
+        if let field = panel.firstResponder as? NSTextField, field.isEditable,
+           field.identifier?.rawValue != ComposerEditorIdentity.viewIdentifier {
+            return nil
+        }
+        guard let target = composerEditorView(in: rootView) else { return nil }
+        panel.makeFirstResponder(target)
+        guard let editor = panel.firstResponder as? NSTextView,
+              editor.isEditable,
+              isComposerEditor(editor) else {
+            return nil
+        }
+        return editor
+    }
+
+    private func isComposerEditor(_ editor: NSTextView) -> Bool {
+        if editor.isFieldEditor {
+            return (editor.delegate as? NSView)?.identifier?.rawValue
+                == ComposerEditorIdentity.viewIdentifier
+        }
+        return editor.identifier?.rawValue == ComposerEditorIdentity.viewIdentifier
+    }
+
+    private func composerEditorView(in view: NSView) -> NSView? {
+        if view.identifier?.rawValue == ComposerEditorIdentity.viewIdentifier {
+            return view
+        }
+        for child in view.subviews {
+            if let target = composerEditorView(in: child) {
+                return target
+            }
+        }
+        return nil
     }
 
     private func handleEscape() {

@@ -20,7 +20,9 @@ struct EscapeDispatchCheck {
         )
 
         require(
-            controller.components(separatedBy: "event.keyCode == 53").count - 1 == 1,
+            controller.components(
+                separatedBy: "event.keyCode == OverlayKeyCode.escape"
+            ).count - 1 == 1,
             "the overlay controller owns exactly one Escape event entry point"
         )
         require(
