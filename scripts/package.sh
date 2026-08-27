@@ -79,6 +79,9 @@ swiftc -parse-as-library Sources/Bubble/PierreFileIconCatalog.swift scripts/chec
 swiftc -parse-as-library Sources/Bubble/PromptTriggerPolicy.swift scripts/check_prompt_palette.swift -o /tmp/bubble-check-prompt-palette
 /tmp/bubble-check-prompt-palette
 
+swiftc -parse-as-library Sources/Bubble/BubbleNativeAction.swift scripts/check_bubble_native_actions.swift -o /tmp/bubble-check-native-actions
+/tmp/bubble-check-native-actions
+
 swift run DiagramChecks
 
 swift run SessionTabsChecks
@@ -102,6 +105,7 @@ swiftc -parse-as-library Sources/BubbleMounts/WorkspaceMounts.swift scripts/chec
 /tmp/bubble-check-mounts
 
 swiftc -parse-as-library \
+  Sources/Bubble/BubbleNativeAction.swift \
   Sources/Bubble/JSONRPC.swift \
   Sources/Bubble/Paths.swift \
   Sources/Bubble/BubbleConfig.swift \

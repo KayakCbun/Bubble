@@ -5,7 +5,6 @@ import Observation
 @Observable
 final class SessionTabsStore {
     private(set) var state: SessionTabsState
-    private(set) var pendingCloseSessionID: UUID?
     private var runtimes: [UUID: ChatStore]
     private var tabPreviews: [UUID: String] = [:]
     @ObservationIgnored private var selectionGeneration = 0
@@ -164,9 +163,6 @@ final class SessionTabsStore {
         }
         runtimes.removeValue(forKey: id)
         tabPreviews.removeValue(forKey: id)
-        if pendingCloseSessionID == id {
-            pendingCloseSessionID = nil
-        }
         persistSessionTabs()
 
         if result.selectionChanged {
@@ -177,30 +173,6 @@ final class SessionTabsStore {
         }
         closing.shutdownClosedTabRuntime()
         return true
-    }
-
-    func requestCloseSideSession(_ id: UUID) {
-        guard !state.isSwitching,
-              let tab = state.tabs.first(where: { $0.id == id }),
-              tab.ordinal != 1,
-              let runtime = runtimes[id],
-              !runtime.isStartingSession else { return }
-        if tab.isBusy {
-            pendingCloseSessionID = id
-        } else {
-            closeSideSession(id)
-        }
-    }
-
-    func cancelCloseSideSession(_ id: UUID) {
-        guard pendingCloseSessionID == id else { return }
-        pendingCloseSessionID = nil
-    }
-
-    func confirmCloseSideSession(_ id: UUID) {
-        guard pendingCloseSessionID == id else { return }
-        pendingCloseSessionID = nil
-        closeSideSession(id, stopIfBusy: true)
     }
 
     func isAwaitingSelectedLayout(_ id: UUID?) -> Bool {
@@ -271,6 +243,14 @@ final class SessionTabsStore {
     private func bind(_ runtime: ChatStore, id: UUID) {
         runtime.onCreateSideSession = { [weak self] in
             self?.createSideSession()
+        }
+        runtime.onCloseCurrentSession = { [weak self, weak runtime] in
+            guard let self, let runtime,
+                  !self.state.isSwitching,
+                  let tab = self.state.tabs.first(where: { $0.id == id }),
+                  tab.ordinal != 1,
+                  !runtime.isStartingSession else { return false }
+            return self.closeSideSession(id, stopIfBusy: true)
         }
         runtime.onResumeInSideSession = { [weak self] sessionID in
             self?.createSideSession(resuming: sessionID)

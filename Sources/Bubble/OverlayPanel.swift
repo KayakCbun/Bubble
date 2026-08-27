@@ -93,10 +93,7 @@ final class OverlayRootView: NSView {
         )
     }
 
-    func sessionTabTarget(
-        atWindowPoint windowPoint: NSPoint,
-        closeableIndices: Set<Int>
-    ) -> SessionTabHitTarget? {
+    func sessionTabTarget(atWindowPoint windowPoint: NSPoint) -> SessionTabHitTarget? {
         guard maskSessionTabCount > 0, maskTranscriptHeight > 1 else { return nil }
         let localPoint = convert(windowPoint, from: nil)
         let inputHeight = maskComposerHeight > 1
@@ -113,7 +110,6 @@ final class OverlayRootView: NSView {
         return SessionTabLayout.target(
             at: localPoint,
             count: maskSessionTabCount,
-            closeableIndices: closeableIndices,
             transcriptOriginY: transcriptY,
             trailingX: OverlayMetrics.shadowInset
         )

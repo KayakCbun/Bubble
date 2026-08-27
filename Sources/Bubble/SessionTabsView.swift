@@ -21,12 +21,7 @@ struct SessionOverlayView: View {
                             tab: tab,
                             selected: tab.id == sessions.presentedSelectedID,
                             preview: sessions.preview(for: tab.id),
-                            closeEnabled: !sessions.isSwitchingSession,
-                            showingCloseConfirmation: sessions.pendingCloseSessionID == tab.id,
-                            select: { sessions.select(tab.id) },
-                            requestClose: { sessions.requestCloseSideSession(tab.id) },
-                            cancelClose: { sessions.cancelCloseSideSession(tab.id) },
-                            confirmClose: { sessions.confirmCloseSideSession(tab.id) }
+                            select: { sessions.select(tab.id) }
                         )
                     }
                 }
@@ -55,14 +50,8 @@ private struct SessionTabButton: View {
     let tab: SessionTabState
     let selected: Bool
     let preview: String
-    let closeEnabled: Bool
-    let showingCloseConfirmation: Bool
     let select: () -> Void
-    let requestClose: () -> Void
-    let cancelClose: () -> Void
-    let confirmClose: () -> Void
     @State private var hovering = false
-    @State private var hoveringClose = false
 
     var body: some View {
         HStack(spacing: 3) {
@@ -73,43 +62,10 @@ private struct SessionTabButton: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            if (hovering || showingCloseConfirmation), tab.ordinal != 1, closeEnabled {
-                Button(action: requestClose) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 8.5, weight: .bold))
-                        .frame(width: SessionTabLayout.closeButtonWidth, height: 22)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(
-                    tab.isBusy
-                        ? "Stop and close Session \(tab.ordinal)"
-                        : "Close Session \(tab.ordinal)"
-                )
-                .foregroundStyle(Color.secondary.opacity(hoveringClose ? 0.95 : 0.64))
-                .onHover { hoveringClose = $0 }
-                .help(tab.isBusy ? "Stop and close Session \(tab.ordinal)" : "Close Session \(tab.ordinal)")
-                .popover(
-                    isPresented: Binding(
-                        get: { showingCloseConfirmation },
-                        set: { if !$0 { cancelClose() } }
-                    ),
-                    arrowEdge: .leading
-                ) {
-                    SessionTabCloseConfirmation(
-                        ordinal: tab.ordinal,
-                        cancel: cancelClose,
-                        confirm: confirmClose
-                    )
-                }
-                .transition(.opacity.combined(with: .scale(scale: 0.9)))
-            }
         }
             .foregroundStyle(selected ? Color.accentColor : Color.secondary)
             .frame(
-                width: hovering
-                    ? SessionTabLayoutMetrics.bubble.expandedWidth
-                    : SessionTabLayoutMetrics.bubble.collapsedWidth,
+                width: SessionTabLayoutMetrics.bubble.collapsedWidth,
                 height: SessionTabLayoutMetrics.bubble.height
             )
             .background {
@@ -180,7 +136,7 @@ private struct SessionTabButton: View {
             alignment: .trailing
         )
         .overlay(alignment: .topLeading) {
-            if hovering, !hoveringClose, !showingCloseConfirmation {
+            if hovering {
                 SessionTabPreviewCard(
                     ordinal: tab.ordinal,
                     preview: preview,
@@ -198,38 +154,8 @@ private struct SessionTabButton: View {
         .accessibilityValue(preview)
         .accessibilityAddTraits(selected ? .isSelected : [])
         .accessibilityAction(named: "Select Session \(tab.ordinal)", select)
-        .accessibilityActions {
-            if tab.ordinal != 1, closeEnabled {
-                Button("Close Session \(tab.ordinal)", action: requestClose)
-            }
-        }
     }
 
-}
-
-private struct SessionTabCloseConfirmation: View {
-    let ordinal: Int
-    let cancel: () -> Void
-    let confirm: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Session \(ordinal) is still running")
-                .font(.system(size: 13, weight: .semibold))
-            Text("Stop its current work and close this side session?")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            HStack {
-                Spacer()
-                Button("Cancel", action: cancel)
-                Button("Stop & Close", role: .destructive, action: confirm)
-                    .keyboardShortcut(.defaultAction)
-            }
-        }
-        .padding(14)
-        .frame(width: 270)
-    }
 }
 
 private struct SessionTabPreviewCard: View {

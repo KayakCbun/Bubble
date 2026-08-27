@@ -73,6 +73,7 @@ struct SlashCommand: Identifiable, Equatable {
         .init(name: "clear", description: "Start a fresh session", local: true),
         .init(name: "new", description: "Start a fresh session", local: true),
         .init(name: "side", description: "Open a parallel side session", local: true),
+        .init(name: "close", description: "Close this side session, or hide Bubble from the main session", local: true),
         .init(name: "compact", description: "Compact older conversation turns now", hint: "instructions", local: false),
         .init(name: "autocompact", description: "Toggle automatic compaction", hint: "on|off|toggle", local: false),
         .init(name: "session", description: "Show session stats", local: false),
@@ -103,6 +104,7 @@ struct SlashCommand: Identifiable, Equatable {
         Type /mounts to mount or unmount a local folder.
         Type /setup to install Pi and pi-acp into ~/.bubble/runtime.
         Type /login to sign in a provider. Type /resume to switch sessions.
+        Type /close to close the current side session. In the main session it hides Bubble.
         Type $ or /skill:name to pick a skill.
 
         Slash commands

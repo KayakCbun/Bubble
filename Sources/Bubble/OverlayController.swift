@@ -63,19 +63,10 @@ final class OverlayController: NSObject, NSWindowDelegate {
         localMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
             guard let self, event.window === self.panel else { return event }
             if event.type == .leftMouseDown {
-                let closeableIndices = self.sessions.isSwitchingSession
-                    ? Set<Int>()
-                    : Set(self.sessions.tabs.indices.filter { self.sessions.tabs[$0].ordinal != 1 })
-                if let target = self.rootView.sessionTabTarget(
-                    atWindowPoint: event.locationInWindow,
-                    closeableIndices: closeableIndices
-                ) {
+                if let target = self.rootView.sessionTabTarget(atWindowPoint: event.locationInWindow) {
                     switch target {
                     case .select(let index) where self.sessions.tabs.indices.contains(index):
                         self.sessions.select(self.sessions.tabs[index].id)
-                        return nil
-                    case .close(let index) where self.sessions.tabs.indices.contains(index):
-                        self.sessions.requestCloseSideSession(self.sessions.tabs[index].id)
                         return nil
                     default:
                         break

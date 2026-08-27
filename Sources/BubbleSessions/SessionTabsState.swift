@@ -395,12 +395,9 @@ public struct SessionTabLayoutMetrics: Equatable, Sendable {
 
 public enum SessionTabHitTarget: Equatable, Sendable {
     case select(index: Int)
-    case close(index: Int)
 }
 
 public enum SessionTabLayout {
-    public static let closeButtonWidth: CGFloat = 18
-
     public static func hitRegions(
         count: Int,
         transcriptOriginY: CGFloat,
@@ -442,7 +439,6 @@ public enum SessionTabLayout {
     public static func target(
         at point: CGPoint,
         count: Int,
-        closeableIndices: Set<Int>,
         transcriptOriginY: CGFloat,
         trailingX: CGFloat,
         metrics: SessionTabLayoutMetrics = .bubble
@@ -455,10 +451,6 @@ public enum SessionTabLayout {
         )
         guard let index = regions.firstIndex(where: { $0.contains(point) }) else {
             return nil
-        }
-        if closeableIndices.contains(index),
-           point.x >= regions[index].maxX - closeButtonWidth {
-            return .close(index: index)
         }
         return .select(index: index)
     }

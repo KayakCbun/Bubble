@@ -714,7 +714,7 @@ public enum WorkspaceError: Error, LocalizedError, Equatable {
         case .noActiveRun:
             return "No workspace run is in progress."
         case .controlUnavailable:
-            return "Bubble workspace control is not running."
+            return "Bubble control is not running."
         }
     }
 }

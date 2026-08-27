@@ -136,7 +136,6 @@ do {
         SessionTabLayout.target(
             at: CGPoint(x: 10, y: 116),
             count: 2,
-            closeableIndices: [1],
             transcriptOriginY: 36,
             trailingX: 36
         ) == .select(index: 1),
@@ -146,17 +145,15 @@ do {
         SessionTabLayout.target(
             at: CGPoint(x: 29, y: 116),
             count: 2,
-            closeableIndices: [1],
             transcriptOriginY: 36,
             trailingX: 36
-        ) == .close(index: 1),
-        "a physical click on the side tab close button must not be routed as session selection"
+        ) == .select(index: 1),
+        "the full side tab remains a selection target with no destructive hit region"
     )
     expect(
         SessionTabLayout.target(
             at: CGPoint(x: 29, y: 76),
             count: 2,
-            closeableIndices: [1],
             transcriptOriginY: 36,
             trailingX: 36
         ) == .select(index: 0),
