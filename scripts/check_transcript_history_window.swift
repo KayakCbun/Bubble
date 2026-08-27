@@ -9,35 +9,44 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
 
 @main
 private enum TranscriptHistoryWindowCheck {
+    private enum RowKind {
+        case user
+        case output
+    }
+
     static func main() {
-        var rows = [false]
+        var rows = [RowKind.output]
         for _ in 0..<45 {
-            rows.append(true)
-            rows.append(false)
-            rows.append(false)
+            rows.append(.user)
+            rows.append(.output)
+            rows.append(.output)
         }
 
         expect(
-            TranscriptHistoryWindow.lowerBound(userRows: rows, turnCapacity: 10) == 106,
+            TranscriptHistoryWindow.lowerBound(rows: rows, turnCapacity: 10, isUser: { $0 == .user }) == 106,
             "initial history window starts at the tenth user turn from the end"
         )
         expect(
-            TranscriptHistoryWindow.lowerBound(userRows: rows, turnCapacity: 30) == 46,
+            TranscriptHistoryWindow.lowerBound(rows: rows, turnCapacity: 30, isUser: { $0 == .user }) == 46,
             "loading earlier expands the projection by twenty user turns"
         )
         expect(
-            TranscriptHistoryWindow.lowerBound(userRows: rows, turnCapacity: 80) == 0,
+            TranscriptHistoryWindow.lowerBound(rows: rows, turnCapacity: 80, isUser: { $0 == .user }) == 0,
             "a capacity larger than the transcript reveals the complete prefix"
         )
         expect(
-            TranscriptHistoryWindow.lowerBound(userRows: [false, false], turnCapacity: 10) == 0,
+            TranscriptHistoryWindow.lowerBound(
+                rows: [RowKind.output, .output],
+                turnCapacity: 10,
+                isUser: { $0 == .user }
+            ) == 0,
             "system-only transcripts remain visible"
         )
 
-        rows.append(true)
-        rows.append(false)
+        rows.append(.user)
+        rows.append(.output)
         expect(
-            TranscriptHistoryWindow.lowerBound(userRows: rows, turnCapacity: 10) == 109,
+            TranscriptHistoryWindow.lowerBound(rows: rows, turnCapacity: 10, isUser: { $0 == .user }) == 109,
             "new turns keep the projection bounded at the live edge"
         )
         expect(

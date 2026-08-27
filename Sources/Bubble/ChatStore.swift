@@ -126,6 +126,11 @@ private struct TranscriptEnvelope: Codable, @unchecked Sendable {
     var richItems: [ChatItem]? = nil
 }
 
+private struct TranscriptLoadResult: @unchecked Sendable {
+    var items: [ChatItem]
+    var richItems: [ChatItem]
+}
+
 struct QueuedUserMessage: Identifiable, Equatable {
     var id: UUID
     var text: String
@@ -241,9 +246,7 @@ final class ChatStore {
     }
     var streamUISuspended = true
     var transcriptRevision: UInt64 = 0
-    var transcriptHistoryTurnCapacity = TranscriptHistoryWindow.initialCapacity(
-        environmentValue: ProcessInfo.processInfo.environment["BUBBLE_TRANSCRIPT_HISTORY_TURNS"]
-    )
+    var transcriptHistoryTurnCapacity = TranscriptHistoryWindow.configuredInitialCapacity
     @ObservationIgnored private var resumeActionGeneration = 0
     var conversationTree: ConversationTreeSnapshot?
     var branchDraft: ConversationBranchDraft? {
@@ -1133,7 +1136,15 @@ final class ChatStore {
         qos: .utility,
         autoreleaseFrequency: .workItem
     )
+    private static let transcriptLoadQueue = DispatchQueue(
+        label: "local.bubble.transcript-load",
+        qos: .userInitiated,
+        attributes: .concurrent,
+        autoreleaseFrequency: .workItem
+    )
     private var persistWork: DispatchWorkItem?
+    @ObservationIgnored private var transcriptLoadGeneration = 0
+    @ObservationIgnored private var transcriptRestorePending = false
     private var richTranscriptRows: [String: ChatItem] = [:]
     private var mountSkillRefreshGeneration = 0
     private var workspacePaneLoadGeneration = 0
@@ -1158,15 +1169,9 @@ final class ChatStore {
         client = AcpClient(controlFile: controlFile, initialSessionID: initialSessionID)
         control = WorkspaceControlServer(controlFile: controlFile)
         OverlayPaths.bootstrap()
-        let restored = initialSessionID.map(Self.loadTranscript(sessionID:))
-            ?? (runtimeRole.restoresSavedTranscript ? Self.loadTranscript() : (items: [], richItems: []))
-        items = restored.items.filter {
-            !StartupTranscriptPolicy.isSetupCard($0.text, isSystem: $0.kind == .system)
-        }
-        for item in restored.richItems + restored.items {
-            if let key = Self.richKey(item) { richTranscriptRows[key] = item }
-        }
-        Self.prewarmTranscriptChunks(restored.items)
+        items = []
+        let restoredSessionID = initialSessionID
+            ?? (runtimeRole.restoresSavedTranscript ? PiSessions.currentId() : nil)
         workspaceState = WorkspaceRegistry.load(from: OverlayPaths.mountsFile)
         if runtimeRole.persistsWorkspaceRegistry, workspaceState.active?.isActive == true {
             workspaceState.active = nil
@@ -1175,11 +1180,6 @@ final class ChatStore {
             workspaceState.active = nil
         }
         refreshMountSkills()
-        // Persist startup-message migrations immediately so Pi metadata does not
-        // return the next time Bubble restores the local transcript.
-        if runtimeRole.restoresSavedTranscript {
-            writeTranscript()
-        }
         refreshCatalog()
         client.onUpdate = { [weak self] update in
             guard update.shouldDeliverToTranscript else { return }
@@ -1208,6 +1208,9 @@ final class ChatStore {
             try await self?.handleWorkspaceControl(method, params) ?? [:]
         }
         control.start()
+        if let restoredSessionID {
+            restoreTranscriptInBackground(sessionID: restoredSessionID)
+        }
     }
 
     func prepareToQuit() {
@@ -1228,6 +1231,7 @@ final class ChatStore {
     }
 
     func shutdownClosedTabRuntime() {
+        transcriptLoadGeneration &+= 1
         cancelPendingResumeAction()
         writeTranscript()
         client.onUpdate = nil
@@ -1250,8 +1254,9 @@ final class ChatStore {
 
     private var transcriptHistoryLowerBound: Int {
         TranscriptHistoryWindow.lowerBound(
-            userRows: items.map { $0.kind == .user },
-            turnCapacity: transcriptHistoryTurnCapacity
+            rows: items,
+            turnCapacity: transcriptHistoryTurnCapacity,
+            isUser: { $0.kind == .user }
         )
     }
 
@@ -2752,6 +2757,8 @@ final class ChatStore {
     }
 
     func resumeReplacingCurrent(_ id: String) {
+        transcriptLoadGeneration &+= 1
+        transcriptRestorePending = false
         writeTranscript()
         let previousItems = items
         let previousRichRows = richTranscriptRows
@@ -2759,9 +2766,7 @@ final class ChatStore {
         let previousHistoryTurnCapacity = transcriptHistoryTurnCapacity
         isStartingSession = true
         items = []
-        transcriptHistoryTurnCapacity = TranscriptHistoryWindow.initialCapacity(
-            environmentValue: ProcessInfo.processInfo.environment["BUBBLE_TRANSCRIPT_HISTORY_TURNS"]
-        )
+        transcriptHistoryTurnCapacity = TranscriptHistoryWindow.configuredInitialCapacity
         richTranscriptRows = [:]
         closeSideStage(animated: false)
         status = "resuming"
@@ -2772,12 +2777,13 @@ final class ChatStore {
                 }
                 _ = try await client.switchToSession(id, persistAsMain: runtimeRole.persistsAsMain)
                 onSessionIdentityChanged?()
-                let restored = Self.loadTranscript(sessionID: id)
+                let restored = await Self.loadTranscriptOffMain(sessionID: id)
                 items = restored.items
                 richTranscriptRows = [:]
                 for item in restored.richItems + restored.items {
                     if let key = Self.richKey(item) { richTranscriptRows[key] = item }
                 }
+                Self.prewarmTranscriptChunks(Array(items[transcriptHistoryLowerBound...]))
                 isConnected = true
                 status = "ready"
                 syncSessionConfig()
@@ -2864,12 +2870,12 @@ final class ChatStore {
     }
 
     private func startFreshConversation() {
+        transcriptLoadGeneration &+= 1
+        transcriptRestorePending = false
         writeTranscript()
         isStartingSession = true
         items = []
-        transcriptHistoryTurnCapacity = TranscriptHistoryWindow.initialCapacity(
-            environmentValue: ProcessInfo.processInfo.environment["BUBBLE_TRANSCRIPT_HISTORY_TURNS"]
-        )
+        transcriptHistoryTurnCapacity = TranscriptHistoryWindow.configuredInitialCapacity
         richTranscriptRows = [:]
         streamingAssistantId = nil
         streamingThoughtId = nil
@@ -3681,6 +3687,7 @@ final class ChatStore {
     }
 
     private func writeTranscript() {
+        guard !transcriptRestorePending else { return }
         guard let sessionID = client.sessionId ?? PiSessions.currentId() else { return }
         let itemSnapshot = items
         let richSnapshot = richTranscriptRows
@@ -3724,9 +3731,38 @@ final class ChatStore {
         }
     }
 
-    private static func loadTranscript() -> (items: [ChatItem], richItems: [ChatItem]) {
-        guard let expectedSessionID = PiSessions.currentId() else { return ([], []) }
-        return loadTranscript(sessionID: expectedSessionID)
+    private func restoreTranscriptInBackground(sessionID: String) {
+        transcriptLoadGeneration &+= 1
+        transcriptRestorePending = true
+        let generation = transcriptLoadGeneration
+        Task { @MainActor [weak self] in
+            let restored = await Self.loadTranscriptOffMain(sessionID: sessionID)
+            guard let self, self.transcriptLoadGeneration == generation else { return }
+            self.transcriptRestorePending = false
+            guard
+                  self.client.sessionId == sessionID
+                    || (self.client.sessionId == nil && PiSessions.currentId() == sessionID) else { return }
+            let restoredItems = restored.items.filter {
+                !StartupTranscriptPolicy.isSetupCard($0.text, isSystem: $0.kind == .system)
+            }
+            let liveItemIDs = Set(self.items.map(\.id))
+            self.items = restoredItems.filter { !liveItemIDs.contains($0.id) } + self.items
+            self.richTranscriptRows = [:]
+            for item in restored.richItems + restored.items {
+                if let key = Self.richKey(item) { self.richTranscriptRows[key] = item }
+            }
+            Self.prewarmTranscriptChunks(Array(self.items[self.transcriptHistoryLowerBound...]))
+            self.writeTranscript()
+            self.onTranscriptUpdated?()
+        }
+    }
+
+    private static func loadTranscriptOffMain(sessionID: String) async -> TranscriptLoadResult {
+        await withCheckedContinuation { continuation in
+            transcriptLoadQueue.async {
+                continuation.resume(returning: loadTranscript(sessionID: sessionID))
+            }
+        }
     }
 
     private static func prewarmTranscriptChunks(_ items: [ChatItem]) {
@@ -3743,7 +3779,7 @@ final class ChatStore {
         }
     }
 
-    private static func loadTranscript(sessionID: String) -> (items: [ChatItem], richItems: [ChatItem]) {
+    private static func loadTranscript(sessionID: String) -> TranscriptLoadResult {
         let sessionData = try? Data(contentsOf: transcriptURL(sessionID: sessionID))
         let currentData = try? Data(contentsOf: OverlayPaths.transcriptFile)
         let envelope = [sessionData, currentData].compactMap { data -> TranscriptEnvelope? in
@@ -3777,7 +3813,10 @@ final class ChatStore {
             return copy
         } }
         if let envelope {
-            return (repairTranscript(clean(envelope.items)), clean(envelope.richItems ?? []))
+            return TranscriptLoadResult(
+                items: repairTranscript(clean(envelope.items)),
+                richItems: clean(envelope.richItems ?? [])
+            )
         }
         // Migrate the pre-envelope transcript once. The legacy file belonged to
         // the session recorded in session-id, and the next write scopes it by ID.
@@ -3785,9 +3824,9 @@ final class ChatStore {
            PiSessions.currentId() == sessionID,
            let legacy = try? JSONDecoder().decode([ChatItem].self, from: currentData) {
             let migrated = repairTranscript(clean(legacy))
-            return (migrated, migrated)
+            return TranscriptLoadResult(items: migrated, richItems: migrated)
         }
-        return ([], [])
+        return TranscriptLoadResult(items: [], richItems: [])
     }
 
     private static func transcriptURL(sessionID: String) -> URL {
@@ -3838,15 +3877,12 @@ final class ChatStore {
             }
             result.append(item)
         }
-        var earlier: [String] = []
-        for index in result.indices where result[index].kind == .assistant {
-            result[index].text = TranscriptStream.truncatedAssistant(
-                result[index].text,
-                earlier: earlier
-            )
-            if !result[index].text.isEmpty {
-                earlier.append(result[index].text)
-            }
+        let assistantIndices = result.indices.filter { result[$0].kind == .assistant }
+        let repairedTexts = TranscriptStream.repairedAssistantTexts(
+            assistantIndices.map { result[$0].text }
+        )
+        for (index, text) in zip(assistantIndices, repairedTexts) {
+            result[index].text = text
         }
         return result.filter { item in
             if item.kind == .assistant {

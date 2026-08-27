@@ -3,7 +3,7 @@
 > 调研日期：2026-08-27  
 > T3 Code 基线：[`33b650a5b3b27382b35d2182dec6b22438c3da56`](https://github.com/pingdotgg/t3code/commit/33b650a5b3b27382b35d2182dec6b22438c3da56)  
 > 证据范围：T3 Code 官方仓库的当前源码、测试与提交历史；没有使用第三方文章或二手解读。  
-> Bubble 范围：只做现状对照与实施建议，本研究不修改产品代码。
+> Bubble 范围：研究结论已用于本轮实现与基准验证；页级本地持久化仍作为后续演进项。
 
 ## 结论先行
 
@@ -24,7 +24,7 @@ Bubble 已经具备其中不少关键能力：长列表按阈值切 `LazyVStack`
 
 Bubble 当前最值得移植的不是列表组件，而是以下三件事：
 
-1. **持久化和水合真正窗口化**：首屏只解码最近一小段，旧历史分页加载；当前“整份 JSON 同步解码 + 最后最多保留 4,000 项”仍会让超长 session 的打开成本随历史线性增长。
+1. **持久化和水合真正窗口化**：首屏只解码最近一小段，旧历史分页加载；本轮先把整份 JSON 读取/解码移出 UI 线程、只发布最近窗口，超长 session 的总解码成本仍随历史线性增长。
 2. **把全局观察拆成行级快照**：用稳定对象 identity 与结构共享，确保一条流式尾消息的变化不会使所有已完成行重新求值。
 3. **把 60 FPS 变成可执行的帧预算门禁**：60 Hz 的主线程预算是 16.67 ms。Bubble 现有滚动基准允许 p95 20 ms，不能证明“所有操作反馈高于 60 帧”；T3 Code 自身也没有公开这种证明。
 
@@ -144,15 +144,15 @@ T3 Code 的 session logic 测试构造 **20,000 条有序 tool activities**，�
 
 | 维度 | T3 Code 当前方案 | Bubble 当前方案 | 判断 |
 |---|---|---|---|
-| 数据窗口 | 最近 10 user turns；旧页每次 20；服务端 keyset cursor | transcript 持久化最终保留最多 4,000 项，但打开时仍读取并解码整个本地 projection | **Bubble 最大缺口：需要页级持久化/水合** |
+| 数据窗口 | 最近 10 user turns；旧页每次 20；服务端 keyset cursor | UI 首屏最近 10 user turns、旧页每次 20；后台仍解码最多 4,000 项的本地 projection | **主线程风险已解除；页级持久化仍待完成** |
 | UI 虚拟化 | LegendList + key/type + estimated size | 小/中 transcript 用稳定 `VStack`，超过 180 rows/source items 才用 `LazyVStack` | Bubble 是针对 SwiftUI 的合理策略，不应机械照搬 |
 | 行稳定性 | row variant 浅比较，复用对象 identity | stable row ID、`mainRowRenderKey`、`EquatableSection`；assistant 文本拆成稳定 render units，只重建 live tail | 方向一致；仍需验证全局 `ChatStore` observation 是否击穿行边界 |
 | 流式提交 | 默认整段缓冲；24K 字符 safety spill | 原始 chunk 聚合到显示脉冲；随 rendered bytes 从 120/60 降到 30/20 Hz | Bubble 保留实时反馈更好，但大输出更新频率本身低于 60 Hz |
 | 自动跟随 | 40 px strict live-edge；MVCP；折叠切换临时冻结 | `TranscriptFollowState` 区分 following/free scrolling；observer 保持可见锚；busy 才随 revision | 方向一致，需加入 prepend / disclosure 的回归门禁 |
 | 富文本 | Suspense plain fallback；完成态 LRU 500/50 MB | prose parse/chunk cache 256/12 MB；代码、Mermaid、Math 另有渲染路径 | 应为所有富渲染建立统一“live cheap / settled rich / bounded cache”规则 |
-| 持久化 | 活跃时不写；settled 后 500ms debounce；缓存携带 page metadata | active stream 不写；约 0.4s debounce；异步保存 | 原则一致；Bubble 的初始 `Data(contentsOf:) + JSONDecoder` 仍是同步整份水合风险 |
+| 持久化 | 活跃时不写；settled 后 500ms debounce；缓存携带 page metadata | active stream 不写；约 0.4s debounce；异步保存和后台整份恢复 | 主线程原则一致；Bubble 尚缺 page metadata 与按页 decode |
 | 状态生命周期 | thread/slice atom family，闲置 5 分钟释放 | 单个 `ChatStore` 承担 transcript、session、streaming 和较多 UI 状态 | 建议拆出 transcript projection / row snapshot store |
-| 性能证据 | 20K activities <100ms CPU test；无 FPS SLO | 600-turn 滚动 fixture；p95 ≤20ms、p99 ≤34ms；session switch ≤220/260ms | Bubble 测试面更接近用户，但门槛还不能证明严格 60 FPS |
+| 性能证据 | 20K activities <100ms CPU test；无 FPS SLO | 600-turn 滚动 fixture；p95 ≤17ms、p99 ≤18ms；Session tab selection ≤220/260ms | Bubble 已建立 60 Hz 核心滚动门禁；仍需扩展重富文本组合 |
 
 Bubble 对照文件：
 
@@ -172,8 +172,8 @@ Bubble 对照文件：
 帧率和操作延迟不是同一个指标。建议把目标拆成三条可审计 SLO：
 
 1. **连续交互流畅度**：滚轮/拖动滚动、展开折叠、窗口 resize、流式到达同时滚动时，60 Hz 设备主线程 frame p95 ≤ 16.67 ms，p99 ≤ 33.3 ms，空白连续帧为 0。
-2. **离散操作首反馈**：点击、键入、session 选择到第一帧视觉确认 ≤ 16.67 ms；完整内容可以后续渐进呈现。
-3. **内容可用延迟**：session 首个缓存窗口出现单独计时，不伪装成 FPS。当前 220/260 ms 的 session-switch 阈值应保留为阶段指标，再按窗口水合结果收紧。
+2. **离散操作首反馈**：点击、键入、Session tab selection 到第一帧视觉确认 ≤ 16.67 ms；完整内容可以后续渐进呈现。
+3. **内容可用延迟**：Session tab 首个缓存窗口出现单独计时，不伪装成 FPS。当前 220/260 ms 的 Session tab selection 阈值应保留为阶段指标，再按窗口水合结果收紧。
 
 若“全部高于 60 帧”按字面要求任何一帧都不超过 16.67 ms，应新增 max-frame 门禁；但后台调度、录屏和 CI 噪声会使它比 p95 门禁脆弱，应在隔离性能机上执行，不能只靠普通 CI。
 
@@ -205,12 +205,12 @@ TranscriptPage
 - 首屏读取最近 10–20 个用户回合，不是固定行数；tool fan-out 随回合归组。
 - 旧页每次 20 回合，使用排他的稳定 cursor，不用 offset。
 - page decode 放后台 executor；主线程只原子发布已解码的 immutable row snapshots。
-- session branch/revert/delete 提升 generation；旧 generation 的在途页不得合并。
+- Conversation branch change/revert/delete 提升 generation；旧 generation 的在途页不得合并。
 - live tail 和旧页都携带 sequence；旧页领先时等待 tail 追平，落后时丢弃并重拉。
 - manifest 明确 `hasMore/isHistoryComplete`，partial cache 永远不能被旧版本或恢复路径误认成完整 transcript。
 - 迁移期保留旧 JSON 只读导入：后台切页写新格式，成功后原子切 manifest；不要在首个打开动作里同步完成全量迁移。
 
-这一步会同时降低 session switch 的磁盘读取、JSON decode、对象创建和 SwiftUI 初始 diff，而不仅是“屏幕上少画几行”。
+这一步会同时降低 Session tab selection 的磁盘读取、JSON decode、对象创建和 SwiftUI 初始 diff，而不仅是“屏幕上少画几行”。
 
 ### P1：把 transcript observation 从 `ChatStore` 全局变化中隔离
 
@@ -244,7 +244,7 @@ Bubble 已有正确骨架，建议补齐以下自动化断言：
 - prepend 旧页前后，首个完全可见 row 与像素 offset 保持不变；
 - 展开/收起长 tool group 或 Mermaid 时，以触发行作锚，不能跳到底；
 - programmatic follow 产生的 AppKit scroll event 不得误判为用户中断；
-- session switch 后旧 session 的 delayed follow / page response 被 generation token 丢弃。
+- Session tab selection 后旧 Session tab 的 delayed follow / page response 被 generation token 丢弃。
 
 40 px 是 T3 Code 针对 Web 列表的经验值，Bubble 应基于 Mac 滚轮、触控板和现有 `TranscriptScrollObserver` 校准，而不是直接复制数值。
 
@@ -255,7 +255,7 @@ Bubble 已有正确骨架，建议补齐以下自动化断言：
 | 场景 | 数据量 | 同时操作 | 必测指标 |
 |---|---:|---|---|
 | 普通长会话 | 600 turns | 物理滚轮连续滚动 | frame p50/p95/p99、blank frames、mounted anchors |
-| 持久化上限 | 4,000 items | 首次打开 + 快速切 session | first feedback、first window、full settle、主线程 stall |
+| 持久化上限 | 4,000 items | 首次打开 + 快速切 Session tab | first feedback、first window、full settle、主线程 stall |
 | 重富文本 | 多个 100KB code/table/mermaid | 展开折叠 + resize | frame time、parse/highlight time、cache bytes |
 | 活跃长回答 | >768KB rendered text | streaming + 历史滚动 | 操作 FPS、文字 commit Hz、tail rebuild cost |
 | 分页竞争 | 多页 + live stream | 连续 load earlier + revert/switch | 锚定误差、重复/丢失 IDs、stale merge 数 |
@@ -267,12 +267,12 @@ Bubble 已有正确骨架，建议补齐以下自动化断言：
 
 完成以下条件后，才建议对外宣称 Bubble 的目标交互达到 60 FPS：
 
-- [ ] 最近窗口能独立水合，打开 4,000-item session 不同步解码整份 transcript。
-- [ ] load earlier 在 live stream、revert、branch、session switch 竞争下无重复、无丢失、无陈旧合并。
+- [x] 最近窗口独立发布，打开 4,000-item session 不在 UI 线程同步解码整份 transcript。
+- [ ] load earlier 在 live stream、Conversation branch revert/change、Session tab selection 竞争下无重复、无丢失、无陈旧合并。
 - [ ] completed rows 在 live-tail 更新中保持 identity，性能日志显示每 pulse 只重算尾部。
 - [ ] 600-turn 与 4,000-item 物理滚动的 frame p95 ≤16.67 ms，连续空白帧为 0。
 - [ ] streaming + scroll、展开重代码、Mermaid、resize 各自通过相同帧预算。
-- [ ] click/key/session select 的第一帧视觉确认 ≤16.67 ms。
+- [ ] click/key/Session tab selection 的第一帧视觉确认 ≤16.67 ms。
 - [ ] 缓存同时有 count/bytes 上限，打开多 session 后 RSS 可回收。
 - [ ] 性能记录同时报告 animation FPS、text commit Hz 和 content-ready latency，不把三者混成一个数字。
 
@@ -288,8 +288,11 @@ T3 Code 最有价值的设计不是“用了虚拟列表”，而是把长会话
 
 - 主 transcript 首屏投影最近 10 个 user turns，顶部显式 “Load earlier”，每次扩展 20 turns；完整 `items`、持久化内容和 Pi session 上下文不被截断。
 - `EquatableSection` 改为保存延迟 row builder。此前 builder 在等值门判断前就构造完整 `mainTranscriptRow`，主线程采样显示 `NSHostingView.layout → AttributeGraph → ForEachChild.updateValue` 是主要热栈。
-- 滚动门禁从 p95 20 ms / p99 34 ms 收紧到 p95 17.5 ms / p99 20 ms；外接 DELL U2719DC 当前为 60 Hz，实测 vsync 间隔约 16.67 ms。
+- session transcript 的文件读取、JSON decode 和清理转到后台队列，UI 线程只原子发布当前 10-turn 窗口并预热该窗口；切换或新建 Session tab 会用 generation 丢弃陈旧恢复结果。
+- legacy replay 修复从“每条 assistant 扫描所有此前完整回复”的二次增长路径，收敛为每条仅做 self-repeat、只让最终 assistant 检查旧回复；600-turn 首窗就绪从约 4.74s 降到 307ms（含基准固定 300ms 等待）。恢复完成前冻结持久化，避免 setup 更新覆盖尚未合并的历史。
+- 滚动门禁从 p95 20 ms / p99 34 ms 收紧到 p95 17 ms / p99 18 ms；外接 DELL U2719DC 当前为 60 Hz，实测 vsync 间隔约 16.67 ms。
 - 600-turn fixture 的未修改基线为 p95 78.15 ms / p99 84.73 ms；落地后首屏 10 turns 为 p95 16.74 ms / p99 16.82 ms，展开到 30 turns 为 16.72 / 16.84 ms，展开到 50 turns 为 16.72 / 17.28 ms，三组 blank frames 均为 0。
+- 最终打包产物的 4,054-item / 4.73MB fixture 为 p95 16.75ms / p99 16.80ms、blank frames 0；600 次随机挂载审计无空白且 anchor error 0px，Session tab selection 总耗时 83.25ms。
 - 物理 UI 滚动到分页边界后点击 “Load earlier”，history rail 从 10 变为 30 turns，Turn 590 的屏幕位置保持不变；随机挂载审计 600 samples 的 anchor error 为 0 px。
 
 这证明当前长会话的核心滚动路径在 60 Hz 显示器上不再持续丢帧。它仍不等于“所有 Bubble 操作在所有机器上永远没有单帧调度尖峰”，也尚未完成上述 P0 的页级磁盘格式迁移；后续应继续用本节门禁约束 session 水合、流式富文本和重型 Mermaid/代码展开。

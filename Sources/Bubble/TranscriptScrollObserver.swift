@@ -142,6 +142,8 @@ final class TranscriptScrollProbe: NSView {
     private var diagnosticWheelBeginsGesture = true
     private var diagnosticLastTick: TimeInterval?
     private var diagnosticFrameIntervals: [TimeInterval] = []
+    private var diagnosticReadyStartedAt: TimeInterval?
+    private var diagnosticReadyLatency: TimeInterval = 0
     private var diagnosticPeakAnchorCount = 0
     private var diagnosticDisplayLink: CADisplayLink?
     private var diagnosticMountTimer: Timer?
@@ -682,6 +684,7 @@ final class TranscriptScrollProbe: NSView {
         guard diagnosticFramesRemaining == 0,
               let window else { return }
         diagnosticFramesRemaining = -1
+        diagnosticReadyStartedAt = CACurrentMediaTime()
         NSRunningApplication.current.activate()
         window.makeKeyAndOrderFront(nil)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self, weak window] in
@@ -691,6 +694,21 @@ final class TranscriptScrollProbe: NSView {
     }
 
     private func beginDiagnosticDrive(in window: NSWindow) {
+        if let document = observedDocument {
+            registerExistingAnchors(in: document)
+            rebuildAnchorIndex()
+        }
+        if anchorIndex.isEmpty,
+           let startedAt = diagnosticReadyStartedAt,
+           CACurrentMediaTime() - startedAt < 15 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self, weak window] in
+                guard let self, let window else { return }
+                self.beginDiagnosticDrive(in: window)
+            }
+            return
+        }
+        diagnosticReadyLatency = diagnosticReadyStartedAt.map { CACurrentMediaTime() - $0 } ?? 0
+        diagnosticReadyStartedAt = nil
         maintainsVisibleContent = true
         diagnosticFramesRemaining = 720
         diagnosticWheelBeginsGesture = true
@@ -711,6 +729,16 @@ final class TranscriptScrollProbe: NSView {
 
     private func startMountAudit() {
         guard diagnosticMountTimer == nil else { return }
+        if let document = observedDocument {
+            registerExistingAnchors(in: document)
+            rebuildAnchorIndex()
+        }
+        if anchorIndex.isEmpty {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                self?.startMountAudit()
+            }
+            return
+        }
         maintainsVisibleContent = true
         diagnosticMountStep = 0
         diagnosticMountAwaitingContent = false
@@ -911,9 +939,10 @@ final class TranscriptScrollProbe: NSView {
             let maximum = (sorted.last ?? 0) * 1_000
             OverlayLog.write(
                 String(
-                    format: "transcript scroll benchmark frames=%d step=%.0f p95=%.2fms p99=%.2fms max=%.2fms anchors=%d peakAnchors=%d blankFrames=%d longestBlankStreak=%d",
+                    format: "transcript scroll benchmark frames=%d step=%.0f ready=%.2fms p95=%.2fms p99=%.2fms max=%.2fms anchors=%d peakAnchors=%d blankFrames=%d longestBlankStreak=%d",
                     diagnosticFrameIntervals.count,
                     diagnosticScrollStep,
+                    diagnosticReadyLatency * 1_000,
                     p95,
                     p99,
                     maximum,

@@ -131,6 +131,15 @@ struct TranscriptStreamCheck {
             replayed == "去掉了。models.json 里现在只剩 gcli/grok-4.5。",
             "replayed history is stripped from the last bubble \(replayed)"
         )
+        let repairedHistory = TranscriptStream.coalesce([
+            .init(kind: "assistant", text: old),
+            .init(kind: "user", text: "继续"),
+            .init(kind: "assistant", text: "新的结论。" + old),
+        ])
+        expect(
+            repairedHistory.last?.text == "新的结论。",
+            "saved-history repair strips replayed history from only the final assistant bubble"
+        )
         let once = "通了。有活直接说。先看现有配置再动手。"
         let doubled = TranscriptStream.collapseSelfRepeat(once + once)
         expect(doubled == once, "exact doubled reply collapses \(doubled)")
