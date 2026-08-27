@@ -30,9 +30,21 @@ enum OverlayPresentationPolicy {
     static func defersNonCriticalWork(isTransitioning: Bool) -> Bool {
         isTransitioning
     }
+}
 
-    static func shouldRequestFocus(isTransitioning: Bool) -> Bool {
-        !isTransitioning
+enum ComposerFocusPolicy {
+    /// Stream rendering may pause for ordinary panel geometry changes without
+    /// making the composer unavailable. Only window visibility transitions
+    /// suspend keyboard focus.
+    static func isSuspended(
+        panelVisible: Bool,
+        presentationTransitioning: Bool
+    ) -> Bool {
+        !panelVisible || presentationTransitioning
+    }
+
+    static func shouldRequestFocus(isSuspended: Bool) -> Bool {
+        !isSuspended
     }
 }
 

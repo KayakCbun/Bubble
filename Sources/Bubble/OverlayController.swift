@@ -207,6 +207,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         hideGeneration += 1
         isHiding = false
         rememberRestPosition(panel.frame)
+        store.composerFocusSuspended = true
         store.setStreamUISuspended(true)
         pendingShowCompletion = completion
 
@@ -251,6 +252,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         presentationPreflightScheduled = false
         commandReturnApplication = nil
         store.cancelPendingResumeAction()
+        store.composerFocusSuspended = true
         store.setStreamUISuspended(true)
         ImageZoomController.shared.close()
         MermaidZoomController.shared.close()
@@ -417,6 +419,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         ) {
             store.setStreamUISuspended(false)
         }
+        store.composerFocusSuspended = false
         store.requestFocus()
         let completion = pendingShowCompletion
         pendingShowCompletion = nil
@@ -464,6 +467,10 @@ final class OverlayController: NSObject, NSWindowDelegate {
             guard let self else { return }
             self.configureRuntime(next)
             next.visibleScreenWidth = self.currentVisibleFrame()?.width ?? next.visibleScreenWidth
+            next.composerFocusSuspended = ComposerFocusPolicy.isSuspended(
+                panelVisible: self.panel.isVisible,
+                presentationTransitioning: self.isPresentationTransitioning
+            )
             next.setStreamUISuspended(!self.panel.isVisible || self.isPresentationTransitioning)
             self.position(confirmsSessionPresentation: false)
         }

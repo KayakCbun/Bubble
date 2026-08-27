@@ -1756,8 +1756,8 @@ struct OverlayView: View {
     }
 
     private func restoreFocus() {
-        guard OverlayPresentationPolicy.shouldRequestFocus(
-            isTransitioning: store.streamUISuspended
+        guard ComposerFocusPolicy.shouldRequestFocus(
+            isSuspended: store.composerFocusSuspended
         ) else { return }
         applyFocusIfAllowed()
         DispatchQueue.main.async {
@@ -1769,8 +1769,8 @@ struct OverlayView: View {
     }
 
     private func applyFocusIfAllowed() {
-        guard OverlayPresentationPolicy.shouldRequestFocus(
-            isTransitioning: store.streamUISuspended
+        guard ComposerFocusPolicy.shouldRequestFocus(
+            isSuspended: store.composerFocusSuspended
         ) else { return }
         focused = true
         activateFieldEditor()

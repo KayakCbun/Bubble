@@ -472,9 +472,30 @@ struct OverlayLayoutCheck {
                "filesystem catalog and reconnect checks wait for an idle interaction window")
         expect(OverlayPresentationPolicy.stablePreflightFrames >= 2,
                "long transcripts render for consecutive stable frames before becoming visible")
-        expect(!OverlayPresentationPolicy.shouldRequestFocus(isTransitioning: true),
+        expect(
+            !ComposerFocusPolicy.isSuspended(
+                panelVisible: true,
+                presentationTransitioning: false
+            ),
+            "a visible settled composer stays focusable while transcript rendering is suspended for resize"
+        )
+        expect(
+            ComposerFocusPolicy.isSuspended(
+                panelVisible: true,
+                presentationTransitioning: true
+            ),
+            "the composer waits only for the actual presentation transition"
+        )
+        expect(
+            ComposerFocusPolicy.isSuspended(
+                panelVisible: false,
+                presentationTransitioning: false
+            ),
+            "a hidden panel cannot request composer focus"
+        )
+        expect(!ComposerFocusPolicy.shouldRequestFocus(isSuspended: true),
                "field-editor focus work cannot interrupt the presentation animation")
-        expect(OverlayPresentationPolicy.shouldRequestFocus(isTransitioning: false),
+        expect(ComposerFocusPolicy.shouldRequestFocus(isSuspended: false),
                "the composer regains focus once Bubble is fully visible")
 
         print("PASS: overlay layout policy")

@@ -244,6 +244,7 @@ final class ChatStore {
         didSet { onActivityChanged?(hasActiveWork) }
     }
     var streamUISuspended = true
+    var composerFocusSuspended = true
     var transcriptRevision: UInt64 = 0
     var transcriptHistoryTurnCapacity = TranscriptHistoryWindow.configuredInitialCapacity
     @ObservationIgnored private var resumeActionGeneration = 0
