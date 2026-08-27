@@ -10,6 +10,7 @@ func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
 @main
 struct OverlayLayoutCheck {
     static func main() {
+        let ordinaryTextKeyCode: UInt16 = 6
         expect(
             OverlayLayoutPolicy.preferredTranscriptHeight(visibleHeight: 900) == 684,
             "a 14-inch display should use more of the available vertical space"
@@ -497,6 +498,56 @@ struct OverlayLayoutCheck {
                "field-editor focus work cannot interrupt the presentation animation")
         expect(ComposerFocusPolicy.shouldRequestFocus(isSuspended: false),
                "the composer regains focus once Bubble is fully visible")
+        expect(
+            ComposerFocusPolicy.shouldReleaseBeforeSubmissionRestore(wasFocused: true),
+            "a submitted composer releases the stale field editor before restoring focus"
+        )
+        expect(
+            !ComposerFocusPolicy.shouldReleaseBeforeSubmissionRestore(wasFocused: false),
+            "an already-unfocused composer only needs the restore edge"
+        )
+        expect(ComposerFocusPolicy.submissionRestoreDelay > 0,
+               "the stale field editor must detach before composer focus is restored")
+        expect(
+            ComposerBusyKeyRoutingPolicy.shouldRoute(
+                isBusy: true,
+                hasText: true,
+                keyCode: ordinaryTextKeyCode,
+                commandModified: false,
+                controlModified: false
+            ),
+            "ordinary typing during a model run is routed through the live field editor"
+        )
+        expect(
+            ComposerBusyKeyRoutingPolicy.shouldRoute(
+                isBusy: true,
+                hasText: false,
+                keyCode: OverlayKeyCode.deleteBackward,
+                commandModified: false,
+                controlModified: false
+            ),
+            "deletion remains available during a model run"
+        )
+        expect(
+            !ComposerBusyKeyRoutingPolicy.shouldRoute(
+                isBusy: true,
+                hasText: true,
+                keyCode: ordinaryTextKeyCode,
+                commandModified: true,
+                controlModified: false
+            ),
+            "command shortcuts remain owned by the standard edit-command path"
+        )
+        expect(
+            !ComposerBusyKeyRoutingPolicy.shouldRoute(
+                isBusy: false,
+                hasText: true,
+                keyCode: ordinaryTextKeyCode,
+                commandModified: false,
+                controlModified: false
+            ),
+            "idle typing stays on SwiftUI's ordinary TextField path"
+        )
 
         let busyEscape = OverlayEscapePolicy.action(
             slashMenuVisible: false,

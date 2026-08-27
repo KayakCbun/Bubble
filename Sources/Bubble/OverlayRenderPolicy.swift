@@ -33,6 +33,8 @@ enum OverlayPresentationPolicy {
 }
 
 enum ComposerFocusPolicy {
+    static let submissionRestoreDelay: TimeInterval = 0.02
+
     /// Stream rendering may pause for ordinary panel geometry changes without
     /// making the composer unavailable. Only window visibility transitions
     /// suspend keyboard focus.
@@ -45,6 +47,49 @@ enum ComposerFocusPolicy {
 
     static func shouldRequestFocus(isSuspended: Bool) -> Bool {
         !isSuspended
+    }
+
+    /// SwiftUI may keep a stale field editor after a multiline TextField submits.
+    /// A focused composer must first publish an explicit release edge.
+    static func shouldReleaseBeforeSubmissionRestore(wasFocused: Bool) -> Bool {
+        wasFocused
+    }
+}
+
+enum ComposerEditorIdentity {
+    static let viewIdentifier = "bubble.composer.editor"
+}
+
+enum OverlayKeyCode {
+    static let returnKey: UInt16 = 36
+    static let tab: UInt16 = 48
+    static let deleteBackward: UInt16 = 51
+    static let escape: UInt16 = 53
+    static let keypadEnter: UInt16 = 76
+    static let deleteForward: UInt16 = 117
+    static let leftArrow: UInt16 = 123
+    static let rightArrow: UInt16 = 124
+    static let downArrow: UInt16 = 125
+    static let upArrow: UInt16 = 126
+
+    static let deletion: Set<UInt16> = [deleteBackward, deleteForward]
+    static let busyComposerReserved: Set<UInt16> = [
+        returnKey, tab, escape, keypadEnter,
+        leftArrow, rightArrow, downArrow, upArrow,
+    ]
+}
+
+enum ComposerBusyKeyRoutingPolicy {
+    static func shouldRoute(
+        isBusy: Bool,
+        hasText: Bool,
+        keyCode: UInt16,
+        commandModified: Bool,
+        controlModified: Bool
+    ) -> Bool {
+        guard isBusy, !commandModified, !controlModified else { return false }
+        if OverlayKeyCode.deletion.contains(keyCode) { return true }
+        return hasText && !OverlayKeyCode.busyComposerReserved.contains(keyCode)
     }
 }
 

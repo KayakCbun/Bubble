@@ -64,9 +64,6 @@ enum OverlayMetrics {
 }
 
 struct OverlayView: View {
-    private static let inputDiagnosticExpected =
-        ProcessInfo.processInfo.environment["BUBBLE_INPUT_DIAGNOSTIC_EXPECTED"]
-
     @Bindable var store: ChatStore
     var onToggleWidth: () -> Void
     var sessionTabCount: Int = 0
@@ -271,14 +268,6 @@ struct OverlayView: View {
         }
         .onChange(of: store.items.count) { _, _ in
             restoreFocus()
-        }
-        .onChange(of: store.draft) { _, draft in
-            guard let expected = Self.inputDiagnosticExpected else {
-                return
-            }
-            OverlayLog.write(
-                "input physical benchmark characters=\(draft.count) matches=\(draft == expected ? 1 : 0)"
-            )
         }
         .onChange(of: store.runtimeID) { _, _ in
             resetSessionPresentationState()
@@ -3859,9 +3848,9 @@ private struct ComposerBar: View {
                         } else {
                             store.send()
                         }
-                        restoreFocus()
+                        restoreFocusAfterSubmit()
                     }
-                    .background(ComposerTextWidthSync())
+                    .background(ComposerEditorSync())
                 if showInputPlaceholder {
                     HStack(spacing: 3) {
                         if showInputCaret {
@@ -3898,7 +3887,7 @@ private struct ComposerBar: View {
         ) {
             Button {
                 store.send()
-                restoreFocus()
+                restoreFocusAfterSubmit()
             } label: {
                 Image(systemName: "arrow.up.circle.fill")
                     .font(.system(size: 18, weight: .semibold))
@@ -3925,7 +3914,7 @@ private struct ComposerBar: View {
         } else if store.hasComposerPayload {
             Button {
                 store.send()
-                restoreFocus()
+                restoreFocusAfterSubmit()
             } label: {
                 Image(systemName: "arrow.up.circle.fill")
                     .font(.system(size: 18, weight: .semibold))
@@ -3939,19 +3928,30 @@ private struct ComposerBar: View {
                 .frame(width: size, height: size)
         }
     }
+
+    private func restoreFocusAfterSubmit() {
+        if ComposerFocusPolicy.shouldReleaseBeforeSubmissionRestore(wasFocused: focused) {
+            focused = false
+        }
+        NSApp.keyWindow?.makeFirstResponder(nil)
+        DispatchQueue.main.asyncAfter(deadline: .now() + ComposerFocusPolicy.submissionRestoreDelay) {
+            restoreFocus()
+        }
+    }
 }
 
-private struct ComposerTextWidthSync: NSViewRepresentable {
-    func makeNSView(context: Context) -> ComposerWidthProbe {
-        ComposerWidthProbe()
+private struct ComposerEditorSync: NSViewRepresentable {
+    func makeNSView(context: Context) -> ComposerEditorProbe {
+        ComposerEditorProbe()
     }
 
-    func updateNSView(_ view: ComposerWidthProbe, context: Context) {
+    func updateNSView(_ view: ComposerEditorProbe, context: Context) {
         view.sync()
     }
 }
 
-private final class ComposerWidthProbe: NSView {
+/// Keeps the native composer editor identifiable and aligned with SwiftUI's width.
+private final class ComposerEditorProbe: NSView {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
     override func layout() {
@@ -3974,6 +3974,9 @@ private final class ComposerWidthProbe: NSView {
         guard let host = superview else { return }
         let views = textViews(in: host)
         for textView in views where textView.isEditable {
+            textView.identifier = NSUserInterfaceItemIdentifier(
+                ComposerEditorIdentity.viewIdentifier
+            )
             textView.textContainer?.widthTracksTextView = true
             textView.textContainer?.lineFragmentPadding = 0
             textView.textContainerInset = NSSize(width: 0, height: 1)
@@ -3981,6 +3984,11 @@ private final class ComposerWidthProbe: NSView {
             if let container = textView.textContainer, abs(container.size.width - width) > 0.5 {
                 container.size = NSSize(width: width, height: 10_000)
             }
+        }
+        for textField in textFields(in: host) where textField.isEditable {
+            textField.identifier = NSUserInterfaceItemIdentifier(
+                ComposerEditorIdentity.viewIdentifier
+            )
         }
     }
 
@@ -3991,6 +3999,17 @@ private final class ComposerWidthProbe: NSView {
         }
         for child in view.subviews {
             found.append(contentsOf: textViews(in: child))
+        }
+        return found
+    }
+
+    private func textFields(in view: NSView) -> [NSTextField] {
+        var found: [NSTextField] = []
+        if let textField = view as? NSTextField {
+            found.append(textField)
+        }
+        for child in view.subviews {
+            found.append(contentsOf: textFields(in: child))
         }
         return found
     }
