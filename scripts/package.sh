@@ -12,7 +12,7 @@ swiftc -parse-as-library Sources/Bubble/ProseFormat.swift scripts/check_prose.sw
 
 swiftc -O -parse-as-library \
   Sources/Bubble/ProseFormat.swift \
-  Sources/Bubble/MarkdownFiles.swift \
+  Sources/Bubble/PreviewFiles.swift \
   Sources/Bubble/OverlayLayoutPolicy.swift \
   Sources/Bubble/OverlaySurface.swift \
   Sources/Bubble/PierreFileIconCatalog.swift \
@@ -77,8 +77,8 @@ swift run SessionTabsChecks
 swiftc -parse-as-library Sources/Bubble/MessageDelivery.swift scripts/check_message_delivery.swift -o /tmp/bubble-check-message-delivery
 /tmp/bubble-check-message-delivery
 
-swiftc -parse-as-library Sources/Bubble/MarkdownFiles.swift scripts/check_markdown.swift -o /tmp/bubble-check-markdown
-/tmp/bubble-check-markdown
+swiftc -parse-as-library Sources/Bubble/PreviewFiles.swift scripts/check_file_preview.swift -o /tmp/bubble-check-file-preview
+/tmp/bubble-check-file-preview
 
 swiftc -parse-as-library Sources/Bubble/CommandTapPolicy.swift scripts/check_command_tap.swift -o /tmp/bubble-check-tap
 /tmp/bubble-check-tap

@@ -197,7 +197,7 @@ final class ChatStore {
     var selectedAvatarFile = AvatarSelection.file
     var transcriptWide = UserDefaults.standard.bool(forKey: "bubble.transcript.wide")
     var overlayPinned = UserDefaults.standard.bool(forKey: "bubble.overlay.pinned")
-    var markdownPreview: MarkdownDocument?
+    var filePreview: FilePreviewDocument?
     var workspaceStage: WorkspaceStage?
     var workspacePaneItems: [ChatItem] = []
     var workspacePaneStreamingAssistantId: UUID?
@@ -305,29 +305,29 @@ final class ChatStore {
         requestFocus()
     }
 
-    func openMarkdownPreview(_ raw: String, fromWorkspacePane: Bool = false) {
-        let path = MarkdownFiles.resolve(
+    func openFilePreview(_ raw: String, fromWorkspacePane: Bool = false) {
+        let path = PreviewFiles.resolve(
             raw,
             workspace: OverlayPaths.workspace.path,
-            extraRoots: markdownSearchRoots()
+            extraRoots: filePreviewSearchRoots()
         )
-        if markdownPreview?.path == path {
+        if filePreview?.path == path {
             if workspaceStage == nil {
                 closeSideStage()
             } else {
-                markdownPreview = nil
+                filePreview = nil
             }
             return
         }
         let wasPresented = sideStagePresented
-        if !SideStagePolicy.keepWorkspaceWhenOpeningMarkdown(fromWorkspacePane: fromWorkspacePane) {
+        if !SideStagePolicy.keepWorkspaceWhenOpeningFilePreview(fromWorkspacePane: fromWorkspacePane) {
             clearWorkspaceStage(keepingItems: false)
         }
-        markdownPreview = MarkdownFiles.load(path: path)
+        filePreview = PreviewFiles.load(path: path)
         applySideStageChromeOnOpen(wasPresented: wasPresented)
     }
 
-    private func markdownSearchRoots() -> [String] {
+    private func filePreviewSearchRoots() -> [String] {
         var seen = Set<String>()
         var roots: [String] = []
         func add(_ path: String) {
@@ -352,12 +352,12 @@ final class ChatStore {
         return roots
     }
 
-    func closeMarkdownPreview() {
+    func closeFilePreview() {
         if workspaceStage == nil {
             closeSideStage()
             return
         }
-        markdownPreview = nil
+        filePreview = nil
     }
 
     func closeSideStage(animated: Bool = true) {
@@ -374,7 +374,7 @@ final class ChatStore {
 
     func collapseSideStage() {
         onSideStageChromeInvalidated?()
-        markdownPreview = nil
+        filePreview = nil
         clearWorkspaceStage(keepingItems: false)
         sideStageChromeVisible = false
     }
@@ -385,7 +385,7 @@ final class ChatStore {
     }
 
     func returnToWorkspaceStage() {
-        markdownPreview = nil
+        filePreview = nil
         revealWorkspacePaneContent()
         uncoverWorkspacePane()
         workspacePaneScrollToken += 1
@@ -394,7 +394,7 @@ final class ChatStore {
     @discardableResult
     func handleSideStageEscape() -> Bool {
         switch SideStagePolicy.escapeAction(
-            showingMarkdown: markdownPreview != nil,
+            showingFilePreview: filePreview != nil,
             workspaceStacked: workspaceStage != nil,
             showingWorkspace: workspaceStage != nil
         ) {
@@ -411,21 +411,21 @@ final class ChatStore {
 
     var sideStagePresented: Bool {
         SideStagePolicy.isPresented(
-            showingMarkdown: markdownPreview != nil,
+            showingFilePreview: filePreview != nil,
             showingWorkspace: workspaceStage != nil
         )
     }
 
     var showsWorkspaceTranscript: Bool {
         SideStagePolicy.showsWorkspaceTranscript(
-            showingMarkdown: markdownPreview != nil,
+            showingFilePreview: filePreview != nil,
             showingWorkspace: workspaceStage != nil
         )
     }
 
     var canReturnToWorkspace: Bool {
         SideStagePolicy.canReturnToWorkspace(
-            showingMarkdown: markdownPreview != nil,
+            showingFilePreview: filePreview != nil,
             workspaceStacked: workspaceStage != nil
         )
     }
@@ -446,7 +446,7 @@ final class ChatStore {
         if let item = items.last(where: {
             $0.kind == .workspaceRun && $0.workspacePath == brief.path
         }) {
-            if workspaceStage?.cardId == item.id, markdownPreview == nil {
+            if workspaceStage?.cardId == item.id, filePreview == nil {
                 return
             }
             openWorkspaceStage(from: item)
@@ -455,9 +455,9 @@ final class ChatStore {
 
     func openWorkspaceStage(from item: ChatItem) {
         let wasPresented = sideStagePresented
-        let opensSideStage = workspaceStage == nil && markdownPreview == nil
+        let opensSideStage = workspaceStage == nil && filePreview == nil
         let changesWorkspace = workspaceStage?.cardId != item.id
-        markdownPreview = nil
+        filePreview = nil
         if opensSideStage || changesWorkspace {
             workspacePanePresentationPhase = .placeholder
             workspacePaneCoverVisible = true
@@ -4385,7 +4385,7 @@ final class ChatStore {
                 if SideStagePolicy.shouldRebindResolvedWorkspaceSession(
                     currentMountPath: workspaceStage?.path,
                     currentRunId: workspaceStage?.runId,
-                    showingMarkdown: markdownPreview != nil,
+                    showingFilePreview: filePreview != nil,
                     resolvedMountPath: mount.path,
                     resolvedRunId: runId
                 ) {
@@ -4785,7 +4785,7 @@ final class ChatStore {
     private func followOpenWorkspaceStageIfNeeded(_ brief: WorkspaceBrief) {
         guard SideStagePolicy.shouldFollowNewWorkspaceRun(
             currentMountPath: workspaceStage?.path,
-            showingMarkdown: markdownPreview != nil,
+            showingFilePreview: filePreview != nil,
             nextMountPath: brief.path
         ),
         let runId = brief.runId,

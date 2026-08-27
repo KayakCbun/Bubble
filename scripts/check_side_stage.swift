@@ -12,41 +12,41 @@ struct SideStageCheck {
     static func main() {
         expect(
             SideStagePolicy.width(
-                showingMarkdown: false,
+                showingFilePreview: false,
                 showingWorkspace: false,
-                markdownWidth: 440,
+                filePreviewWidth: 440,
                 workspaceWidth: 760
             ) == 0,
             "closed stage adds no width"
         )
         expect(
             SideStagePolicy.width(
-                showingMarkdown: true,
+                showingFilePreview: true,
                 showingWorkspace: true,
-                markdownWidth: 440,
+                filePreviewWidth: 440,
                 workspaceWidth: 760
             ) == 440,
             "stacked markdown uses preview width"
         )
         expect(
             SideStagePolicy.width(
-                showingMarkdown: false,
+                showingFilePreview: false,
                 showingWorkspace: true,
-                markdownWidth: 440,
+                filePreviewWidth: 440,
                 workspaceWidth: 760
             ) == 760,
             "workspace session uses default transcript width"
         )
         expect(
-            SideStagePolicy.showsWorkspaceTranscript(showingMarkdown: true, showingWorkspace: true) == false,
+            SideStagePolicy.showsWorkspaceTranscript(showingFilePreview: true, showingWorkspace: true) == false,
             "stacked markdown hides the workspace transcript"
         )
         expect(
-            SideStagePolicy.canReturnToWorkspace(showingMarkdown: true, workspaceStacked: true),
+            SideStagePolicy.canReturnToWorkspace(showingFilePreview: true, workspaceStacked: true),
             "markdown opened from a workspace session can return"
         )
         expect(
-            !SideStagePolicy.canReturnToWorkspace(showingMarkdown: true, workspaceStacked: false),
+            !SideStagePolicy.canReturnToWorkspace(showingFilePreview: true, workspaceStacked: false),
             "main-transcript markdown has no back stack"
         )
         expect(SideStagePolicy.followLatest(status: "running"), "live cards follow the tail")
@@ -179,7 +179,7 @@ struct SideStageCheck {
         )
         expect(
             SideStagePolicy.escapeAction(
-                showingMarkdown: true,
+                showingFilePreview: true,
                 workspaceStacked: true,
                 showingWorkspace: true
             ) == .returnToWorkspace,
@@ -187,7 +187,7 @@ struct SideStageCheck {
         )
         expect(
             SideStagePolicy.escapeAction(
-                showingMarkdown: true,
+                showingFilePreview: true,
                 workspaceStacked: false,
                 showingWorkspace: false
             ) == .closeStage,
@@ -195,7 +195,7 @@ struct SideStageCheck {
         )
         expect(
             SideStagePolicy.escapeAction(
-                showingMarkdown: false,
+                showingFilePreview: false,
                 workspaceStacked: false,
                 showingWorkspace: true
             ) == .closeStage,
@@ -207,7 +207,7 @@ struct SideStageCheck {
         expect(
             SideStagePolicy.shouldFollowNewWorkspaceRun(
                 currentMountPath: "/mount/a",
-                showingMarkdown: false,
+                showingFilePreview: false,
                 nextMountPath: "/mount/b"
             ),
             "an open workspace stage follows a run started in another mount"
@@ -215,7 +215,7 @@ struct SideStageCheck {
         expect(
             !SideStagePolicy.shouldFollowNewWorkspaceRun(
                 currentMountPath: nil,
-                showingMarkdown: false,
+                showingFilePreview: false,
                 nextMountPath: "/mount/b"
             ),
             "a new workspace run does not open a stage the user had closed"
@@ -223,7 +223,7 @@ struct SideStageCheck {
         expect(
             !SideStagePolicy.shouldFollowNewWorkspaceRun(
                 currentMountPath: "/mount/a",
-                showingMarkdown: true,
+                showingFilePreview: true,
                 nextMountPath: "/mount/b"
             ),
             "a new workspace run does not replace a markdown document the user is reading"
@@ -231,7 +231,7 @@ struct SideStageCheck {
         expect(
             !SideStagePolicy.shouldFollowNewWorkspaceRun(
                 currentMountPath: "/mount/a",
-                showingMarkdown: false,
+                showingFilePreview: false,
                 nextMountPath: "/mount/a"
             ),
             "updates from the currently displayed mount stay in the existing stage"
@@ -261,7 +261,7 @@ struct SideStageCheck {
             SideStagePolicy.shouldRebindResolvedWorkspaceSession(
                 currentMountPath: "/mount/b",
                 currentRunId: "run-b",
-                showingMarkdown: false,
+                showingFilePreview: false,
                 resolvedMountPath: "/mount/b",
                 resolvedRunId: "run-b"
             ),
@@ -271,7 +271,7 @@ struct SideStageCheck {
             !SideStagePolicy.shouldRebindResolvedWorkspaceSession(
                 currentMountPath: "/mount/b",
                 currentRunId: "run-old",
-                showingMarkdown: false,
+                showingFilePreview: false,
                 resolvedMountPath: "/mount/b",
                 resolvedRunId: "run-b"
             ),
@@ -281,18 +281,18 @@ struct SideStageCheck {
             !SideStagePolicy.shouldRebindResolvedWorkspaceSession(
                 currentMountPath: "/mount/b",
                 currentRunId: "run-b",
-                showingMarkdown: true,
+                showingFilePreview: true,
                 resolvedMountPath: "/mount/b",
                 resolvedRunId: "run-b"
             ),
             "session resolution does not steal a markdown document opened meanwhile"
         )
         expect(
-            SideStagePolicy.keepWorkspaceWhenOpeningMarkdown(fromWorkspacePane: true),
+            SideStagePolicy.keepWorkspaceWhenOpeningFilePreview(fromWorkspacePane: true),
             "links inside the workspace pane keep the session stacked"
         )
         expect(
-            !SideStagePolicy.keepWorkspaceWhenOpeningMarkdown(fromWorkspacePane: false),
+            !SideStagePolicy.keepWorkspaceWhenOpeningFilePreview(fromWorkspacePane: false),
             "links in the main transcript replace the stage"
         )
 

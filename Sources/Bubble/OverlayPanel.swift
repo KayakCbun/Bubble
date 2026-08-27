@@ -15,7 +15,7 @@ final class OverlayRootView: NSView {
     private var maskTranscriptWidth = OverlayMetrics.transcriptWidthDefault
     private var maskComposerHeight = OverlayMetrics.minHeight
     private var maskPreviewWidth: CGFloat = 0
-    private var maskPreviewIsMarkdown = false
+    private var maskPreviewHasFileControls = false
     private var maskPreviewHasBack = false
     private var maskSessionTabCount = 0
 
@@ -177,7 +177,7 @@ final class OverlayRootView: NSView {
             if closeRect.contains(point) {
                 return .previewClose
             }
-            if maskPreviewIsMarkdown {
+            if maskPreviewHasFileControls {
                 let finderRect = NSRect(
                     x: previewTrailing - hitWidth * 2,
                     y: 0,
@@ -228,7 +228,7 @@ final class OverlayRootView: NSView {
         transcriptWidth: CGFloat = OverlayMetrics.transcriptWidthDefault,
         composerHeight: CGFloat = OverlayMetrics.minHeight,
         previewWidth: CGFloat = 0,
-        previewIsMarkdown: Bool = false,
+        previewHasFileControls: Bool = false,
         previewHasBack: Bool = false,
         sessionTabCount: Int = 0
     ) {
@@ -238,7 +238,7 @@ final class OverlayRootView: NSView {
         maskTranscriptWidth = transcriptWidth
         maskComposerHeight = composerHeight > 1 ? composerHeight : OverlayMetrics.minHeight
         maskPreviewWidth = previewWidth
-        maskPreviewIsMarkdown = previewIsMarkdown
+        maskPreviewHasFileControls = previewHasFileControls
         maskPreviewHasBack = previewHasBack
         maskSessionTabCount = sessionTabCount
         rebuildCardMask()

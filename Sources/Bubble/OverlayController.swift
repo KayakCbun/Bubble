@@ -498,7 +498,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         }
         rootView.installPreviewControls(
             onFinder: { [weak self] in
-                guard let path = self?.store.markdownPreview?.path else { return }
+                guard let path = self?.store.filePreview?.path else { return }
                 NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
             },
             onClose: { [weak self] in
@@ -715,7 +715,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
                 chromeVisible: store.sideStageChromeVisible,
                 previewWidth: layout.previewWidth
             ),
-            previewIsMarkdown: store.markdownPreview != nil,
+            previewHasFileControls: store.filePreview != nil,
             previewHasBack: store.canReturnToWorkspace,
             sessionTabCount: layout.sessionTabCount
         )
@@ -891,9 +891,9 @@ final class OverlayController: NSObject, NSWindowDelegate {
 
     private var currentPreviewWidth: CGFloat {
         SideStagePolicy.width(
-            showingMarkdown: store.markdownPreview != nil,
+            showingFilePreview: store.filePreview != nil,
             showingWorkspace: store.workspaceStage != nil,
-            markdownWidth: OverlayMetrics.previewWidth,
+            filePreviewWidth: OverlayMetrics.previewWidth,
             workspaceWidth: OverlayMetrics.previewWidth
         )
     }

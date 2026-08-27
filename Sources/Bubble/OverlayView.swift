@@ -101,9 +101,9 @@ struct OverlayView: View {
 
     private var previewWidth: CGFloat {
         SideStagePolicy.width(
-            showingMarkdown: store.markdownPreview != nil,
+            showingFilePreview: store.filePreview != nil,
             showingWorkspace: store.workspaceStage != nil,
-            markdownWidth: OverlayMetrics.previewWidth,
+            filePreviewWidth: OverlayMetrics.previewWidth,
             workspaceWidth: OverlayMetrics.previewWidth
         )
     }
@@ -255,8 +255,8 @@ struct OverlayView: View {
         .overlay {
             QuoteChipLayer(store: store)
         }
-        .environment(\.openMarkdownPreview) { path in
-            store.openMarkdownPreview(path)
+        .environment(\.openFilePreview) { path in
+            store.openFilePreview(path)
         }
         .preference(key: OverlayLayoutKey.self, value: layout)
         .background(Color.clear)
@@ -333,18 +333,18 @@ struct OverlayView: View {
         ZStack {
             if let stage = store.workspaceStage {
                 workspaceStageContent(stage)
-                    .opacity(store.markdownPreview == nil ? 1 : 0)
-                    .allowsHitTesting(store.markdownPreview == nil)
+                    .opacity(store.filePreview == nil ? 1 : 0)
+                    .allowsHitTesting(store.filePreview == nil)
             }
-            if let preview = store.markdownPreview {
-                markdownPreviewPane(preview)
+            if let preview = store.filePreview {
+                filePreviewPane(preview)
             }
         }
         .frame(width: previewWidth, height: transcriptHeight)
         .frostedGlass(in: transcriptShape)
         .clipped()
-        .environment(\.openMarkdownPreview) { path in
-            store.openMarkdownPreview(path, fromWorkspacePane: store.workspaceStage != nil)
+        .environment(\.openFilePreview) { path in
+            store.openFilePreview(path, fromWorkspacePane: store.workspaceStage != nil)
         }
     }
 
@@ -596,7 +596,7 @@ struct OverlayView: View {
         }
     }
 
-    private func markdownPreviewPane(_ document: MarkdownDocument) -> some View {
+    private func filePreviewPane(_ document: FilePreviewDocument) -> some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 if store.canReturnToWorkspace {
@@ -604,7 +604,7 @@ struct OverlayView: View {
                         store.returnToWorkspaceStage()
                     }
                 }
-                MarkdownFileGlyph(pointSize: 14)
+                PierreFileIcon(path: document.path, size: 14)
                 Text(document.title)
                     .font(.system(size: 13, weight: .medium))
                     .lineLimit(1)
@@ -630,8 +630,14 @@ struct OverlayView: View {
                 .padding(16)
             } else {
                 ScrollView {
-                    MessageBody(text: document.source, preferClassicMarkdown: true)
-                        .padding(16)
+                    switch document.format {
+                    case .markdown:
+                        MessageBody(text: document.source, preferClassicMarkdown: true)
+                            .padding(16)
+                    case .plainText(let language):
+                        CodeBlockView(language: language, source: document.source)
+                            .padding(16)
+                    }
                 }
                 .scrollIndicators(.never)
             }
@@ -2668,8 +2674,8 @@ struct OverlayView: View {
                 fallbackRoot: OverlayPaths.workspace.path
             )
         )
-        if MarkdownFiles.isMarkdown(path: url.path) {
-            store.openMarkdownPreview(url.path)
+        if PreviewFiles.isPreviewable(path: url.path) {
+            store.openFilePreview(url.path)
             return
         }
         NSWorkspace.shared.activateFileViewerSelecting([url])

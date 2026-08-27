@@ -1,14 +1,22 @@
 import Foundation
 
-struct MarkdownDocument: Equatable {
+enum FilePreviewFormat: Equatable {
+    case markdown
+    case plainText(language: String)
+}
+
+struct FilePreviewDocument: Equatable {
     var path: String
     var title: String
     var source: String
     var error: String?
+    var format: FilePreviewFormat = .markdown
 }
 
-enum MarkdownFiles {
-    static let extensions: Set<String> = ["md", "markdown"]
+enum PreviewFiles {
+    static let markdownExtensions: Set<String> = ["md", "markdown"]
+    static let textPreviewExtensions: Set<String> = ["json", "txt", "csv"]
+    static let supportedExtensions = markdownExtensions.union(textPreviewExtensions)
     static let maxBytes = 512_000
     private static let skipDirectoryNames: Set<String> = [
         "node_modules", ".git", "DerivedData", ".build", "dist", "Pods", ".swiftpm",
@@ -16,11 +24,24 @@ enum MarkdownFiles {
 
     static func isMarkdown(path: String) -> Bool {
         let ext = (path as NSString).pathExtension.lowercased()
-        return extensions.contains(ext)
+        return markdownExtensions.contains(ext)
     }
 
     static func isMarkdown(ext: String) -> Bool {
-        extensions.contains(ext.lowercased())
+        markdownExtensions.contains(ext.lowercased())
+    }
+
+    static func isPreviewable(path: String) -> Bool {
+        isPreviewable(ext: (path as NSString).pathExtension)
+    }
+
+    static func isPreviewable(ext: String) -> Bool {
+        supportedExtensions.contains(ext.lowercased())
+    }
+
+    static func previewFormat(path: String) -> FilePreviewFormat {
+        let ext = (path as NSString).pathExtension.lowercased()
+        return markdownExtensions.contains(ext) ? .markdown : .plainText(language: ext)
     }
 
     static func trimTrailingPunctuation(_ raw: String) -> String {
@@ -142,23 +163,23 @@ enum MarkdownFiles {
         return stripped.removingPercentEncoding ?? stripped
     }
 
-    static func load(path: String) -> MarkdownDocument {
+    static func load(path: String) -> FilePreviewDocument {
         let path = sanitizePath(path)
         let url = URL(fileURLWithPath: path)
         let title = url.lastPathComponent
         var isDirectory: ObjCBool = false
         let exists = FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory)
         guard exists else {
-            return MarkdownDocument(path: path, title: title, source: "", error: "File not found.")
+            return FilePreviewDocument(path: path, title: title, source: "", error: "File not found.")
         }
         if isDirectory.boolValue {
-            return MarkdownDocument(path: path, title: title, source: "", error: "That path is a folder.")
+            return FilePreviewDocument(path: path, title: title, source: "", error: "That path is a folder.")
         }
         let data: Data
         do {
             data = try readFile(at: path)
         } catch {
-            return MarkdownDocument(
+            return FilePreviewDocument(
                 path: path,
                 title: title,
                 source: "",
@@ -166,7 +187,7 @@ enum MarkdownFiles {
             )
         }
         if data.count > maxBytes {
-            return MarkdownDocument(
+            return FilePreviewDocument(
                 path: path,
                 title: title,
                 source: "",
@@ -175,9 +196,15 @@ enum MarkdownFiles {
         }
         guard let text = String(data: data, encoding: .utf8)
             ?? String(data: data, encoding: .isoLatin1) else {
-            return MarkdownDocument(path: path, title: title, source: "", error: "File is not text.")
+            return FilePreviewDocument(path: path, title: title, source: "", error: "File is not text.")
         }
-        return MarkdownDocument(path: path, title: title, source: text, error: nil)
+        return FilePreviewDocument(
+            path: path,
+            title: title,
+            source: text,
+            error: nil,
+            format: previewFormat(path: path)
+        )
     }
 
     static func readFile(at path: String) throws -> Data {
