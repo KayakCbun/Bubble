@@ -24,10 +24,11 @@ struct SessionOverlayView: View {
                             selected: tab.id == sessions.presentedSelectedID,
                             preview: sessions.preview(for: tab.id),
                             closeEnabled: !sessions.isSwitchingSession,
+                            showingCloseConfirmation: sessions.pendingCloseSessionID == tab.id,
                             select: { sessions.select(tab.id) },
-                            close: { stopIfBusy in
-                                sessions.closeSideSession(tab.id, stopIfBusy: stopIfBusy)
-                            }
+                            requestClose: { sessions.requestCloseSideSession(tab.id) },
+                            cancelClose: { sessions.cancelCloseSideSession(tab.id) },
+                            confirmClose: { sessions.confirmCloseSideSession(tab.id) }
                         )
                     }
                 }
@@ -57,11 +58,13 @@ private struct SessionTabButton: View {
     let selected: Bool
     let preview: String
     let closeEnabled: Bool
+    let showingCloseConfirmation: Bool
     let select: () -> Void
-    let close: (_ stopIfBusy: Bool) -> Void
+    let requestClose: () -> Void
+    let cancelClose: () -> Void
+    let confirmClose: () -> Void
     @State private var hovering = false
     @State private var hoveringClose = false
-    @State private var showingCloseConfirmation = false
 
     var body: some View {
         HStack(spacing: 3) {
@@ -76,7 +79,7 @@ private struct SessionTabButton: View {
                 Button(action: requestClose) {
                     Image(systemName: "xmark")
                         .font(.system(size: 8.5, weight: .bold))
-                        .frame(width: 18, height: 22)
+                        .frame(width: SessionTabLayout.closeButtonWidth, height: 22)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -88,14 +91,17 @@ private struct SessionTabButton: View {
                 .foregroundStyle(Color.secondary.opacity(hoveringClose ? 0.95 : 0.64))
                 .onHover { hoveringClose = $0 }
                 .help(tab.isBusy ? "Stop and close Session \(tab.ordinal)" : "Close Session \(tab.ordinal)")
-                .popover(isPresented: $showingCloseConfirmation, arrowEdge: .leading) {
+                .popover(
+                    isPresented: Binding(
+                        get: { showingCloseConfirmation },
+                        set: { if !$0 { cancelClose() } }
+                    ),
+                    arrowEdge: .leading
+                ) {
                     SessionTabCloseConfirmation(
                         ordinal: tab.ordinal,
-                        cancel: { showingCloseConfirmation = false },
-                        confirm: {
-                            showingCloseConfirmation = false
-                            close(true)
-                        }
+                        cancel: cancelClose,
+                        confirm: confirmClose
                     )
                 }
                 .transition(.opacity.combined(with: .scale(scale: 0.9)))
@@ -201,13 +207,6 @@ private struct SessionTabButton: View {
         }
     }
 
-    private func requestClose() {
-        if tab.isBusy {
-            showingCloseConfirmation = true
-        } else {
-            close(false)
-        }
-    }
 }
 
 private struct SessionTabCloseConfirmation: View {

@@ -8,6 +8,16 @@ enum OverlayHitTestPolicy {
     ) -> Bool {
         !panelContainsClick || !visibleCardContainsClick
     }
+
+    static func shouldHideLocalPanelClick(
+        atWindowPoint point: CGPoint,
+        visibleCardRegions: [OverlayCardHitRegion]
+    ) -> Bool {
+        shouldHide(
+            panelContainsClick: true,
+            visibleCardContainsClick: visibleCardRegions.contains { $0.contains(point) }
+        )
+    }
 }
 
 struct OverlayCardHitRegion {

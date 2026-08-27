@@ -84,7 +84,19 @@ final class OverlayRootView: NSView {
             || hitRegions.contains(where: { $0.contains(localPoint) })
     }
 
-    func sessionTabIndex(atWindowPoint windowPoint: NSPoint) -> Int? {
+    func shouldHideLocalPanelClick(atWindowPoint windowPoint: NSPoint) -> Bool {
+        let localPoint = convert(windowPoint, from: nil)
+        guard control(at: localPoint) == nil else { return false }
+        return OverlayHitTestPolicy.shouldHideLocalPanelClick(
+            atWindowPoint: localPoint,
+            visibleCardRegions: hitRegions
+        )
+    }
+
+    func sessionTabTarget(
+        atWindowPoint windowPoint: NSPoint,
+        closeableIndices: Set<Int>
+    ) -> SessionTabHitTarget? {
         guard maskSessionTabCount > 0, maskTranscriptHeight > 1 else { return nil }
         let localPoint = convert(windowPoint, from: nil)
         let inputHeight = maskComposerHeight > 1
@@ -98,9 +110,10 @@ final class OverlayRootView: NSView {
             OverlayMetrics.shadowInset,
             inputY - OverlayMetrics.stackSpacing - maskTranscriptHeight
         )
-        return SessionTabLayout.index(
+        return SessionTabLayout.target(
             at: localPoint,
             count: maskSessionTabCount,
+            closeableIndices: closeableIndices,
             transcriptOriginY: transcriptY,
             trailingX: OverlayMetrics.shadowInset
         )

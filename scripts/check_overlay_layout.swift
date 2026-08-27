@@ -306,6 +306,13 @@ struct OverlayLayoutCheck {
             cornerRadius: 22
         )
         expect(roundedInput.contains(CGPoint(x: 260, y: 23)), "composer center is interactive")
+        expect(
+            !OverlayHitTestPolicy.shouldHideLocalPanelClick(
+                atWindowPoint: CGPoint(x: 260, y: 23),
+                visibleCardRegions: [roundedInput]
+            ),
+            "a local mouseDown in the composer must keep Bubble open without resampling the global pointer"
+        )
         expect(!roundedInput.contains(CGPoint(x: 1, y: 1)), "transparent rounded corner dismisses Bubble")
         let snapped = OverlayPixel.align(CGRect(x: 12.25, y: 8.75, width: 760, height: 46), scale: 2)
         expect(snapped.origin.x == 12.5 && snapped.origin.y == 9, "rect origin follows backing scale")

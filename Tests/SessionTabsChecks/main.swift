@@ -132,6 +132,36 @@ do {
         ) == 1,
         "a physical click on the second visible tab must resolve to the side session"
     )
+    expect(
+        SessionTabLayout.target(
+            at: CGPoint(x: 10, y: 116),
+            count: 2,
+            closeableIndices: [1],
+            transcriptOriginY: 36,
+            trailingX: 36
+        ) == .select(index: 1),
+        "a physical click on the side tab label must select that session"
+    )
+    expect(
+        SessionTabLayout.target(
+            at: CGPoint(x: 29, y: 116),
+            count: 2,
+            closeableIndices: [1],
+            transcriptOriginY: 36,
+            trailingX: 36
+        ) == .close(index: 1),
+        "a physical click on the side tab close button must not be routed as session selection"
+    )
+    expect(
+        SessionTabLayout.target(
+            at: CGPoint(x: 29, y: 76),
+            count: 2,
+            closeableIndices: [1],
+            transcriptOriginY: 36,
+            trailingX: 36
+        ) == .select(index: 0),
+        "the main session has no close target"
+    )
 
     let restoredPrimary = UUID()
     let restoredSide = UUID()
