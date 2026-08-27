@@ -33,13 +33,24 @@ final class OverlayController: NSObject, NSWindowDelegate {
     private var chromeRevealGeneration = 0
     private var chromeRevealPending = false
     private var chromeHideGeneration = 0
+    private let presentationAnimator = OverlayPresentationAnimator()
+    private var presentationDiagnostics: WindowPresentationDiagnostics?
+    private var isPreparingShow = false
+    private var presentationPreflightScheduled = false
+    private var showGeneration = 0
+    private var pendingShowCompletion: (() -> Void)?
+    private var deferredPresentationWorkGeneration = 0
 
     private let positionCenterXKey = "bubble.position.centerX"
     private let positionBottomYKey = "bubble.position.bottomY"
+    private var runsPresentationDiagnostics: Bool {
+        ProcessInfo.processInfo.environment["BUBBLE_PRESENTATION_DIAGNOSTICS"] == "1"
+    }
 
     func start() {
         OverlayPaths.bootstrap()
         installView()
+        if runsPresentationDiagnostics { return }
         tapMonitor.onDoubleTap = { [weak self] in
             self?.toggleFromCommandTap()
         }
@@ -140,11 +151,12 @@ final class OverlayController: NSObject, NSWindowDelegate {
         if let localKeys { NSEvent.removeMonitor(localKeys) }
         sessions.prepareToQuit()
         frameAnimator.cancel()
+        presentationAnimator.cancel(resetVisible: true)
         hide(animated: false)
     }
 
     func toggle() {
-        if panel.isVisible {
+        if panel.isVisible, !isHiding {
             hide()
         } else {
             show()
@@ -152,7 +164,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
     }
 
     private func toggleFromCommandTap() {
-        if panel.isVisible {
+        if panel.isVisible, !isHiding {
             let application = commandReturnApplication
             commandReturnApplication = nil
             hide(animated: true, returningFocusTo: application)
@@ -171,58 +183,56 @@ final class OverlayController: NSObject, NSWindowDelegate {
         show(returningFocusTo: nil)
     }
 
-    private func show(returningFocusTo application: NSRunningApplication?) {
+    private func show(
+        returningFocusTo application: NSRunningApplication?,
+        completion: (() -> Void)? = nil
+    ) {
         if !CommandFocusReturnPolicy.preservesExistingTarget(
             panelVisible: panel.isVisible,
             requestedTargetPresent: application != nil
         ) {
             commandReturnApplication = application
         }
+
+        if panel.isVisible, !isHiding, !isPreparingShow {
+            completion?()
+            return
+        }
+
+        showGeneration &+= 1
+        deferredPresentationWorkGeneration &+= 1
+        let generation = showGeneration
         restorePositionIfNeeded()
         syncVisibleScreenWidth()
         hideGeneration += 1
         isHiding = false
-        panel.ignoresMouseEvents = false
-        let appearing = !panel.isVisible
         rememberRestPosition(panel.frame)
-        if appearing {
-            var start = panel.frame
-            start.origin.y -= 16
-            CATransaction.begin()
-            CATransaction.setDisableActions(true)
-            panel.alphaValue = 0
-            panel.setFrame(start, display: false)
-            CATransaction.commit()
-            targetPanelFrame = NSRect(
-                x: (restCenterX ?? panel.frame.midX) - panel.frame.width / 2,
-                y: restBottomY ?? (panel.frame.minY + 10),
-                width: panel.frame.width,
-                height: panel.frame.height
-            )
+        store.setStreamUISuspended(true)
+        pendingShowCompletion = completion
+
+        if panel.isVisible, presentationAnimator.isAnimating {
+            isPreparingShow = false
+            beginPresentationShow(generation: generation)
+            return
         }
+
+        isPreparingShow = true
+        presentationPreflightScheduled = false
+        panel.ignoresMouseEvents = true
+        panel.alphaValue = 1
+        presentationAnimator.prepareHidden(scale: panel.backingScaleFactor)
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
-        position()
-        if appearing || panel.alphaValue < 0.99 {
-            let dest = targetPanelFrame ?? panel.frame
-            isUpdatingFrame = true
-            store.setStreamUISuspended(true)
-            if appearing {
-                frameAnimator.syncFromPanel()
-            }
-            frameAnimator.onSettled = { [weak self] in
-                self?.finishFrameAnimation()
-            }
-            frameAnimator.retarget(frame: dest, alpha: 1)
-        } else {
-            store.setStreamUISuspended(false)
+        if let layout = lastAppliedLayout {
+            apply(layout, confirmsSessionPresentation: false)
         }
-        store.requestFocus()
-        OverlayPulse.shared.onNextFrame { [weak self] in
-            self?.store.refreshCatalog()
-        }
-        Task { @MainActor in
-            await connectIfNeeded()
+        rootView.needsLayout = true
+        hostingView?.needsLayout = true
+        rootView.layoutSubtreeIfNeeded()
+        hostingView?.layoutSubtreeIfNeeded()
+        DispatchQueue.main.async { [weak self] in
+            guard let self, generation == self.showGeneration else { return }
+            self.tryBeginPendingShow()
         }
     }
 
@@ -230,7 +240,15 @@ final class OverlayController: NSObject, NSWindowDelegate {
         hide(animated: animated, returningFocusTo: nil)
     }
 
-    private func hide(animated: Bool, returningFocusTo application: NSRunningApplication?) {
+    private func hide(
+        animated: Bool,
+        returningFocusTo application: NSRunningApplication?,
+        completion: (() -> Void)? = nil
+    ) {
+        showGeneration &+= 1
+        deferredPresentationWorkGeneration &+= 1
+        pendingShowCompletion = nil
+        presentationPreflightScheduled = false
         commandReturnApplication = nil
         store.cancelPendingResumeAction()
         store.setStreamUISuspended(true)
@@ -238,42 +256,194 @@ final class OverlayController: NSObject, NSWindowDelegate {
         MermaidZoomController.shared.close()
         guard panel.isVisible else {
             panel.orderOut(nil)
+            presentationAnimator.resetVisible()
             application?.activate(options: [])
+            completion?()
             return
         }
         guard animated else {
             isHiding = false
+            isPreparingShow = false
             frameAnimator.cancel()
-            panel.alphaValue = 1
+            presentationAnimator.cancel(resetVisible: true)
+            targetPanelFrame = nil
+            isUpdatingFrame = false
             panel.orderOut(nil)
             application?.activate(options: [])
+            completion?()
             return
         }
         if isHiding { return }
+        isPreparingShow = false
         isHiding = true
         hideGeneration += 1
         let generation = hideGeneration
-        isUpdatingFrame = true
+        frameAnimator.cancel()
+        targetPanelFrame = nil
+        isUpdatingFrame = false
         panel.ignoresMouseEvents = true
-        var dest = panel.frame
-        dest.origin.y -= 14
-        frameAnimator.syncFromPanel()
-        frameAnimator.onSettled = { [weak self] in
-            guard let self, self.hideGeneration == generation, self.isHiding else { return }
+        presentationDiagnostics?.begin(stableFrame: panel.frame, phase: "hide")
+        presentationAnimator.animate(
+            visible: false,
+            scale: panel.backingScaleFactor,
+            reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        ) { [weak self] _ in
+            guard let self,
+                  self.hideGeneration == generation,
+                  self.isHiding else { return }
+            self.presentationDiagnostics?.end()
             self.panel.orderOut(nil)
-            self.panel.alphaValue = 1
+            self.presentationAnimator.resetVisible()
             self.panel.ignoresMouseEvents = false
-            if let restX = self.restCenterX, let restY = self.restBottomY {
-                var rest = self.panel.frame
-                rest.origin.x = restX - rest.width / 2
-                rest.origin.y = restY
-                self.panel.setFrame(rest, display: false)
-            }
             self.isHiding = false
-            self.finishFrameAnimation()
             application?.activate(options: [])
+            completion?()
         }
-        frameAnimator.retarget(frame: dest, alpha: 0)
+    }
+
+    func runPresentationBenchmark(cycles: Int = 6) {
+        guard ProcessInfo.processInfo.environment["BUBBLE_PRESENTATION_DIAGNOSTICS"] == "1",
+              let surface = rootView.layer else { return }
+        let diagnostics = WindowPresentationDiagnostics()
+        diagnostics.attach(panel: panel, surface: surface)
+        presentationDiagnostics = diagnostics
+
+        func runCycle(_ remaining: Int) {
+            show(returningFocusTo: nil) { [weak self] in
+                guard let self else { return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    self.hide(animated: true, returningFocusTo: nil) { [weak self] in
+                        guard let self else { return }
+                        if remaining > 1 {
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                                runCycle(remaining - 1)
+                            }
+                        } else {
+                            let summary = diagnostics.summary(cycles: cycles)
+                            OverlayLog.write(summary)
+                            self.presentationDiagnostics = nil
+                        }
+                    }
+                }
+            }
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            runCycle(max(cycles, 1))
+        }
+    }
+
+    private func tryBeginPendingShow() {
+        guard isPreparingShow,
+              !presentationPreflightScheduled,
+              panel.isVisible,
+              !isHiding,
+              OverlayPresentationPolicy.shouldBegin(
+                layoutSessionID: lastAppliedLayout?.sessionID,
+                selectedSessionID: store.runtimeID,
+                targetFramePending: targetPanelFrame != nil,
+                geometryAnimating: frameAnimator.isAnimating,
+                transcriptRestorePending: store.isTranscriptRestorePending
+              ) else { return }
+
+        let generation = showGeneration
+        presentationPreflightScheduled = true
+        preparePresentationSurface()
+        waitForPresentationPreflight(
+            generation: generation,
+            framesRemaining: OverlayPresentationPolicy.stablePreflightFrames
+        )
+    }
+
+    private func waitForPresentationPreflight(generation: Int, framesRemaining: Int) {
+        OverlayPulse.shared.onNextFrame { [weak self] in
+            guard let self,
+                  generation == self.showGeneration,
+                  self.isPreparingShow,
+                  self.panel.isVisible,
+                  !self.isHiding else { return }
+            guard OverlayPresentationPolicy.shouldBegin(
+                layoutSessionID: self.lastAppliedLayout?.sessionID,
+                selectedSessionID: self.store.runtimeID,
+                targetFramePending: self.targetPanelFrame != nil,
+                geometryAnimating: self.frameAnimator.isAnimating,
+                transcriptRestorePending: self.store.isTranscriptRestorePending
+            ) else {
+                self.presentationPreflightScheduled = false
+                self.tryBeginPendingShow()
+                return
+            }
+
+            self.preparePresentationSurface()
+            if framesRemaining > 1 {
+                self.waitForPresentationPreflight(
+                    generation: generation,
+                    framesRemaining: framesRemaining - 1
+                )
+            } else {
+                self.presentationPreflightScheduled = false
+                self.beginPresentationShow(generation: generation)
+            }
+        }
+    }
+
+    private func preparePresentationSurface() {
+        rootView.layoutSubtreeIfNeeded()
+        hostingView?.layoutSubtreeIfNeeded()
+        panel.displayIfNeeded()
+        CATransaction.flush()
+    }
+
+    private func beginPresentationShow(generation: Int) {
+        guard generation == showGeneration, panel.isVisible, !isHiding else { return }
+        isPreparingShow = false
+        panel.ignoresMouseEvents = false
+        presentationDiagnostics?.begin(stableFrame: panel.frame, phase: "show")
+        presentationAnimator.animate(
+            visible: true,
+            scale: panel.backingScaleFactor,
+            reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        ) { [weak self] _ in
+            guard let self, generation == self.showGeneration, !self.isHiding else { return }
+            self.presentationDiagnostics?.end()
+            self.finishPresentationShow()
+        }
+    }
+
+    private func finishPresentationShow() {
+        if OverlayRenderPolicy.shouldResumeStream(
+            panelVisible: panel.isVisible,
+            isMoving: isPresentationTransitioning
+        ) {
+            store.setStreamUISuspended(false)
+        }
+        store.requestFocus()
+        let completion = pendingShowCompletion
+        pendingShowCompletion = nil
+        completion?()
+
+        scheduleDeferredPresentationWork()
+    }
+
+    private func scheduleDeferredPresentationWork() {
+        deferredPresentationWorkGeneration &+= 1
+        let generation = deferredPresentationWorkGeneration
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + OverlayPresentationPolicy.nonCriticalWorkDelay
+        ) { [weak self] in
+            guard let self,
+                  generation == self.deferredPresentationWorkGeneration,
+                  self.panel.isVisible,
+                  !self.isPresentationTransitioning else { return }
+            self.store.refreshCatalog()
+            Task { @MainActor [weak self] in
+                await self?.connectIfNeeded()
+            }
+        }
+    }
+
+    private var isPresentationTransitioning: Bool {
+        isPreparingShow || isHiding || presentationAnimator.isAnimating
     }
 
     var isTrustedForHotkey: Bool { tapMonitor.isTrusted }
@@ -294,7 +464,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
             guard let self else { return }
             self.configureRuntime(next)
             next.visibleScreenWidth = self.currentVisibleFrame()?.width ?? next.visibleScreenWidth
-            next.setStreamUISuspended(!self.panel.isVisible || self.isHiding)
+            next.setStreamUISuspended(!self.panel.isVisible || self.isPresentationTransitioning)
             self.position(confirmsSessionPresentation: false)
         }
         let root = SessionOverlayView(
@@ -345,6 +515,10 @@ final class OverlayController: NSObject, NSWindowDelegate {
         }
         panel.setFrame(initial, display: false)
         frameAnimator.attach(panel)
+        rootView.wantsLayer = true
+        if let surface = rootView.layer {
+            presentationAnimator.attach(surface)
+        }
         rootView.applyCardMask(transcriptHeight: 0, pickerHeight: 0, composerHeight: OverlayMetrics.minHeight)
     }
 
@@ -470,7 +644,10 @@ final class OverlayController: NSObject, NSWindowDelegate {
             chromeVisible: layout.chromeVisible,
             sessionTabCount: layout.sessionTabCount
         )
-        let animateFrame = panel.isVisible && OverlayRenderPolicy.shouldAnimatePanelFrame(
+        let animateFrame = panel.isVisible
+            && !isPreparingShow
+            && !isHiding
+            && OverlayRenderPolicy.shouldAnimatePanelFrame(
             previous: lastAppliedLayout,
             next: applied
         )
@@ -488,7 +665,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
             lastAppliedLayout = applied
         }
         if confirmsSessionPresentation, let sessionID = applied.sessionID {
-            if isUpdatingFrame || frameAnimator.isAnimating {
+            if isUpdatingFrame || frameAnimator.isAnimating || isPresentationTransitioning {
                 pendingSessionPresentationID = sessionID
             } else {
                 sessions.selectedLayoutDidApply(sessionID)
@@ -497,6 +674,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         if workspaceRevealPending, layout.previewWidth > 0, !destChanged {
             scheduleWorkspacePaneRevealOnNextFrame()
         }
+        tryBeginPendingShow()
     }
 
     private func position(confirmsSessionPresentation: Bool = true) {
@@ -632,7 +810,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         if !workspaceRevealPending,
            OverlayRenderPolicy.shouldResumeStream(
             panelVisible: panel.isVisible,
-            isMoving: isHiding || frameAnimator.isAnimating
+            isMoving: isPresentationTransitioning || frameAnimator.isAnimating
         ) {
             store.setStreamUISuspended(false)
         }
@@ -688,7 +866,8 @@ final class OverlayController: NSObject, NSWindowDelegate {
                   generation == self.workspaceRevealGeneration,
                   self.workspaceRevealPending,
                   !self.isUpdatingFrame,
-                  !self.frameAnimator.isAnimating else { return }
+                  !self.frameAnimator.isAnimating,
+                  !self.isPresentationTransitioning else { return }
             self.workspaceRevealPending = false
             self.store.revealWorkspacePaneContent()
             OverlayPulse.shared.onNextFrame { [weak self] in
@@ -701,7 +880,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
                     self.store.uncoverWorkspacePane()
                     if OverlayRenderPolicy.shouldResumeStream(
                         panelVisible: self.panel.isVisible,
-                        isMoving: self.isHiding || self.frameAnimator.isAnimating
+                        isMoving: self.isPresentationTransitioning || self.frameAnimator.isAnimating
                     ) {
                         self.store.setStreamUISuspended(false)
                     }
@@ -795,6 +974,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
     }
 
     func hideIfFocusLost() {
+        if runsPresentationDiagnostics { return }
         if store.overlayPinned { return }
         if MermaidZoomController.shared.isVisible || ImageZoomController.shared.isVisible {
             return

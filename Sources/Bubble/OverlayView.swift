@@ -64,6 +64,9 @@ enum OverlayMetrics {
 }
 
 struct OverlayView: View {
+    private static let inputDiagnosticExpected =
+        ProcessInfo.processInfo.environment["BUBBLE_INPUT_DIAGNOSTIC_EXPECTED"]
+
     @Bindable var store: ChatStore
     var onEscape: () -> Void
     var onToggleWidth: () -> Void
@@ -269,6 +272,14 @@ struct OverlayView: View {
         }
         .onChange(of: store.items.count) { _, _ in
             restoreFocus()
+        }
+        .onChange(of: store.draft) { _, draft in
+            guard let expected = Self.inputDiagnosticExpected else {
+                return
+            }
+            OverlayLog.write(
+                "input physical benchmark characters=\(draft.count) matches=\(draft == expected ? 1 : 0)"
+            )
         }
         .onChange(of: store.runtimeID) { _, _ in
             resetSessionPresentationState()
@@ -1740,15 +1751,24 @@ struct OverlayView: View {
     }
 
     private func restoreFocus() {
-        focused = true
+        guard OverlayPresentationPolicy.shouldRequestFocus(
+            isTransitioning: store.streamUISuspended
+        ) else { return }
+        applyFocusIfAllowed()
         DispatchQueue.main.async {
-            self.focused = true
-            self.activateFieldEditor()
+            self.applyFocusIfAllowed()
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) {
-            self.focused = true
-            self.activateFieldEditor()
+            self.applyFocusIfAllowed()
         }
+    }
+
+    private func applyFocusIfAllowed() {
+        guard OverlayPresentationPolicy.shouldRequestFocus(
+            isTransitioning: store.streamUISuspended
+        ) else { return }
+        focused = true
+        activateFieldEditor()
     }
 
     private func activateFieldEditor() {

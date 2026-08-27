@@ -1158,6 +1158,8 @@ final class ChatStore {
     private static let workspacePaneLoadingText = "Loading workspace session…"
     private static let workspacePaneRunCacheLimit = 24
 
+    var isTranscriptRestorePending: Bool { transcriptRestorePending }
+
     init(
         runtimeID: UUID = UUID(),
         runtimeRole: SessionRuntimeRole = .main,

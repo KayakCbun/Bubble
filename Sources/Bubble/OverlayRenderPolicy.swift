@@ -1,5 +1,41 @@
 import Foundation
 
+enum OverlayPresentationPolicy {
+    static let showDuration: TimeInterval = 0.14
+    static let hideDuration: TimeInterval = 0.10
+    static let nonCriticalWorkDelay: TimeInterval = 0.30
+    static let verticalOffset: CGFloat = 14
+    static let stablePreflightFrames = 2
+
+    /// Visibility transitions belong to the presentation layer. The physical
+    /// NSWindow remains at its final resting frame so SwiftUI never relays out
+    /// the transcript while Bubble appears or disappears.
+    static func windowFrame(resting: CGRect, visible: Bool) -> CGRect {
+        resting
+    }
+
+    static func shouldBegin(
+        layoutSessionID: UUID?,
+        selectedSessionID: UUID,
+        targetFramePending: Bool,
+        geometryAnimating: Bool,
+        transcriptRestorePending: Bool
+    ) -> Bool {
+        layoutSessionID == selectedSessionID
+            && !targetFramePending
+            && !geometryAnimating
+            && !transcriptRestorePending
+    }
+
+    static func defersNonCriticalWork(isTransitioning: Bool) -> Bool {
+        isTransitioning
+    }
+
+    static func shouldRequestFocus(isTransitioning: Bool) -> Bool {
+        !isTransitioning
+    }
+}
+
 enum OverlayRenderPolicy {
     /// AppKit's display-link animator owns side-stage geometry. Animating the
     /// SwiftUI HStack as well interpolates the transcript width at subpixels,

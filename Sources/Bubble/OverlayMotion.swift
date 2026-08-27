@@ -244,3 +244,245 @@ final class OverlayFrameAnimator: NSObject {
         onProgress?(frame, panel.alphaValue)
     }
 }
+
+final class OverlayPresentationAnimator: NSObject, CAAnimationDelegate {
+    private weak var surface: CALayer?
+    private var generation = 0
+    private var completion: ((Bool) -> Void)?
+    private let animationKey = "bubble.window.presentation"
+    private let hiddenOpacity: Float = 0.005
+
+    var isAnimating: Bool {
+        surface?.animation(forKey: animationKey) != nil
+    }
+
+    func attach(_ surface: CALayer) {
+        self.surface = surface
+        resetVisible()
+    }
+
+    func prepareHidden(scale: CGFloat) {
+        guard let surface else { return }
+        generation &+= 1
+        completion = nil
+        surface.removeAnimation(forKey: animationKey)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        // A fully transparent subtree can be culled by WindowServer. Keeping one
+        // near-invisible preflight frame forces the expensive SwiftUI hierarchy
+        // into a reusable compositor surface before the visible transition.
+        surface.opacity = hiddenOpacity
+        surface.transform = hiddenTransform
+        surface.shouldRasterize = true
+        surface.rasterizationScale = max(scale, 1)
+        CATransaction.commit()
+    }
+
+    func animate(
+        visible: Bool,
+        scale: CGFloat,
+        reduceMotion: Bool,
+        completion: @escaping (Bool) -> Void
+    ) {
+        guard let surface else {
+            completion(false)
+            return
+        }
+
+        let current = surface.presentation() ?? surface
+        let fromOpacity = current.opacity
+        let fromTransform = current.transform
+        let targetOpacity: Float = visible ? 1 : hiddenOpacity
+        let targetTransform = visible ? CATransform3DIdentity : hiddenTransform
+        let distance = max(
+            abs(CGFloat(fromOpacity - targetOpacity)),
+            min(1, abs(fromTransform.m42 - targetTransform.m42) / max(OverlayPresentationPolicy.verticalOffset, 1))
+        )
+
+        generation &+= 1
+        let animationGeneration = generation
+        self.completion = completion
+        surface.removeAnimation(forKey: animationKey)
+        surface.shouldRasterize = true
+        surface.rasterizationScale = max(scale, 1)
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        surface.opacity = targetOpacity
+        surface.transform = targetTransform
+        CATransaction.commit()
+
+        if reduceMotion || distance < 0.001 {
+            finish(generation: animationGeneration, visible: visible, finished: true)
+            return
+        }
+
+        let baseDuration = visible
+            ? OverlayPresentationPolicy.showDuration
+            : OverlayPresentationPolicy.hideDuration
+        let duration = max(0.045, baseDuration * TimeInterval(distance))
+
+        let opacity = CABasicAnimation(keyPath: "opacity")
+        opacity.fromValue = fromOpacity
+        opacity.toValue = targetOpacity
+
+        let transform = CABasicAnimation(keyPath: "transform")
+        transform.fromValue = NSValue(caTransform3D: fromTransform)
+        transform.toValue = NSValue(caTransform3D: targetTransform)
+
+        let group = CAAnimationGroup()
+        group.animations = [opacity, transform]
+        group.duration = duration
+        group.timingFunction = CAMediaTimingFunction(
+            controlPoints: visible ? 0.16 : 0.40,
+            visible ? 1.00 : 0.00,
+            visible ? 0.30 : 0.72,
+            1.00
+        )
+        group.delegate = self
+        group.setValue(animationGeneration, forKey: "bubbleGeneration")
+        group.setValue(visible, forKey: "bubbleVisible")
+        group.isRemovedOnCompletion = true
+        surface.add(group, forKey: animationKey)
+    }
+
+    func resetVisible() {
+        guard let surface else { return }
+        generation &+= 1
+        completion = nil
+        surface.removeAnimation(forKey: animationKey)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        surface.opacity = 1
+        surface.transform = CATransform3DIdentity
+        surface.shouldRasterize = false
+        CATransaction.commit()
+    }
+
+    func cancel(resetVisible: Bool) {
+        guard let surface else { return }
+        generation &+= 1
+        completion = nil
+        surface.removeAnimation(forKey: animationKey)
+        if resetVisible {
+            self.resetVisible()
+        }
+    }
+
+    func animationDidStop(_ anim: CAAnimation, finished flag: Bool) {
+        guard let animationGeneration = anim.value(forKey: "bubbleGeneration") as? Int,
+              let visible = anim.value(forKey: "bubbleVisible") as? Bool else { return }
+        finish(generation: animationGeneration, visible: visible, finished: flag)
+    }
+
+    private var hiddenTransform: CATransform3D {
+        CATransform3DMakeTranslation(0, -OverlayPresentationPolicy.verticalOffset, 0)
+    }
+
+    private func finish(generation animationGeneration: Int, visible: Bool, finished: Bool) {
+        guard animationGeneration == generation else { return }
+        let callback = completion
+        completion = nil
+        if visible {
+            surface?.shouldRasterize = false
+        }
+        callback?(finished)
+    }
+}
+
+final class WindowPresentationDiagnostics: NSObject {
+    private weak var panel: NSPanel?
+    private weak var surface: CALayer?
+    private var link: CADisplayLink?
+    private var active = false
+    private var lastTimestamp: CFTimeInterval = 0
+    private var stableFrame: NSRect = .zero
+    private var intervals: [TimeInterval] = []
+    private var phase = "idle"
+    private var phaseCounts: [String: Int] = [:]
+    private var slowIntervals: [String] = []
+    private(set) var frameMutations = 0
+    private(set) var presentationSamples = 0
+
+    func attach(panel: NSPanel, surface: CALayer) {
+        self.panel = panel
+        self.surface = surface
+    }
+
+    func begin(stableFrame: NSRect, phase: String) {
+        guard let panel else { return }
+        self.stableFrame = stableFrame
+        phaseCounts[phase, default: 0] += 1
+        self.phase = "\(phase)\(phaseCounts[phase] ?? 0)"
+        active = true
+        lastTimestamp = 0
+        if link == nil {
+            let link = panel.displayLink(target: self, selector: #selector(tick))
+            link.preferredFrameRateRange = OverlayMotion.frameRate
+            link.add(to: .main, forMode: .common)
+            self.link = link
+        }
+    }
+
+    func end() {
+        active = false
+        lastTimestamp = 0
+    }
+
+    func summary(cycles: Int) -> String {
+        link?.invalidate()
+        link = nil
+        let milliseconds = intervals.sorted().map { $0 * 1_000 }
+        let p95 = percentile(milliseconds, 0.95)
+        let p99 = percentile(milliseconds, 0.99)
+        let maximum = milliseconds.last ?? 0
+        let slowSummary = slowIntervals.isEmpty ? "none" : slowIntervals.joined(separator: ",")
+        return String(
+            format: "window presentation benchmark cycles=%d samples=%d p95=%.2fms p99=%.2fms max=%.2fms frameMutations=%d presentationSamples=%d",
+            cycles,
+            milliseconds.count,
+            p95,
+            p99,
+            maximum,
+            frameMutations,
+            presentationSamples
+        ) + " slow=\(slowSummary)"
+    }
+
+    @objc private func tick(_ link: CADisplayLink) {
+        guard active, let panel else { return }
+        if lastTimestamp > 0 {
+            let interval = max(0, link.timestamp - lastTimestamp)
+            intervals.append(interval)
+            if interval > 0.020, slowIntervals.count < 12 {
+                slowIntervals.append(String(format: "%@-%.2f", phase, interval * 1_000))
+            }
+        }
+        lastTimestamp = link.timestamp
+
+        let frame = panel.frame
+        if abs(frame.origin.x - stableFrame.origin.x) > 0.25
+            || abs(frame.origin.y - stableFrame.origin.y) > 0.25
+            || abs(frame.width - stableFrame.width) > 0.25
+            || abs(frame.height - stableFrame.height) > 0.25 {
+            frameMutations += 1
+        }
+
+        if let presentation = surface?.presentation() {
+            let opacityIsTransitioning = presentation.opacity > 0.001 && presentation.opacity < 0.999
+            let translationIsTransitioning = abs(presentation.transform.m42) > 0.1
+            if opacityIsTransitioning || translationIsTransitioning {
+                presentationSamples += 1
+            }
+        }
+    }
+
+    private func percentile(_ values: [Double], _ percentile: Double) -> Double {
+        guard !values.isEmpty else { return .infinity }
+        let index = min(
+            values.count - 1,
+            max(0, Int((Double(values.count - 1) * percentile).rounded(.up)))
+        )
+        return values[index]
+    }
+}
