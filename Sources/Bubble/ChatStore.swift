@@ -465,9 +465,13 @@ final class ChatStore {
         let status = item.workspaceStatus
         let follow = SideStagePolicy.followLatest(status: status)
         let sessionId = follow
-            ? item.workspaceSessionId
-                ?? workspaceState.mounts.first(where: { $0.path == item.workspacePath })?.sessionId
-                ?? childSessionId
+            ? SideStagePolicy.preferredWorkspaceSessionId(
+                cardSessionId: item.workspaceSessionId,
+                mountedSessionId: WorkspaceRegistry.sessionId(
+                    forMountPath: item.workspacePath,
+                    in: workspaceState
+                )
+            )
             : item.workspaceSessionId
         let previousSessionId = workspaceStage?.sessionId
         let previousCardId = workspaceStage?.cardId
@@ -4324,6 +4328,7 @@ final class ChatStore {
         childBusy = true
         childAssistant = ""
         childChanged = []
+        followOpenWorkspaceStageIfNeeded(brief)
         Task { @MainActor in
             await self.prepareAndRunWorkspace(
                 brief: brief,
@@ -4377,6 +4382,15 @@ final class ChatStore {
             }) {
                 items[index].workspaceSessionId = sessionId
                 persist()
+                if SideStagePolicy.shouldRebindResolvedWorkspaceSession(
+                    currentMountPath: workspaceStage?.path,
+                    currentRunId: workspaceStage?.runId,
+                    showingMarkdown: markdownPreview != nil,
+                    resolvedMountPath: mount.path,
+                    resolvedRunId: runId
+                ) {
+                    openWorkspaceStage(from: items[index])
+                }
             }
             try? await client.applyBubblePreferences(sessionId: sessionId)
             guard WorkspaceRunLifecyclePolicy.acceptsCompletion(
@@ -4768,6 +4782,21 @@ final class ChatStore {
         upsertWorkspaceCard(active)
     }
 
+    private func followOpenWorkspaceStageIfNeeded(_ brief: WorkspaceBrief) {
+        guard SideStagePolicy.shouldFollowNewWorkspaceRun(
+            currentMountPath: workspaceStage?.path,
+            showingMarkdown: markdownPreview != nil,
+            nextMountPath: brief.path
+        ),
+        let runId = brief.runId,
+        let card = items.last(where: {
+            $0.kind == .workspaceRun
+                && $0.workspacePath == brief.path
+                && $0.workspaceRunId == runId
+        }) else { return }
+        openWorkspaceStage(from: card)
+    }
+
     private func upsertWorkspaceCard(_ brief: WorkspaceBrief) {
         let status = brief.status.rawValue
         if let index = items.lastIndex(where: { $0.kind == .workspaceRun && $0.workspacePath == brief.path }) {
@@ -4816,7 +4845,10 @@ final class ChatStore {
                 workspaceChangedPaths: brief.changedPaths,
                 workspaceChildren: [],
                 workspaceStartedAt: Date().timeIntervalSince1970,
-                workspaceSessionId: childSessionId
+                workspaceSessionId: WorkspaceRegistry.sessionId(
+                    forMountPath: brief.path,
+                    in: workspaceState
+                )
             )
         )
         persist()

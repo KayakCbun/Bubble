@@ -228,6 +228,12 @@ public enum WorkspaceRegistry {
         }
     }
 
+    public static func sessionId(forMountPath path: String?, in store: WorkspaceStoreFile) -> String? {
+        guard let path else { return nil }
+        let normalized = normalize(path)
+        return store.mounts.first(where: { $0.path == normalized })?.sessionId
+    }
+
     public static func resetSessions(in store: inout WorkspaceStoreFile) {
         for index in store.mounts.indices {
             store.mounts[index].sessionId = nil

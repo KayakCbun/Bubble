@@ -205,6 +205,89 @@ struct SideStageCheck {
         expect(SideStagePolicy.shouldToggleClosed(openCardId: card, tappedCardId: card), "same card closes")
         expect(!SideStagePolicy.shouldToggleClosed(openCardId: card, tappedCardId: UUID()), "other card replaces")
         expect(
+            SideStagePolicy.shouldFollowNewWorkspaceRun(
+                currentMountPath: "/mount/a",
+                showingMarkdown: false,
+                nextMountPath: "/mount/b"
+            ),
+            "an open workspace stage follows a run started in another mount"
+        )
+        expect(
+            !SideStagePolicy.shouldFollowNewWorkspaceRun(
+                currentMountPath: nil,
+                showingMarkdown: false,
+                nextMountPath: "/mount/b"
+            ),
+            "a new workspace run does not open a stage the user had closed"
+        )
+        expect(
+            !SideStagePolicy.shouldFollowNewWorkspaceRun(
+                currentMountPath: "/mount/a",
+                showingMarkdown: true,
+                nextMountPath: "/mount/b"
+            ),
+            "a new workspace run does not replace a markdown document the user is reading"
+        )
+        expect(
+            !SideStagePolicy.shouldFollowNewWorkspaceRun(
+                currentMountPath: "/mount/a",
+                showingMarkdown: false,
+                nextMountPath: "/mount/a"
+            ),
+            "updates from the currently displayed mount stay in the existing stage"
+        )
+        expect(
+            SideStagePolicy.preferredWorkspaceSessionId(
+                cardSessionId: "session-card",
+                mountedSessionId: "session-mount"
+            ) == "session-card",
+            "a run card's exact workspace session remains authoritative"
+        )
+        expect(
+            SideStagePolicy.preferredWorkspaceSessionId(
+                cardSessionId: nil,
+                mountedSessionId: "session-b"
+            ) == "session-b",
+            "a reopened mount uses that mount's remembered session"
+        )
+        expect(
+            SideStagePolicy.preferredWorkspaceSessionId(
+                cardSessionId: nil,
+                mountedSessionId: nil
+            ) == nil,
+            "a brand-new mount never inherits the previously displayed workspace session"
+        )
+        expect(
+            SideStagePolicy.shouldRebindResolvedWorkspaceSession(
+                currentMountPath: "/mount/b",
+                currentRunId: "run-b",
+                showingMarkdown: false,
+                resolvedMountPath: "/mount/b",
+                resolvedRunId: "run-b"
+            ),
+            "a followed workspace stage rebinds when its final session is resolved"
+        )
+        expect(
+            !SideStagePolicy.shouldRebindResolvedWorkspaceSession(
+                currentMountPath: "/mount/b",
+                currentRunId: "run-old",
+                showingMarkdown: false,
+                resolvedMountPath: "/mount/b",
+                resolvedRunId: "run-b"
+            ),
+            "a late session resolution cannot replace a newer run"
+        )
+        expect(
+            !SideStagePolicy.shouldRebindResolvedWorkspaceSession(
+                currentMountPath: "/mount/b",
+                currentRunId: "run-b",
+                showingMarkdown: true,
+                resolvedMountPath: "/mount/b",
+                resolvedRunId: "run-b"
+            ),
+            "session resolution does not steal a markdown document opened meanwhile"
+        )
+        expect(
             SideStagePolicy.keepWorkspaceWhenOpeningMarkdown(fromWorkspacePane: true),
             "links inside the workspace pane keep the session stacked"
         )

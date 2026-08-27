@@ -232,6 +232,34 @@ enum SideStagePolicy {
         openCardId == tappedCardId
     }
 
+    static func shouldFollowNewWorkspaceRun(
+        currentMountPath: String?,
+        showingMarkdown: Bool,
+        nextMountPath: String
+    ) -> Bool {
+        guard let currentMountPath, !showingMarkdown else { return false }
+        return currentMountPath != nextMountPath
+    }
+
+    static func preferredWorkspaceSessionId(
+        cardSessionId: String?,
+        mountedSessionId: String?
+    ) -> String? {
+        cardSessionId ?? mountedSessionId
+    }
+
+    static func shouldRebindResolvedWorkspaceSession(
+        currentMountPath: String?,
+        currentRunId: String?,
+        showingMarkdown: Bool,
+        resolvedMountPath: String,
+        resolvedRunId: String
+    ) -> Bool {
+        !showingMarkdown
+            && currentMountPath == resolvedMountPath
+            && currentRunId == resolvedRunId
+    }
+
     static func keepWorkspaceWhenOpeningMarkdown(fromWorkspacePane: Bool) -> Bool {
         fromWorkspacePane
     }
