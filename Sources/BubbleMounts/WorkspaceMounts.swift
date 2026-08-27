@@ -119,6 +119,35 @@ public struct WorkspacePaletteRow: Equatable, Sendable {
     }
 }
 
+public enum WorkspacePromptEnvelope {
+    private static let openingMarker = "<bubble-workspace>"
+    private static let closingMarker = "</bubble-workspace>"
+
+    public static func wrap(userText: String, workspaceStatus: String) -> String {
+        """
+        \(userText)
+
+        \(openingMarker)
+        \(workspaceStatus)
+        \(closingMarker)
+        """
+    }
+
+    public static func displayText(from raw: String) -> String {
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.hasPrefix(openingMarker),
+           let closing = text.range(of: closingMarker) {
+            return text[closing.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let trailingMarker = "\n\n\(openingMarker)"
+        if text.hasSuffix(closingMarker),
+           let opening = text.range(of: trailingMarker, options: .backwards) {
+            return text[..<opening.lowerBound].trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return text
+    }
+}
+
 public enum WorkspaceRegistry {
     public static let maxRecent = 12
     public static let maxChangedPaths = 20
@@ -467,13 +496,10 @@ public enum WorkspaceRegistry {
         home: String,
         skillsByMount: [String: [String]] = [:]
     ) -> String {
-        """
-        <bubble-workspace>
-        \(statusBlock(store, home: home, skillsByMount: skillsByMount))
-        </bubble-workspace>
-
-        \(text)
-        """
+        WorkspacePromptEnvelope.wrap(
+            userText: text,
+            workspaceStatus: statusBlock(store, home: home, skillsByMount: skillsByMount)
+        )
     }
 
     public static func injectionPrompt(

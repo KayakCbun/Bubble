@@ -109,7 +109,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func rebuildConfigMenus() {
         let store = overlay.store
-        let models = store.availableModels.isEmpty ? BubbleConfig.catalogModels() : store.availableModels
+        let models = store.resolvedModelCatalog()
         modelMenu.removeAllItems()
         if models.isEmpty {
             let empty = NSMenuItem(title: "No models yet", action: nil, keyEquivalent: "")

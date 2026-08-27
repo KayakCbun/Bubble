@@ -216,7 +216,6 @@ final class ChatStore {
     var prompts: [PiPrompt] = []
     var sessions: [PiSessionInfo] = []
     var workspaceFiles: [WorkspaceFile] = []
-    var availableModels: [AgentModel] = BubbleConfig.catalogModels()
     var currentModelId: String? = BubbleConfig.load().modelIdentity
     var thinkingLevels: [String] = BubbleConfig.defaultThinkingLevels
     var currentThinking: String? = BubbleConfig.load().thinking
@@ -1379,10 +1378,7 @@ final class ChatStore {
     }
 
     var visiblePaletteItems: [PaletteItem] {
-        if isMountPalette {
-            return paletteItems
-        }
-        return Array(paletteItems.prefix(OverlayMetrics.paletteVisibleLimit))
+        paletteItems
     }
 
     var paletteCaption: String {
@@ -1611,12 +1607,12 @@ final class ChatStore {
     }
 
     private func modelPaletteItems(query: String) -> [PaletteItem] {
-        let models = availableModels.isEmpty ? BubbleConfig.catalogModels() : availableModels
+        let models = resolvedModelCatalog()
         let items = models.map { model in
             PaletteItem(
                 kind: .model,
-                title: model.identity,
-                subtitle: model.displayName,
+                title: model.displayName,
+                subtitle: model.identity,
                 insert: "/model \(model.identity)",
                 autoSend: true
             )
@@ -2851,14 +2847,9 @@ final class ChatStore {
     }
 
     private func handleReload() {
-        if let active = workspaceState.active, active.isActive {
-            interruptActiveWorkspaceRun(active)
-        } else {
-            clearActiveWorkspaceRun()
-        }
         isConnected = false
         status = "reloading"
-        client.stop()
+        client.stopForReload()
         items.append(ChatItem(kind: .system, text: "Reconnecting to Pi…"))
         persist(immediate: true)
         Task { @MainActor in
@@ -2990,9 +2981,6 @@ final class ChatStore {
     }
 
     private func syncSessionConfig() {
-        if !client.availableModels.isEmpty {
-            availableModels = client.availableModels
-        }
         if let model = client.currentModelId, !model.isEmpty {
             currentModelId = model
         }
@@ -3009,8 +2997,16 @@ final class ChatStore {
         NotificationCenter.default.post(name: .bubbleSessionConfigDidChange, object: nil)
     }
 
+    func resolvedModelCatalog() -> [AgentModel] {
+        ModelCatalogPolicy.merge(
+            sessionModels: client.availableModels,
+            installedModels: BubbleConfig.catalogModels(),
+            currentIdentity: currentModelId
+        )
+    }
+
     private func modelHelpText() -> String {
-        let models = availableModels.isEmpty ? BubbleConfig.catalogModels() : availableModels
+        let models = resolvedModelCatalog()
         if models.isEmpty {
             return "No models found. Run `pi` in Terminal to log in, then reopen Bubble."
         }

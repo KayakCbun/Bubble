@@ -146,7 +146,8 @@ struct WorkspaceMountsCheck {
         expect(wrapped.contains("<bubble-workspace>"), "prompt wrap includes the block")
         expect(wrapped.contains("workspace_run"), "prompt wrap tells the model to dispatch")
         expect(wrapped.contains("birio-bitable"), "prompt wrap lists mount skills")
-        expect(wrapped.hasSuffix("hello"), "prompt wrap keeps user text")
+        expect(wrapped.hasPrefix("hello\n\n<bubble-workspace>"), "Pi session titles start from the user's request")
+        expect(wrapped.hasSuffix("</bubble-workspace>"), "workspace metadata follows the user request")
     }
 
     static func interruptActive() {

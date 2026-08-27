@@ -1,3 +1,6 @@
+#if canImport(BubbleMounts)
+import BubbleMounts
+#endif
 import Foundation
 
 struct ConversationEntry: Equatable, Sendable {
@@ -304,12 +307,7 @@ struct ConversationTreeSnapshot: Equatable, Sendable {
     }
 
     static func displayUserText(_ text: String) -> String {
-        let marker = "</bubble-workspace>"
-        guard text.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("<bubble-workspace>"),
-              let range = text.range(of: marker) else {
-            return text.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        return text[range.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
+        WorkspacePromptEnvelope.displayText(from: text)
     }
 
     private static func isWorkspaceRelayText(_ text: String) -> Bool {

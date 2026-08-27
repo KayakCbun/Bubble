@@ -100,6 +100,18 @@ require(snapshot.depth(of: "u2a") == 1, "tree rows expose conversation depth")
 let transcript = snapshot.transcript
 require(transcript.map(\.kind) == [.user, .thought, .assistant, .user, .tool, .assistant], "active transcript projection")
 require(transcript.first?.text == "First question", "Bubble workspace metadata is hidden")
+let titleFriendlyPrompt = """
+Investigate the reload bug
+
+<bubble-workspace>
+mounts: none
+active: none
+</bubble-workspace>
+"""
+require(
+    ConversationTreeSnapshot.displayUserText(titleFriendlyPrompt) == "Investigate the reload bug",
+    "trailing workspace metadata stays hidden from restored user messages"
+)
 require(transcript[1].text == "First thought", "assistant thinking is preserved")
 require(transcript[4].toolName == "read", "historic tool identity is preserved")
 require(transcript[4].text == "tool output", "historic tool output is preserved")

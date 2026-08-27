@@ -22,6 +22,7 @@ struct PiSetupCheck {
         testSetupCard()
         testSteeringExtension()
         testBranchExtension()
+        testModelCatalogMerge()
         print("PASS: pi setup diagnose")
     }
 
@@ -117,5 +118,34 @@ struct PiSetupCheck {
         let source = BubbleConfig.workspaceExtensionSource
         expectContains(source, "pi.registerCommand(\"bubble-navigate\"", "extension owns hidden branch navigation")
         expectContains(source, "ctx.navigateTree(targetId, { summarize: false })", "branch navigation keeps the current Pi session")
+    }
+
+    static func testModelCatalogMerge() {
+        let session = [
+            AgentModel(provider: "openai", id: "gpt-5.6", name: "GPT 5.6"),
+            AgentModel(provider: "custom", id: "new-model", name: "Old session label"),
+        ]
+        let installed = [
+            AgentModel(provider: "custom", id: "new-model", name: "New model added this session"),
+            AgentModel(provider: "anthropic", id: "claude-4", name: "Claude 4"),
+        ]
+        let merged = ModelCatalogPolicy.merge(
+            sessionModels: session,
+            installedModels: installed,
+            currentIdentity: "local/current-model"
+        )
+        expect(
+            merged.map(\.identity) == [
+                "anthropic/claude-4",
+                "custom/new-model",
+                "local/current-model",
+                "openai/gpt-5.6",
+            ],
+            "model picker and menu share a complete sorted model list"
+        )
+        expect(
+            merged.first(where: { $0.identity == "custom/new-model" })?.name == "New model added this session",
+            "the latest installed model metadata wins over stale session metadata"
+        )
     }
 }

@@ -46,6 +46,9 @@ swiftc -parse-as-library Sources/Bubble/OverlayLayoutPolicy.swift Sources/Bubble
 swiftc -parse-as-library Sources/Bubble/SideStage.swift Sources/Bubble/WorkspaceTranscriptRenderPlan.swift scripts/check_side_stage.swift -o /tmp/bubble-check-side-stage
 /tmp/bubble-check-side-stage
 
+swiftc -parse-as-library Sources/Bubble/SessionReloadPolicy.swift scripts/check_session_reload.swift -o /tmp/bubble-check-session-reload
+/tmp/bubble-check-session-reload
+
 swiftc -parse-as-library Sources/Bubble/TranscriptInteractionPolicy.swift scripts/check_transcript_interactions.swift -o /tmp/bubble-check-transcript-interactions
 /tmp/bubble-check-transcript-interactions
 
@@ -83,7 +86,7 @@ swiftc -parse-as-library Sources/Bubble/PreviewFiles.swift scripts/check_file_pr
 swiftc -parse-as-library Sources/Bubble/CommandTapPolicy.swift scripts/check_command_tap.swift -o /tmp/bubble-check-tap
 /tmp/bubble-check-tap
 
-swiftc -parse-as-library Sources/Bubble/AssistantMessageContent.swift Sources/Bubble/ConversationTree.swift scripts/check_conversation_tree.swift -o /tmp/bubble-check-conversation-tree
+swiftc -parse-as-library Sources/BubbleMounts/WorkspaceMounts.swift Sources/Bubble/AssistantMessageContent.swift Sources/Bubble/ConversationTree.swift scripts/check_conversation_tree.swift -o /tmp/bubble-check-conversation-tree
 /tmp/bubble-check-conversation-tree
 
 swiftc -parse-as-library Sources/Bubble/BubblePiAcpPatch.swift scripts/check_pi_acp_patch.swift -o /tmp/bubble-check-pi-acp-patch

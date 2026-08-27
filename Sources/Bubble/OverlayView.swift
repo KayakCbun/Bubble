@@ -28,7 +28,6 @@ enum OverlayMetrics {
     static let chipSize: CGFloat = 12.5
     static var bodyFont: Font { .system(size: fontSize, weight: .regular) }
     static let slashRowHeight: CGFloat = 44
-    static let paletteVisibleLimit = 7
     static let mountPaletteVisibleRows = 9
     static var ink: Color { Color(nsColor: .textColor) }
     static var tertiaryInk: Color { Color(nsColor: .tertiaryLabelColor) }
