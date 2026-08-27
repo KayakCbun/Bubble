@@ -863,6 +863,9 @@ struct OverlayView: View {
 
     @ViewBuilder
     private func transcriptStackContent(_ rows: [MainTranscriptRenderRow]) -> some View {
+        if store.hasEarlierTranscriptItems {
+            loadEarlierTranscriptButton
+        }
         if store.lastTurnDuration >= 1, !store.isBusy {
             workedHeader(store.lastTurnDuration)
         }
@@ -901,6 +904,26 @@ struct OverlayView: View {
         Color.clear
             .frame(height: OverlayMetrics.transcriptCornerRadius)
             .id("transcript-end")
+    }
+
+    private var loadEarlierTranscriptButton: some View {
+        Button {
+            store.loadEarlierTranscriptItems()
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.up")
+                    .font(.system(size: 9.5, weight: .semibold))
+                Text("Load earlier")
+                    .font(.system(size: OverlayMetrics.chipSize, weight: .medium))
+            }
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 7)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .id("load-earlier-transcript")
+        .accessibilityLabel("Load earlier conversation turns")
     }
 
     private var branchCutoverDivider: some View {
@@ -3121,11 +3144,11 @@ private final class ComposerDragView: NSView {
 
 private struct EquatableSection<Value: Equatable, Content: View>: View, Equatable {
     let value: Value
-    let content: Content
+    let content: () -> Content
 
-    init(value: Value, @ViewBuilder content: () -> Content) {
+    init(value: Value, @ViewBuilder content: @escaping () -> Content) {
         self.value = value
-        self.content = content()
+        self.content = content
     }
 
     static func == (lhs: Self, rhs: Self) -> Bool {
@@ -3133,7 +3156,7 @@ private struct EquatableSection<Value: Equatable, Content: View>: View, Equatabl
     }
 
     var body: some View {
-        content
+        content()
     }
 }
 

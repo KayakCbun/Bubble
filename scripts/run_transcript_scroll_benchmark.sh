@@ -5,12 +5,13 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP_BIN="${BUBBLE_BENCHMARK_APP_BIN:-$ROOT/dist/Bubble.app/Contents/MacOS/Bubble}"
 TURNS="${BUBBLE_BENCHMARK_TURNS:-600}"
 MODE="${BUBBLE_BENCHMARK_MODE:-display}"
-MAX_P95_MS="${BUBBLE_BENCHMARK_MAX_P95_MS:-20}"
-MAX_P99_MS="${BUBBLE_BENCHMARK_MAX_P99_MS:-34}"
+MAX_P95_MS="${BUBBLE_BENCHMARK_MAX_P95_MS:-17.5}"
+MAX_P99_MS="${BUBBLE_BENCHMARK_MAX_P99_MS:-20}"
 MAX_PEAK_ANCHORS="${BUBBLE_BENCHMARK_MAX_PEAK_ANCHORS:-250}"
 SCROLL_STEP="${BUBBLE_BENCHMARK_SCROLL_STEP:-32}"
 MAX_JUMP_BLANK_SAMPLES="${BUBBLE_BENCHMARK_MAX_JUMP_BLANK_SAMPLES:-6}"
 MAX_JUMP_BLANK_STREAK="${BUBBLE_BENCHMARK_MAX_JUMP_BLANK_STREAK:-1}"
+HISTORY_TURNS="${BUBBLE_BENCHMARK_HISTORY_TURNS:-}"
 
 if [[ "$MODE" != "display" && "$MODE" != "wheel" && "$MODE" != "mount-audit" && "$MODE" != "history-navigation-audit" ]]; then
   echo "FAIL: BUBBLE_BENCHMARK_MODE must be display, wheel, mount-audit, or history-navigation-audit" >&2
@@ -61,7 +62,7 @@ history_target=""
 if [[ "$MODE" == "history-navigation-audit" ]]; then
   diagnostics_mode="history-navigation-audit"
   benchmark_pattern="history navigation audit"
-  history_target="$(printf '00000000-0000-0000-0001-%012d' "$((TURNS / 2))")"
+  history_target="$(printf '00000000-0000-0000-0001-%012d' "$((TURNS - 5))")"
 fi
 benchmark_env=(
   HOME="$BENCH_HOME"
@@ -69,6 +70,9 @@ benchmark_env=(
   BUBBLE_SCROLL_DIAGNOSTICS="$diagnostics_mode"
   BUBBLE_SCROLL_DIAGNOSTIC_STEP="$SCROLL_STEP"
 )
+if [[ -n "$HISTORY_TURNS" ]]; then
+  benchmark_env+=(BUBBLE_TRANSCRIPT_HISTORY_TURNS="$HISTORY_TURNS")
+fi
 if [[ -n "$history_target" ]]; then
   benchmark_env+=(BUBBLE_HISTORY_NAVIGATION_AUDIT_TARGET="$history_target")
 fi

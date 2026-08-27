@@ -241,6 +241,9 @@ final class ChatStore {
     }
     var streamUISuspended = true
     var transcriptRevision: UInt64 = 0
+    var transcriptHistoryTurnCapacity = TranscriptHistoryWindow.initialCapacity(
+        environmentValue: ProcessInfo.processInfo.environment["BUBBLE_TRANSCRIPT_HISTORY_TURNS"]
+    )
     @ObservationIgnored private var resumeActionGeneration = 0
     var conversationTree: ConversationTreeSnapshot?
     var branchDraft: ConversationBranchDraft? {
@@ -1245,8 +1248,36 @@ final class ChatStore {
         resumeDestination.cancelPendingAction()
     }
 
+    private var transcriptHistoryLowerBound: Int {
+        TranscriptHistoryWindow.lowerBound(
+            userRows: items.map { $0.kind == .user },
+            turnCapacity: transcriptHistoryTurnCapacity
+        )
+    }
+
+    var hasEarlierTranscriptItems: Bool {
+        transcriptHistoryLowerBound > 0
+    }
+
+    func loadEarlierTranscriptItems() {
+        let previousLowerBound = transcriptHistoryLowerBound
+        let totalTurns = items.reduce(into: 0) { count, item in
+            if item.kind == .user { count += 1 }
+        }
+        let expanded = TranscriptHistoryWindow.expandedCapacity(
+            current: transcriptHistoryTurnCapacity,
+            totalTurns: totalTurns
+        )
+        guard expanded != transcriptHistoryTurnCapacity else { return }
+        transcriptHistoryTurnCapacity = expanded
+        let nextLowerBound = transcriptHistoryLowerBound
+        if nextLowerBound < previousLowerBound {
+            Self.prewarmTranscriptChunks(Array(items[nextLowerBound..<previousLowerBound]))
+        }
+    }
+
     var visibleItems: [ChatItem] {
-        items.filter { item in
+        items[transcriptHistoryLowerBound...].filter { item in
             switch item.kind {
             case .assistant:
                 return AssistantMessagePresentation.hasContent(
@@ -2725,8 +2756,12 @@ final class ChatStore {
         let previousItems = items
         let previousRichRows = richTranscriptRows
         let previousTree = conversationTree
+        let previousHistoryTurnCapacity = transcriptHistoryTurnCapacity
         isStartingSession = true
         items = []
+        transcriptHistoryTurnCapacity = TranscriptHistoryWindow.initialCapacity(
+            environmentValue: ProcessInfo.processInfo.environment["BUBBLE_TRANSCRIPT_HISTORY_TURNS"]
+        )
         richTranscriptRows = [:]
         closeSideStage(animated: false)
         status = "resuming"
@@ -2756,6 +2791,7 @@ final class ChatStore {
                 items = previousItems
                 richTranscriptRows = previousRichRows
                 conversationTree = previousTree
+                transcriptHistoryTurnCapacity = previousHistoryTurnCapacity
                 status = friendly(error)
                 items.append(ChatItem(kind: .system, text: friendly(error)))
                 persist(immediate: true)
@@ -2831,6 +2867,9 @@ final class ChatStore {
         writeTranscript()
         isStartingSession = true
         items = []
+        transcriptHistoryTurnCapacity = TranscriptHistoryWindow.initialCapacity(
+            environmentValue: ProcessInfo.processInfo.environment["BUBBLE_TRANSCRIPT_HISTORY_TURNS"]
+        )
         richTranscriptRows = [:]
         streamingAssistantId = nil
         streamingThoughtId = nil
