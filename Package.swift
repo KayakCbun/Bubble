@@ -9,6 +9,7 @@ let package = Package(
     products: [
         .executable(name: "Bubble", targets: ["Bubble"]),
         .library(name: "BubbleMounts", targets: ["BubbleMounts"]),
+        .library(name: "BubbleSessions", targets: ["BubbleSessions"]),
     ],
     dependencies: [
         .package(url: "https://github.com/gonzalezreal/swift-markdown-ui", from: "2.4.1"),
@@ -23,10 +24,15 @@ let package = Package(
             name: "BubbleDiagramSupport",
             path: "Sources/BubbleDiagramSupport"
         ),
+        .target(
+            name: "BubbleSessions",
+            path: "Sources/BubbleSessions"
+        ),
         .executableTarget(
             name: "Bubble",
             dependencies: [
                 "BubbleMounts",
+                "BubbleSessions",
                 "BubbleDiagramSupport",
                 .product(name: "MarkdownUI", package: "swift-markdown-ui"),
                 .product(name: "BeautifulMermaid", package: "beautiful-mermaid-swift"),
@@ -50,6 +56,11 @@ let package = Package(
                 .product(name: "BeautifulMermaid", package: "beautiful-mermaid-swift"),
             ],
             path: "Tests/DiagramChecks"
+        ),
+        .executableTarget(
+            name: "SessionTabsChecks",
+            dependencies: ["BubbleSessions"],
+            path: "Tests/SessionTabsChecks"
         ),
     ]
 )

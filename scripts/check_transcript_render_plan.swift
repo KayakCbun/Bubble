@@ -50,6 +50,24 @@ private enum TranscriptRenderPlanCheck {
             expect(plan.units[cutover].isAfterBranchPoint, "branch metadata is computed once in the plan")
         }
 
+        for seed in seeds where seed.kind == .assistant {
+            _ = WorkspaceTranscriptChunker.chunks(seed.text, identity: seed.id)
+        }
+        let preparedStart = ContinuousClock.now
+        let preparedPlan = TranscriptRenderPlanner().plan(
+            seeds: seeds,
+            branchSourceID: nil,
+            streamingSeedIDs: []
+        )
+        let preparedElapsed = preparedStart.duration(to: .now)
+        let preparedMilliseconds = Double(preparedElapsed.components.seconds) * 1_000
+            + Double(preparedElapsed.components.attoseconds) / 1_000_000_000_000_000
+        expect(preparedPlan.units.count == plan.units.count, "prepared session presentation must preserve every render unit")
+        expect(
+            preparedMilliseconds < 40,
+            "a background-prepared long session must build its presentation plan within 40ms, got \(preparedMilliseconds)ms"
+        )
+
         let streaming = TranscriptRenderPlan.build(
             seeds: Array(seeds.suffix(2)),
             branchSourceID: nil,
@@ -220,6 +238,13 @@ private enum TranscriptRenderPlanCheck {
             "1,200 rich rows must plan in under \(Int(coldLimitMilliseconds))ms cold, got \(coldMilliseconds)ms"
         )
         expect(warmMilliseconds < 300, "cached repeated planning must stay under 300ms, got \(warmMilliseconds)ms")
-        print(String(format: "PASS: transcript render plan cold=%.1fms incremental=%.1fms warm20=%.1fms units=%d", coldMilliseconds, incrementalMilliseconds, warmMilliseconds, plan.units.count))
+        print(String(
+            format: "PASS: transcript render plan cold=%.1fms prepared=%.1fms incremental=%.1fms warm20=%.1fms units=%d",
+            coldMilliseconds,
+            preparedMilliseconds,
+            incrementalMilliseconds,
+            warmMilliseconds,
+            plan.units.count
+        ))
     }
 }

@@ -114,6 +114,26 @@ private enum TranscriptInteractionCheck {
             TranscriptFollowPolicy.followsRevisionChange(isBusy: true),
             "a live main turn still follows revision while streaming"
         )
+        expect(
+            !TranscriptScrollSequencePolicy.suppressesEventAfterProgrammaticScroll(
+                isScrollWheel: true,
+                beginsNewGesture: false,
+                isDiscreteWheel: false,
+                isDirectChange: true,
+                hasMomentum: false
+            ),
+            "direct wheel movement immediately interrupts a scroll-to-end animation"
+        )
+        expect(
+            TranscriptScrollSequencePolicy.suppressesEventAfterProgrammaticScroll(
+                isScrollWheel: true,
+                beginsNewGesture: false,
+                isDiscreteWheel: false,
+                isDirectChange: false,
+                hasMomentum: true
+            ),
+            "momentum tail events from the prior gesture stay suppressed"
+        )
         var follow = TranscriptFollowState()
         expect(follow.followsLatest, "a transcript starts pinned to the live edge")
         expect(!follow.showsScrollToEnd, "the jump chip stays hidden while already at the end")
@@ -172,6 +192,12 @@ private enum TranscriptInteractionCheck {
         follow.resumeAtEnd()
         expect(follow.followsLatest, "sending a new user turn deliberately resumes live follow")
         expect(!follow.showsScrollToEnd, "resuming the live edge dismisses the jump chip")
+        follow.beginFollowingTurn(targetID: "user-turn")
+        expect(follow.followingTurnTargetID == "user-turn", "a sent user turn becomes the viewport anchor")
+        expect(!follow.followsLatest, "a sent user turn is aligned near the top instead of following the bottom")
+        expect(!follow.viewportChanged(atEnd: false, userDriven: false), "programmatic turn alignment keeps its anchor")
+        expect(follow.viewportChanged(atEnd: false, userDriven: true), "manual scrolling releases the sent-turn anchor")
+        expect(TranscriptTurnAlignmentPolicy.viewportAnchorY == 0.08, "sent messages keep breathing room above them")
         expect(
             TranscriptViewportAnchorPolicy.visibleOrigin(
                 anchorPosition: 480,

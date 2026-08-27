@@ -8,6 +8,16 @@ enum OverlayHitTestPolicy {
     ) -> Bool {
         !panelContainsClick || !visibleCardContainsClick
     }
+
+    static func shouldHideLocalPanelClick(
+        atWindowPoint point: CGPoint,
+        visibleCardRegions: [OverlayCardHitRegion]
+    ) -> Bool {
+        shouldHide(
+            panelContainsClick: true,
+            visibleCardContainsClick: visibleCardRegions.contains { $0.contains(point) }
+        )
+    }
 }
 
 struct OverlayCardHitRegion {
@@ -31,6 +41,7 @@ struct OverlayCardHitRegion {
 }
 
 struct OverlayLayout: Equatable {
+    var sessionID: UUID? = nil
     var totalHeight: CGFloat
     var transcriptHeight: CGFloat
     var pickerHeight: CGFloat
@@ -39,6 +50,7 @@ struct OverlayLayout: Equatable {
     var composerHeight: CGFloat
     var previewWidth: CGFloat = 0
     var chromeVisible: Bool = false
+    var sessionTabCount: Int = 0
 }
 
 enum OverlayPalettePolicy {
@@ -75,8 +87,16 @@ enum OverlayPalettePolicy {
 }
 
 enum OverlayLayoutPolicy {
-    static func isTranscriptPresented(itemCount: Int, isStartingSession: Bool) -> Bool {
-        itemCount > 0 || isStartingSession
+    static func preferredTranscriptHeight(visibleHeight: CGFloat) -> CGFloat {
+        max(620, (visibleHeight * 0.76).rounded())
+    }
+
+    static func isTranscriptPresented(
+        itemCount: Int,
+        isStartingSession: Bool,
+        sessionTabCount: Int = 0
+    ) -> Bool {
+        itemCount > 0 || isStartingSession || sessionTabCount > 0
     }
 
     static func transcriptHeight(isPresented: Bool, maximum: CGFloat) -> CGFloat {

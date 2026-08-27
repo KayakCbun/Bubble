@@ -1,5 +1,6 @@
 import AppKit
 import BubbleMounts
+import BubbleSessions
 import Foundation
 import Observation
 
@@ -125,10 +126,33 @@ private struct TranscriptEnvelope: Codable, @unchecked Sendable {
     var richItems: [ChatItem]? = nil
 }
 
+private struct TranscriptLoadResult: @unchecked Sendable {
+    var items: [ChatItem]
+    var richItems: [ChatItem]
+}
+
 struct QueuedUserMessage: Identifiable, Equatable {
     var id: UUID
     var text: String
     var imageNames: [String]
+}
+
+enum SessionRuntimeRole: Equatable {
+    case main
+    case side
+
+    var restoresSavedTranscript: Bool { self == .main }
+    var persistsAsMain: Bool { self == .main }
+    var persistsWorkspaceRegistry: Bool { self == .main }
+
+    func controlFile(runtimeID: UUID) -> URL {
+        switch self {
+        case .main:
+            return OverlayPaths.controlFile
+        case .side:
+            return OverlayPaths.sideControlFile(runtimeID: runtimeID)
+        }
+    }
 }
 
 @Observable
@@ -165,7 +189,10 @@ final class ChatStore {
         didSet { syncOverlayChrome() }
     }
     var isBusy = false {
-        didSet { syncOverlayChrome() }
+        didSet {
+            syncOverlayChrome()
+            onActivityChanged?(hasActiveWork)
+        }
     }
     var selectedAvatarFile = AvatarSelection.file
     var transcriptWide = UserDefaults.standard.bool(forKey: "bubble.transcript.wide")
@@ -196,7 +223,13 @@ final class ChatStore {
     var installedApps: [MacApp] = []
     var macEpoch = 0
     var slashHighlight = 0
+    var resumeDestination = ResumeDestinationState()
     var onHideOverlay: (() -> Void)?
+    var onCreateSideSession: (() -> Void)?
+    var onResumeInSideSession: ((String) -> Int?)?
+    var onSessionIdentityChanged: (() -> Void)?
+    var onActivityChanged: ((Bool) -> Void)?
+    var onTranscriptUpdated: (() -> Void)?
     var onWorkspacePanePresentationRequested: (() -> Void)?
     var onSideStageChromePresentationRequested: (() -> Void)?
     var onSideStageChromeDismissalRequested: (() -> Void)?
@@ -208,9 +241,13 @@ final class ChatStore {
     var draftImages: [DraftImage] = [] {
         didSet { syncOverlayChrome() }
     }
-    var childBusy = false
+    var childBusy = false {
+        didSet { onActivityChanged?(hasActiveWork) }
+    }
     var streamUISuspended = true
     var transcriptRevision: UInt64 = 0
+    var transcriptHistoryTurnCapacity = TranscriptHistoryWindow.configuredInitialCapacity
+    @ObservationIgnored private var resumeActionGeneration = 0
     var conversationTree: ConversationTreeSnapshot?
     var branchDraft: ConversationBranchDraft? {
         didSet { syncOverlayChrome() }
@@ -218,7 +255,7 @@ final class ChatStore {
     var isSwitchingBranch = false
     private var paletteSuppressed = false
     private var lastPaletteSignature = ""
-    private let control = WorkspaceControlServer()
+    private let control: WorkspaceControlServer
     private var childSessionId: String?
     private var childSessionIds: Set<String> = []
     private var workspaceRunGeneration = 0
@@ -229,6 +266,8 @@ final class ChatStore {
     private var childChanged: [String] = []
     private var pendingInjection: WorkspaceBrief?
     private var injecting = false
+
+    private var hasActiveWork: Bool { isBusy || childBusy }
     private var pendingChildSteer: WorkspaceBrief?
     private var pendingPrompts: [PendingPrompt] = []
     private var steeringMessageIds: Set<UUID> = []
@@ -1078,7 +1117,10 @@ final class ChatStore {
         workspacePaneItems = rows
     }
 
-    let client = AcpClient()
+    let runtimeID: UUID
+    let client: AcpClient
+    let transcriptPlanner = TranscriptRenderPlanner()
+    private let runtimeRole: SessionRuntimeRole
     private static let catalogRefreshQueue = DispatchQueue(
         label: "local.bubble.catalog-refresh",
         qos: .userInitiated,
@@ -1089,7 +1131,20 @@ final class ChatStore {
         qos: .utility,
         autoreleaseFrequency: .workItem
     )
+    private static let transcriptWarmupQueue = DispatchQueue(
+        label: "local.bubble.transcript-warmup",
+        qos: .utility,
+        autoreleaseFrequency: .workItem
+    )
+    private static let transcriptLoadQueue = DispatchQueue(
+        label: "local.bubble.transcript-load",
+        qos: .userInitiated,
+        autoreleaseFrequency: .workItem
+    )
     private var persistWork: DispatchWorkItem?
+    @ObservationIgnored private var transcriptLoadGeneration = 0
+    @ObservationIgnored private var transcriptRestorePending = false
+    @ObservationIgnored private var transcriptRestoreTask: Task<Void, Never>?
     private var richTranscriptRows: [String: ChatItem] = [:]
     private var mountSkillRefreshGeneration = 0
     private var workspacePaneLoadGeneration = 0
@@ -1103,29 +1158,34 @@ final class ChatStore {
     private static let workspacePaneLoadingText = "Loading workspace session…"
     private static let workspacePaneRunCacheLimit = 24
 
-    init() {
+    init(
+        runtimeID: UUID = UUID(),
+        runtimeRole: SessionRuntimeRole = .main,
+        initialSessionID: String? = nil
+    ) {
+        self.runtimeID = runtimeID
+        self.runtimeRole = runtimeRole
+        let controlFile = runtimeRole.controlFile(runtimeID: runtimeID)
+        client = AcpClient(controlFile: controlFile, initialSessionID: initialSessionID)
+        control = WorkspaceControlServer(controlFile: controlFile)
         OverlayPaths.bootstrap()
-        let restored = Self.loadTranscript()
-        items = restored.items.filter {
-            !StartupTranscriptPolicy.isSetupCard($0.text, isSystem: $0.kind == .system)
-        }
-        for item in restored.richItems + restored.items {
-            if let key = Self.richKey(item) { richTranscriptRows[key] = item }
-        }
+        items = []
+        let restoredSessionID = initialSessionID
+            ?? (runtimeRole.restoresSavedTranscript ? PiSessions.currentId() : nil)
         workspaceState = WorkspaceRegistry.load(from: OverlayPaths.mountsFile)
-        if workspaceState.active?.isActive == true {
+        if runtimeRole.persistsWorkspaceRegistry, workspaceState.active?.isActive == true {
             workspaceState.active = nil
             try? WorkspaceRegistry.save(workspaceState, to: OverlayPaths.mountsFile)
+        } else if !runtimeRole.persistsWorkspaceRegistry {
+            workspaceState.active = nil
         }
         refreshMountSkills()
-        // Persist startup-message migrations immediately so Pi metadata does not
-        // return the next time Bubble restores the local transcript.
-        writeTranscript()
         refreshCatalog()
         client.onUpdate = { [weak self] update in
             guard update.shouldDeliverToTranscript else { return }
             DispatchQueue.main.async {
                 self?.routeUpdate(update.sessionId, update.data)
+                self?.onTranscriptUpdated?()
             }
         }
         client.onLog = { text in
@@ -1148,19 +1208,87 @@ final class ChatStore {
             try await self?.handleWorkspaceControl(method, params) ?? [:]
         }
         control.start()
+        if let restoredSessionID {
+            restoreTranscriptInBackground(sessionID: restoredSessionID)
+        }
     }
 
     func prepareToQuit() {
+        finishPendingTranscriptRestore()
         closeSideStage(animated: false)
         WorkspaceRegistry.interruptActive(in: &workspaceState)
-        persistWorkspaceState()
+        if runtimeRole.persistsWorkspaceRegistry {
+            persistWorkspaceState()
+        }
         writeTranscript()
         Self.transcriptPersistQueue.sync {}
         control.stop()
     }
 
+    func shutdown() {
+        cancelPendingResumeAction()
+        prepareToQuit()
+        client.stop()
+    }
+
+    func shutdownClosedTabRuntime() {
+        cancelPendingResumeAction()
+        if !transcriptRestorePending {
+            writeTranscript()
+        }
+        client.onUpdate = nil
+        client.onLog = nil
+        client.onExit = nil
+        client.onConfigChange = nil
+        control.handler = nil
+        let client = client
+        let control = control
+        let pendingRestore = transcriptRestoreTask
+        Task { @MainActor in
+            await pendingRestore?.value
+            DispatchQueue.global(qos: .utility).async {
+                control.stop()
+                client.stop()
+            }
+        }
+    }
+
+    func cancelPendingResumeAction() {
+        resumeActionGeneration &+= 1
+        resumeDestination.cancelPendingAction()
+    }
+
+    private var transcriptHistoryLowerBound: Int {
+        TranscriptHistoryWindow.lowerBound(
+            rows: items,
+            turnCapacity: transcriptHistoryTurnCapacity,
+            isUser: { $0.kind == .user }
+        )
+    }
+
+    var hasEarlierTranscriptItems: Bool {
+        transcriptHistoryLowerBound > 0
+    }
+
+    func loadEarlierTranscriptItems() {
+        let previousLowerBound = transcriptHistoryLowerBound
+        let totalTurns = items.reduce(into: 0) { count, item in
+            if item.kind == .user { count += 1 }
+        }
+        let expanded = TranscriptHistoryWindow.expandedCapacity(
+            current: transcriptHistoryTurnCapacity,
+            totalTurns: totalTurns
+        )
+        guard expanded != transcriptHistoryTurnCapacity else { return }
+        transcriptHistoryTurnCapacity = expanded
+        let nextLowerBound = transcriptHistoryLowerBound
+        if nextLowerBound < previousLowerBound {
+            Self.prewarmTranscriptChunks(Array(items[nextLowerBound..<previousLowerBound]))
+        }
+    }
+
     var visibleItems: [ChatItem] {
-        items.filter { item in
+        items[transcriptHistoryLowerBound...].filter { item in
             switch item.kind {
             case .assistant:
                 return AssistantMessagePresentation.hasContent(
@@ -1177,6 +1305,9 @@ final class ChatStore {
             }
         }
     }
+
+    var currentSessionID: String? { client.sessionId }
+    var sessionTabRole: SessionTabRuntimeRole { runtimeRole == .main ? .main : .side }
 
     var visibleWorkspacePaneItems: [ChatItem] {
         workspacePaneItems.filter { item in
@@ -1573,6 +1704,12 @@ final class ChatStore {
         focusTick += 1
     }
 
+    func presentSessionMessage(_ text: String) {
+        items.append(ChatItem(kind: .system, text: text))
+        persist(immediate: true)
+        requestFocus()
+    }
+
     func refreshCatalog() {
         let workspace = OverlayPaths.workspace
         Self.catalogRefreshQueue.async { [weak self] in
@@ -1685,9 +1822,14 @@ final class ChatStore {
             return
         }
         do {
-            _ = try await client.connectAndResume()
+            if runtimeRole == .main {
+                _ = try await client.connectAndResume()
+            } else {
+                _ = try await client.reconnectSideSession()
+            }
             isConnected = true
             status = "ready"
+            onSessionIdentityChanged?()
             removeSetupCards(persistNow: true)
             syncSessionConfig()
             refreshCatalog()
@@ -1871,6 +2013,10 @@ final class ChatStore {
         let imageData = composerImages.map(\.png)
         let branch = branchDraft
         guard !text.isEmpty || !composerClips.isEmpty || !imageData.isEmpty else { return }
+        if branch == nil, SlashCommand.token(in: text) == "side", handleLocalSlash(text) {
+            consumeComposer()
+            return
+        }
         guard branch == nil || !isBusy else {
             status = "finish the current turn before branching"
             return
@@ -2344,6 +2490,10 @@ final class ChatStore {
             draft = ""
             startFreshConversation()
             return true
+        case "side":
+            draft = ""
+            onCreateSideSession?()
+            return true
         case "copy":
             draft = ""
             copyLastAssistant()
@@ -2566,12 +2716,65 @@ final class ChatStore {
             requestFocus()
             return
         }
+        if !ResumeDestinationPolicy.requiresChoice(
+            sessionID: id,
+            currentSessionID: currentSessionID
+        ) {
+            items.append(ChatItem(kind: .system, text: "Session \(id) is already open here."))
+            persist(immediate: true)
+            requestFocus()
+            return
+        }
+        resumeDestination.request(sessionID: id)
+        resumeActionGeneration &+= 1
+        requestFocus()
+    }
+
+    func resolveResumeDestination(_ choice: ResumeDestinationChoice) {
+        guard let outcome = resumeDestination.choose(choice) else { return }
+        guard outcome == .actionQueued else {
+            requestFocus()
+            return
+        }
+        resumeActionGeneration &+= 1
+        let generation = resumeActionGeneration
+        requestFocus()
+        OverlayPulse.shared.onNextFrame { [weak self] in
+            guard let self, self.resumeActionGeneration == generation else { return }
+            OverlayPulse.shared.onNextFrame { [weak self] in
+                guard let self, self.resumeActionGeneration == generation,
+                      let resolution = self.resumeDestination.takePendingAction() else { return }
+                self.performResumeDestination(resolution)
+            }
+        }
+    }
+
+    private func performResumeDestination(_ resolution: ResumeDestinationResolution) {
+        switch resolution {
+        case .side(let sessionID):
+            if let ordinal = onResumeInSideSession?(sessionID) {
+                presentSessionMessage("Opening session \(sessionID) in Side Session \(ordinal).")
+            }
+        case .replaceCurrent(let sessionID):
+            resumeReplacingCurrent(sessionID)
+        case .cancelled:
+            requestFocus()
+        }
+    }
+
+    func resumeReplacingCurrent(_ id: String) {
+        finishPendingTranscriptRestore()
+        transcriptLoadGeneration &+= 1
+        let loadGeneration = transcriptLoadGeneration
         writeTranscript()
+        transcriptRestorePending = true
         let previousItems = items
         let previousRichRows = richTranscriptRows
         let previousTree = conversationTree
+        let previousHistoryTurnCapacity = transcriptHistoryTurnCapacity
         isStartingSession = true
         items = []
+        transcriptHistoryTurnCapacity = TranscriptHistoryWindow.configuredInitialCapacity
         richTranscriptRows = [:]
         closeSideStage(animated: false)
         status = "resuming"
@@ -2580,13 +2783,12 @@ final class ChatStore {
                 if !isConnected {
                     await connect()
                 }
-                _ = try await client.switchToSession(id)
-                let restored = Self.loadTranscript(sessionID: id)
-                items = restored.items
-                richTranscriptRows = [:]
-                for item in restored.richItems + restored.items {
-                    if let key = Self.richKey(item) { richTranscriptRows[key] = item }
-                }
+                _ = try await client.switchToSession(id, persistAsMain: runtimeRole.persistsAsMain)
+                onSessionIdentityChanged?()
+                let restored = await Self.loadTranscriptOffMain(sessionID: id)
+                guard transcriptLoadGeneration == loadGeneration else { return }
+                transcriptRestorePending = false
+                mergeRestoredTranscript(restored, removingSetupCards: false)
                 isConnected = true
                 status = "ready"
                 syncSessionConfig()
@@ -2597,13 +2799,17 @@ final class ChatStore {
                     persist(immediate: true)
                 }
             } catch {
+                guard transcriptLoadGeneration == loadGeneration else { return }
+                transcriptRestorePending = false
                 items = previousItems
                 richTranscriptRows = previousRichRows
                 conversationTree = previousTree
+                transcriptHistoryTurnCapacity = previousHistoryTurnCapacity
                 status = friendly(error)
                 items.append(ChatItem(kind: .system, text: friendly(error)))
                 persist(immediate: true)
             }
+            guard transcriptLoadGeneration == loadGeneration else { return }
             isStartingSession = false
             requestFocus()
         }
@@ -2672,9 +2878,12 @@ final class ChatStore {
     }
 
     private func startFreshConversation() {
+        finishPendingTranscriptRestore()
+        transcriptLoadGeneration &+= 1
         writeTranscript()
         isStartingSession = true
         items = []
+        transcriptHistoryTurnCapacity = TranscriptHistoryWindow.configuredInitialCapacity
         richTranscriptRows = [:]
         streamingAssistantId = nil
         streamingThoughtId = nil
@@ -2687,7 +2896,8 @@ final class ChatStore {
                 if !isConnected {
                     await connect()
                 }
-                _ = try await client.startFreshSession()
+                _ = try await client.startFreshSession(persistAsMain: runtimeRole.persistsAsMain)
+                onSessionIdentityChanged?()
                 try resetWorkspaceSessionsForFreshMainSession()
                 isConnected = true
                 status = "ready"
@@ -3485,12 +3695,14 @@ final class ChatStore {
     }
 
     private func writeTranscript() {
+        guard !transcriptRestorePending else { return }
         guard let sessionID = client.sessionId ?? PiSessions.currentId() else { return }
         let itemSnapshot = items
         let richSnapshot = richTranscriptRows
         let selectedLeafID = Self.savedConversationLeaves()[sessionID]
         let sessionURL = Self.transcriptURL(sessionID: sessionID)
         let transcriptURL = OverlayPaths.transcriptFile
+        let writesCurrentTranscript = runtimeRole.persistsAsMain
         Self.transcriptPersistQueue.async {
             do {
                 let stored = itemSnapshot
@@ -3518,19 +3730,95 @@ final class ChatStore {
                     withIntermediateDirectories: true
                 )
                 try data.write(to: sessionURL, options: .atomic)
-                try data.write(to: transcriptURL, options: .atomic)
+                if writesCurrentTranscript {
+                    try data.write(to: transcriptURL, options: .atomic)
+                }
             } catch {
                 OverlayLog.write("transcript save failed: \(error.localizedDescription)")
             }
         }
     }
 
-    private static func loadTranscript() -> (items: [ChatItem], richItems: [ChatItem]) {
-        guard let expectedSessionID = PiSessions.currentId() else { return ([], []) }
-        return loadTranscript(sessionID: expectedSessionID)
+    private func restoreTranscriptInBackground(sessionID: String) {
+        transcriptLoadGeneration &+= 1
+        transcriptRestorePending = true
+        TranscriptHydrationTiming.startIfDiagnosing()
+        let generation = transcriptLoadGeneration
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let restored = await Self.loadTranscriptOffMain(sessionID: sessionID)
+            defer {
+                if self.transcriptLoadGeneration == generation {
+                    self.transcriptRestoreTask = nil
+                }
+            }
+            guard self.transcriptLoadGeneration == generation else { return }
+            self.transcriptRestorePending = false
+            guard
+                  self.client.sessionId == sessionID
+                    || (self.client.sessionId == nil && PiSessions.currentId() == sessionID) else { return }
+            self.mergeRestoredTranscript(restored, removingSetupCards: true)
+            self.writeTranscript()
+            self.onTranscriptUpdated?()
+        }
+        transcriptRestoreTask = task
     }
 
-    private static func loadTranscript(sessionID: String) -> (items: [ChatItem], richItems: [ChatItem]) {
+    private func finishPendingTranscriptRestore() {
+        guard transcriptRestorePending else { return }
+        transcriptLoadGeneration &+= 1
+        transcriptRestorePending = false
+        guard let sessionID = client.sessionId ?? PiSessions.currentId() else { return }
+        mergeRestoredTranscript(
+            Self.loadTranscript(sessionID: sessionID),
+            removingSetupCards: runtimeRole.restoresSavedTranscript
+        )
+    }
+
+    private func mergeRestoredTranscript(
+        _ restored: TranscriptLoadResult,
+        removingSetupCards: Bool
+    ) {
+        let restoredItems = restored.items.filter { item in
+            !removingSetupCards
+                || !StartupTranscriptPolicy.isSetupCard(item.text, isSystem: item.kind == .system)
+        }
+        items = TranscriptRestoreMerge.merge(
+            restored: restoredItems,
+            live: items,
+            id: \.id,
+            stableKey: Self.richKey
+        )
+        richTranscriptRows = [:]
+        for item in restored.richItems + restored.items + items {
+            if let key = Self.richKey(item) { richTranscriptRows[key] = item }
+        }
+        Self.prewarmTranscriptChunks(Array(items[transcriptHistoryLowerBound...]))
+    }
+
+    private static func loadTranscriptOffMain(sessionID: String) async -> TranscriptLoadResult {
+        await withCheckedContinuation { continuation in
+            transcriptLoadQueue.async {
+                continuation.resume(returning: loadTranscript(sessionID: sessionID))
+            }
+        }
+    }
+
+    private static func prewarmTranscriptChunks(_ items: [ChatItem]) {
+        let assistantRows = items.compactMap { item -> (String, String)? in
+            guard item.kind == .assistant,
+                  (item.imageNames ?? []).isEmpty else { return nil }
+            return (item.id.uuidString, item.text)
+        }
+        guard !assistantRows.isEmpty else { return }
+        transcriptWarmupQueue.async {
+            for (id, text) in assistantRows {
+                _ = WorkspaceTranscriptChunker.chunks(text, identity: id)
+            }
+        }
+    }
+
+    private static func loadTranscript(sessionID: String) -> TranscriptLoadResult {
         let sessionData = try? Data(contentsOf: transcriptURL(sessionID: sessionID))
         let currentData = try? Data(contentsOf: OverlayPaths.transcriptFile)
         let envelope = [sessionData, currentData].compactMap { data -> TranscriptEnvelope? in
@@ -3564,7 +3852,10 @@ final class ChatStore {
             return copy
         } }
         if let envelope {
-            return (repairTranscript(clean(envelope.items)), clean(envelope.richItems ?? []))
+            return TranscriptLoadResult(
+                items: repairTranscript(clean(envelope.items)),
+                richItems: clean(envelope.richItems ?? [])
+            )
         }
         // Migrate the pre-envelope transcript once. The legacy file belonged to
         // the session recorded in session-id, and the next write scopes it by ID.
@@ -3572,9 +3863,9 @@ final class ChatStore {
            PiSessions.currentId() == sessionID,
            let legacy = try? JSONDecoder().decode([ChatItem].self, from: currentData) {
             let migrated = repairTranscript(clean(legacy))
-            return (migrated, migrated)
+            return TranscriptLoadResult(items: migrated, richItems: migrated)
         }
-        return ([], [])
+        return TranscriptLoadResult(items: [], richItems: [])
     }
 
     private static func transcriptURL(sessionID: String) -> URL {
@@ -3625,15 +3916,12 @@ final class ChatStore {
             }
             result.append(item)
         }
-        var earlier: [String] = []
-        for index in result.indices where result[index].kind == .assistant {
-            result[index].text = TranscriptStream.truncatedAssistant(
-                result[index].text,
-                earlier: earlier
-            )
-            if !result[index].text.isEmpty {
-                earlier.append(result[index].text)
-            }
+        let assistantIndices = result.indices.filter { result[$0].kind == .assistant }
+        let repairedTexts = TranscriptStream.repairedAssistantTexts(
+            assistantIndices.map { result[$0].text }
+        )
+        for (index, text) in zip(assistantIndices, repairedTexts) {
+            result[index].text = text
         }
         return result.filter { item in
             if item.kind == .assistant {
@@ -3847,6 +4135,11 @@ final class ChatStore {
     }
 
     private func persistWorkspaceStateOrThrow() throws {
+        guard runtimeRole.persistsWorkspaceRegistry else {
+            refreshMountSkills()
+            macEpoch += 1
+            return
+        }
         try WorkspaceRegistry.save(workspaceState, to: OverlayPaths.mountsFile)
         refreshMountSkills()
         macEpoch += 1

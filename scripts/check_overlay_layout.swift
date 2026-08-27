@@ -10,6 +10,10 @@ func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
 @main
 struct OverlayLayoutCheck {
     static func main() {
+        expect(
+            OverlayLayoutPolicy.preferredTranscriptHeight(visibleHeight: 900) == 684,
+            "a 14-inch display should use more of the available vertical space"
+        )
         expect(OverlayLayoutPolicy.transcriptHeight(isPresented: false, maximum: 640) == 0,
                "a hidden transcript must not reserve height")
         expect(OverlayLayoutPolicy.transcriptHeight(isPresented: true, maximum: 640) == 640,
@@ -20,6 +24,11 @@ struct OverlayLayoutCheck {
                "session loading must keep the transcript visible")
         expect(OverlayLayoutPolicy.isTranscriptPresented(itemCount: 1, isStartingSession: false),
                "a ready message must keep the transcript visible")
+        expect(OverlayLayoutPolicy.isTranscriptPresented(
+            itemCount: 0,
+            isStartingSession: false,
+            sessionTabCount: 2
+        ), "parallel-session tabs must keep an empty conversation window visible")
         expect(OverlayLayoutPolicy.previewExtraWidth(0, gap: 8) == 0,
                "a closed preview must not grow the panel")
         expect(OverlayLayoutPolicy.previewExtraWidth(440, gap: 8) == 448,
@@ -78,6 +87,44 @@ struct OverlayLayoutCheck {
                "chrome visibility must refresh the card mask")
         expect(OverlayRenderPolicy.maskNeedsApply(previous: chrome, next: revealed),
                "fading the extra card updates hit testing without resizing")
+        var tabbed = chrome
+        tabbed.sessionTabCount = 2
+        expect(OverlayRenderPolicy.layoutNeedsApply(previous: chrome, next: tabbed),
+               "showing session tabs must refresh the physical hit mask")
+        let previousSession = UUID()
+        let selectedSession = UUID()
+        expect(!OverlayRenderPolicy.acceptsSessionLayout(
+            layoutSessionID: previousSession,
+            selectedSessionID: selectedSession
+        ), "a late layout from the previous session must not resize the selected session")
+        expect(OverlayRenderPolicy.acceptsSessionLayout(
+            layoutSessionID: selectedSession,
+            selectedSessionID: selectedSession
+        ), "the selected session must be allowed to resize its panel")
+        let selectedLayout = OverlayLayout(
+            sessionID: selectedSession,
+            totalHeight: 614,
+            transcriptHeight: 560,
+            pickerHeight: 0,
+            commandPaletteHeight: 0,
+            transcriptWidth: 760,
+            composerHeight: 46
+        )
+        let emptyOverlayLayout = OverlayLayout(
+            totalHeight: 0,
+            transcriptHeight: 0,
+            pickerHeight: 0,
+            commandPaletteHeight: 0,
+            transcriptWidth: 760,
+            composerHeight: 46
+        )
+        expect(
+            OverlayRenderPolicy.reduceLayoutPreference(
+                current: selectedLayout,
+                next: emptyOverlayLayout
+            ) == selectedLayout,
+            "a tab overlay's empty preference must not erase the conversation layout"
+        )
         expect(!OverlayRenderPolicy.shouldPersistStreamChunk(isBusy: true, childBusy: false),
                "a live main turn must not write transcript.json on every token")
         expect(!OverlayRenderPolicy.shouldPersistStreamChunk(isBusy: false, childBusy: true),
@@ -259,6 +306,13 @@ struct OverlayLayoutCheck {
             cornerRadius: 22
         )
         expect(roundedInput.contains(CGPoint(x: 260, y: 23)), "composer center is interactive")
+        expect(
+            !OverlayHitTestPolicy.shouldHideLocalPanelClick(
+                atWindowPoint: CGPoint(x: 260, y: 23),
+                visibleCardRegions: [roundedInput]
+            ),
+            "a local mouseDown in the composer must keep Bubble open without resampling the global pointer"
+        )
         expect(!roundedInput.contains(CGPoint(x: 1, y: 1)), "transparent rounded corner dismisses Bubble")
         let snapped = OverlayPixel.align(CGRect(x: 12.25, y: 8.75, width: 760, height: 46), scale: 2)
         expect(snapped.origin.x == 12.5 && snapped.origin.y == 9, "rect origin follows backing scale")

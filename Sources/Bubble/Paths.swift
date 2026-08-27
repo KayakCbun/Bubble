@@ -33,6 +33,14 @@ enum OverlayPaths {
         root.appendingPathComponent("control.json")
     }
 
+    static var controlsDirectory: URL {
+        root.appendingPathComponent("controls", isDirectory: true)
+    }
+
+    static func sideControlFile(runtimeID: UUID) -> URL {
+        controlsDirectory.appendingPathComponent("\(runtimeID.uuidString).json")
+    }
+
     static var steeringDirectory: URL {
         root.appendingPathComponent("steering", isDirectory: true)
     }
@@ -74,6 +82,10 @@ enum OverlayPaths {
         root.appendingPathComponent("session-id")
     }
 
+    static var sessionTabsFile: URL {
+        root.appendingPathComponent("session-tabs.json")
+    }
+
     static var transcriptFile: URL {
         root.appendingPathComponent("transcript.json")
     }
@@ -112,6 +124,7 @@ enum OverlayPaths {
         try? fm.createDirectory(at: imagesDirectory, withIntermediateDirectories: true)
         try? fm.createDirectory(at: runtime, withIntermediateDirectories: true)
         try? fm.createDirectory(at: steeringDirectory, withIntermediateDirectories: true)
+        try? fm.createDirectory(at: controlsDirectory, withIntermediateDirectories: true)
         BubbleConfig.ensureAgentsFile()
         BubbleConfig.ensureWorkspaceExtension()
         BubbleConfig.ensureWorkspaceTrust()
@@ -164,12 +177,15 @@ enum OverlayPaths {
         return FileManager.default.isExecutableFile(atPath: url.path) ? url : nil
     }
 
-    static func processEnvironment() -> [String: String] {
+    static func processEnvironment(controlFile: URL? = nil) -> [String: String] {
         var env = ProcessInfo.processInfo.environment
         let extra = searchPathDirectories().map(\.path)
         let existing = env["PATH"] ?? ""
         env["PATH"] = (extra + [existing]).joined(separator: ":")
         env["HOME"] = home.path
+        if let controlFile {
+            env["BUBBLE_CONTROL_FILE"] = controlFile.path
+        }
         return env
     }
 

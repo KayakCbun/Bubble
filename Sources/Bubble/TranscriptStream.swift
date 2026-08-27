@@ -150,6 +150,20 @@ enum TranscriptStream {
         return text
     }
 
+    /// The legacy resume bug appended prior replies to the final assistant
+    /// bubble. Collapse self-repeats in every row, but scan the prior history
+    /// only once for that final bubble so restore cost stays linear in turns.
+    static func repairedAssistantTexts(_ texts: [String]) -> [String] {
+        guard !texts.isEmpty else { return [] }
+        var repaired = texts.map(collapseSelfRepeat)
+        let finalIndex = repaired.index(before: repaired.endIndex)
+        repaired[finalIndex] = truncatedAssistant(
+            repaired[finalIndex],
+            earlier: Array(repaired[..<finalIndex])
+        )
+        return repaired
+    }
+
     struct Node: Equatable {
         var kind: String
         var text: String
@@ -175,12 +189,10 @@ enum TranscriptStream {
                 result.append(item)
             }
         }
-        var earlier: [String] = []
-        for index in result.indices where result[index].kind == "assistant" {
-            result[index].text = truncatedAssistant(result[index].text, earlier: earlier)
-            if !result[index].text.isEmpty {
-                earlier.append(result[index].text)
-            }
+        let assistantIndices = result.indices.filter { result[$0].kind == "assistant" }
+        let repairedTexts = repairedAssistantTexts(assistantIndices.map { result[$0].text })
+        for (index, text) in zip(assistantIndices, repairedTexts) {
+            result[index].text = text
         }
         return result.filter { item in
             item.kind != "assistant" || !item.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty

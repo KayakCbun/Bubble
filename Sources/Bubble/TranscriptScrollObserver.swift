@@ -54,6 +54,7 @@ extension Notification.Name {
     static let transcriptHistoryNavigationSettled = Notification.Name(
         "BubbleTranscriptHistoryNavigationSettled"
     )
+    static let transcriptUserScrollStarted = Notification.Name("BubbleTranscriptUserScrollStarted")
 }
 
 enum TranscriptViewportUserInfoKey {
@@ -114,7 +115,7 @@ final class TranscriptScrollProbe: NSView {
     private var historyNavigationObserver: NSObjectProtocol?
     private var eventMonitor: Any?
     private var userEventDeadline: TimeInterval = 0
-    private var userEventGeneration = 0
+    private var userSettleTimer: Timer?
     private var suppressingPriorScrollSequence = false
     private var pendingHistoryTargetID: String?
     private var historyAlignmentQueued = false
@@ -141,6 +142,8 @@ final class TranscriptScrollProbe: NSView {
     private var diagnosticWheelBeginsGesture = true
     private var diagnosticLastTick: TimeInterval?
     private var diagnosticFrameIntervals: [TimeInterval] = []
+    private var diagnosticReadyStartedAt: TimeInterval?
+    private var diagnosticReadyLatency: TimeInterval = 0
     private var diagnosticPeakAnchorCount = 0
     private var diagnosticDisplayLink: CADisplayLink?
     private var diagnosticMountTimer: Timer?
@@ -292,7 +295,8 @@ final class TranscriptScrollProbe: NSView {
         anchorIndexRebuildQueued = false
         viewportReportQueued = false
         cancelPendingHistoryAlignment()
-        userEventGeneration += 1
+        userSettleTimer?.invalidate()
+        userSettleTimer = nil
         diagnosticDisplayLink?.invalidate()
         diagnosticDisplayLink = nil
         diagnosticMountTimer?.invalidate()
@@ -313,8 +317,12 @@ final class TranscriptScrollProbe: NSView {
             let frameInWindow = scrollView.convert(scrollView.bounds, to: nil)
             guard frameInWindow.contains(event.locationInWindow) else { return }
         }
+        let startsUserScroll = CACurrentMediaTime() > userEventDeadline
         cancelPendingHistoryAlignment()
         deferAnchorMaintenanceUntilUserSettles()
+        if startsUserScroll {
+            NotificationCenter.default.post(name: .transcriptUserScrollStarted, object: self)
+        }
         if diagnosticsEnabled, !diagnosedUserScroll {
             diagnosedUserScroll = true
             OverlayLog.write("transcript physical scroll observed")
@@ -323,27 +331,29 @@ final class TranscriptScrollProbe: NSView {
     }
 
     /// Clicking the chip can happen before a trackpad gesture has emitted its
-    /// final changed/ended and momentum events. Those belong to the gesture
-    /// that preceded the click; only a new began phase (or a discrete wheel,
-    /// key, or drag event) is allowed to interrupt the return animation.
+    /// final ended and momentum events. Those belong to the gesture that
+    /// preceded the click. A direct changed event means the user is actively
+    /// moving the wheel/trackpad again and must interrupt the return animation
+    /// even when AppKit does not emit a fresh began phase.
     private func suppressesPriorScrollEvent(_ event: NSEvent) -> Bool {
         guard suppressingPriorScrollSequence else { return false }
-        guard event.type == .scrollWheel else {
+        let suppress = TranscriptScrollSequencePolicy.suppressesEventAfterProgrammaticScroll(
+            isScrollWheel: event.type == .scrollWheel,
+            beginsNewGesture: event.phase.contains(.began) || event.phase.contains(.mayBegin),
+            isDiscreteWheel: event.phase.isEmpty && event.momentumPhase.isEmpty,
+            isDirectChange: event.phase.contains(.changed),
+            hasMomentum: !event.momentumPhase.isEmpty
+        )
+        if !suppress {
             suppressingPriorScrollSequence = false
-            return false
         }
-        let beginsNewGesture = event.phase.contains(.began) || event.phase.contains(.mayBegin)
-        let isDiscreteWheel = event.phase.isEmpty && event.momentumPhase.isEmpty
-        if beginsNewGesture || isDiscreteWheel {
-            suppressingPriorScrollSequence = false
-            return false
-        }
-        return true
+        return suppress
     }
 
     private func prepareForProgrammaticScroll() {
         userEventDeadline = 0
-        userEventGeneration += 1
+        userSettleTimer?.invalidate()
+        userSettleTimer = nil
         suppressingPriorScrollSequence = true
     }
 
@@ -359,16 +369,20 @@ final class TranscriptScrollProbe: NSView {
     private func deferAnchorMaintenanceUntilUserSettles() {
         visibleAnchor = nil
         userEventDeadline = CACurrentMediaTime() + Self.userEventWindow
-        userEventGeneration += 1
-        let generation = userEventGeneration
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.userEventWindow) { [weak self] in
-            guard let self,
-                  generation == self.userEventGeneration,
-                  CACurrentMediaTime() >= self.userEventDeadline else { return }
+        if let userSettleTimer {
+            userSettleTimer.fireDate = Date(timeIntervalSinceNow: Self.userEventWindow)
+            return
+        }
+        let timer = Timer(timeInterval: Self.userEventWindow, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            self.userSettleTimer = nil
+            guard CACurrentMediaTime() >= self.userEventDeadline else { return }
             self.rebuildAnchorIndex()
             self.reportPosition()
             self.captureVisibleAnchor()
         }
+        userSettleTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
     }
 
     private func scheduleVisibleAnchorCapture() {
@@ -670,15 +684,35 @@ final class TranscriptScrollProbe: NSView {
         guard diagnosticFramesRemaining == 0,
               let window else { return }
         diagnosticFramesRemaining = -1
+        diagnosticReadyStartedAt = TranscriptHydrationTiming.diagnosticStartedAt
+            ?? ProcessInfo.processInfo.systemUptime
         NSRunningApplication.current.activate()
         window.makeKeyAndOrderFront(nil)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self, weak window] in
+        DispatchQueue.main.async { [weak self, weak window] in
             guard let self, let window else { return }
             self.beginDiagnosticDrive(in: window)
         }
     }
 
     private func beginDiagnosticDrive(in window: NSWindow) {
+        if let document = observedDocument {
+            registerExistingAnchors(in: document)
+            rebuildAnchorIndex()
+        }
+        if !anchorIndex.contains(where: { $0.historyTickID != nil }),
+           let startedAt = diagnosticReadyStartedAt,
+           ProcessInfo.processInfo.systemUptime - startedAt < 15 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self, weak window] in
+                guard let self, let window else { return }
+                self.beginDiagnosticDrive(in: window)
+            }
+            return
+        }
+        diagnosticReadyLatency = diagnosticReadyStartedAt.map {
+            ProcessInfo.processInfo.systemUptime - $0
+        } ?? 0
+        diagnosticReadyStartedAt = nil
+        TranscriptHydrationTiming.clear()
         maintainsVisibleContent = true
         diagnosticFramesRemaining = 720
         diagnosticWheelBeginsGesture = true
@@ -699,6 +733,16 @@ final class TranscriptScrollProbe: NSView {
 
     private func startMountAudit() {
         guard diagnosticMountTimer == nil else { return }
+        if let document = observedDocument {
+            registerExistingAnchors(in: document)
+            rebuildAnchorIndex()
+        }
+        if anchorIndex.isEmpty {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                self?.startMountAudit()
+            }
+            return
+        }
         maintainsVisibleContent = true
         diagnosticMountStep = 0
         diagnosticMountAwaitingContent = false
@@ -899,9 +943,10 @@ final class TranscriptScrollProbe: NSView {
             let maximum = (sorted.last ?? 0) * 1_000
             OverlayLog.write(
                 String(
-                    format: "transcript scroll benchmark frames=%d step=%.0f p95=%.2fms p99=%.2fms max=%.2fms anchors=%d peakAnchors=%d blankFrames=%d longestBlankStreak=%d",
+                    format: "transcript scroll benchmark frames=%d step=%.0f ready=%.2fms p95=%.2fms p99=%.2fms max=%.2fms anchors=%d peakAnchors=%d blankFrames=%d longestBlankStreak=%d",
                     diagnosticFrameIntervals.count,
                     diagnosticScrollStep,
+                    diagnosticReadyLatency * 1_000,
                     p95,
                     p99,
                     maximum,

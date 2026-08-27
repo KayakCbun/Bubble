@@ -1,5 +1,6 @@
 import AppKit
 import BubbleMounts
+import BubbleSessions
 import SwiftUI
 
 enum OverlayMetrics {
@@ -55,7 +56,7 @@ enum OverlayMetrics {
 
     static var transcriptMaxHeight: CGFloat {
         let visible = NSScreen.main?.visibleFrame.height ?? 800
-        return max(560, (visible * 0.70).rounded())
+        return OverlayLayoutPolicy.preferredTranscriptHeight(visibleHeight: visible)
     }
     static var maxHeight: CGFloat {
         transcriptMaxHeight + stackSpacing + pickerHeight + stackSpacing + OverlayComposer.ceilingHeight
@@ -66,9 +67,10 @@ struct OverlayView: View {
     @Bindable var store: ChatStore
     var onEscape: () -> Void
     var onToggleWidth: () -> Void
+    var sessionTabCount: Int = 0
+    var sessionSwitchLoading = false
 
     @FocusState private var focused: Bool
-    @State private var transcriptPlanner = TranscriptRenderPlanner()
     @State private var expandedThoughts: Set<UUID> = []
     @State private var expandedToolGroups: Set<String> = []
     @State private var expandedTools: Set<UUID> = []
@@ -106,7 +108,8 @@ struct OverlayView: View {
     private var isTranscriptPresented: Bool {
         OverlayLayoutPolicy.isTranscriptPresented(
             itemCount: store.visibleItems.count,
-            isStartingSession: store.isStartingSession
+            isStartingSession: store.isStartingSession,
+            sessionTabCount: sessionTabCount
         ) || store.sideStagePresented
     }
 
@@ -150,6 +153,7 @@ struct OverlayView: View {
 
     private var layout: OverlayLayout {
         OverlayLayout(
+            sessionID: store.runtimeID,
             totalHeight: totalHeight,
             transcriptHeight: transcriptHeight,
             pickerHeight: pickerHeight,
@@ -157,7 +161,8 @@ struct OverlayView: View {
             transcriptWidth: chatWidth,
             composerHeight: composerHeight,
             previewWidth: previewWidth,
-            chromeVisible: store.sideStageChromeVisible
+            chromeVisible: store.sideStageChromeVisible,
+            sessionTabCount: sessionTabCount
         )
     }
 
@@ -167,6 +172,14 @@ struct OverlayView: View {
                 transcriptList
                     .frame(width: chatWidth, height: transcriptHeight)
                     .frostedGlass(in: transcriptShape)
+                    .overlay {
+                        if sessionSwitchLoading
+                            || store.isStartingSession
+                            || store.resumeDestination.isPerformingAction {
+                            SessionSwitchLoadingMask()
+                                .clipShape(transcriptShape)
+                        }
+                    }
                     .overlay(alignment: .topTrailing) {
                         HStack(spacing: 2) {
                             TranscriptPinButton(pinned: store.overlayPinned) {
@@ -257,6 +270,9 @@ struct OverlayView: View {
         .onChange(of: store.items.count) { _, _ in
             restoreFocus()
         }
+        .onChange(of: store.runtimeID) { _, _ in
+            resetSessionPresentationState()
+        }
 
         .onKeyPress(.escape) {
             if QuoteSelectionMonitor.shared.snapshot != nil {
@@ -289,6 +305,16 @@ struct OverlayView: View {
             }
             return .handled
         }
+    }
+
+    private func resetSessionPresentationState() {
+        expandedThoughts.removeAll(keepingCapacity: true)
+        expandedToolGroups.removeAll(keepingCapacity: true)
+        expandedTools.removeAll(keepingCapacity: true)
+        expandedFileChanges.removeAll(keepingCapacity: true)
+        followState = TranscriptFollowState()
+        followQueued = false
+        QuoteSelectionMonitor.shared.dismiss()
     }
 
     @ViewBuilder
@@ -350,18 +376,7 @@ struct OverlayView: View {
             Rectangle()
                 .fill(OverlaySurface.hairline)
                 .frame(height: 0.5)
-            VStack(spacing: 12) {
-                Image(nsImage: NSApp.applicationIconImage)
-                    .resizable()
-                    .interpolation(.high)
-                    .scaledToFit()
-                    .frame(width: 46, height: 46)
-                    .opacity(0.72)
-                Text("Opening workspace…")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.tertiary)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            BubbleOpeningPlaceholder(text: "Opening workspace…")
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -670,7 +685,7 @@ struct OverlayView: View {
         if store.isBusy, let id = store.streamingAssistantId {
             streamingSeedIDs.insert(id.uuidString)
         }
-        let plan = transcriptPlanner.plan(
+        let plan = store.transcriptPlanner.plan(
             seeds: seeds,
             branchSourceID: store.branchDraft?.sourceItemID.uuidString,
             streamingSeedIDs: streamingSeedIDs
@@ -729,7 +744,7 @@ struct OverlayView: View {
             .scrollBounceBehavior(.basedOnSize)
             .contentMargins(.bottom, 0, for: .scrollContent)
             .transaction { transaction in
-                if store.isBusy {
+                if store.isBusy, followState.followingTurnTargetID == nil {
                     transaction.disablesAnimations = true
                 }
             }
@@ -779,14 +794,23 @@ struct OverlayView: View {
                 }
             }
             .onChange(of: store.items.count) { _, _ in
-                if store.items.last?.kind == .user {
-                    followState.resumeAtEnd()
+                if let item = store.items.last, item.kind == .user {
+                    followState.beginFollowingTurn(targetID: item.id.uuidString)
                 }
-                requestFollowLatest(proxy)
+                requestCurrentFollowTarget(proxy)
             }
             .onChange(of: store.transcriptRevision) { _, _ in
-                if followState.shouldFollowRevision(isBusy: store.isBusy) {
-                    requestFollowLatest(proxy)
+                requestCurrentFollowTarget(
+                    proxy,
+                    allowsLatest: followState.shouldFollowRevision(isBusy: store.isBusy)
+                )
+            }
+            .onChange(of: store.resumeDestination.prompt?.sessionID) { _, sessionID in
+                guard sessionID != nil else { return }
+                OverlayPulse.shared.onNextFrame {
+                    withAnimation(OverlayMotion.scroll) {
+                        proxy.scrollTo("resume-destination", anchor: .bottom)
+                    }
                 }
             }
             .onChange(of: store.branchDraft?.sourceItemID) { _, sourceID in
@@ -799,7 +823,7 @@ struct OverlayView: View {
                 }
             }
             .onChange(of: store.isBusy) { _, _ in
-                requestFollowLatest(proxy)
+                requestCurrentFollowTarget(proxy)
             }
             .onChange(of: composerHeight) { _, _ in
                 if followState.followsLatest {
@@ -813,7 +837,9 @@ struct OverlayView: View {
         _ content: Content,
         hasHistoryTicks: Bool
     ) -> some View {
-        content
+        TranscriptSelectionScope {
+            content
+        }
             .padding(
                 .leading,
                 hasHistoryTicks ? HistoryLimits.gutter + 16 : OverlayMetrics.transcriptInset
@@ -837,6 +863,9 @@ struct OverlayView: View {
 
     @ViewBuilder
     private func transcriptStackContent(_ rows: [MainTranscriptRenderRow]) -> some View {
+        if store.hasEarlierTranscriptItems {
+            loadEarlierTranscriptButton
+        }
         if store.lastTurnDuration >= 1, !store.isBusy {
             workedHeader(store.lastTurnDuration)
         }
@@ -844,12 +873,10 @@ struct OverlayView: View {
             if row.startsAfterBranchPoint {
                 branchCutoverDivider
             }
-            HoverSelectableTranscriptRow {
-                EquatableSection(value: mainRowRenderKey(row)) {
-                    mainTranscriptRow(row)
-                }
-                .equatable()
+            EquatableSection(value: mainRowRenderKey(row)) {
+                mainTranscriptRow(row)
             }
+            .equatable()
             .id(row.id)
             .background {
                 if row.id == row.historyTickID {
@@ -858,6 +885,13 @@ struct OverlayView: View {
             }
             .padding(.top, row.isContinuation ? -10 : 0)
             .opacity(row.isAfterBranchPoint ? 0.34 : 1)
+        }
+        if let prompt = store.resumeDestination.prompt {
+            ResumeDestinationCard(
+                prompt: prompt,
+                choose: store.resolveResumeDestination
+            )
+            .id("resume-destination")
         }
         if store.isBusy {
             WorkingRow(startedAt: store.turnStartedAt ?? Date())
@@ -870,6 +904,26 @@ struct OverlayView: View {
         Color.clear
             .frame(height: OverlayMetrics.transcriptCornerRadius)
             .id("transcript-end")
+    }
+
+    private var loadEarlierTranscriptButton: some View {
+        Button {
+            store.loadEarlierTranscriptItems()
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.up")
+                    .font(.system(size: 9.5, weight: .semibold))
+                Text("Load earlier")
+                    .font(.system(size: OverlayMetrics.chipSize, weight: .medium))
+            }
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 7)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .id("load-earlier-transcript")
+        .accessibilityLabel("Load earlier conversation turns")
     }
 
     private var branchCutoverDivider: some View {
@@ -1741,6 +1795,33 @@ struct OverlayView: View {
             withTransaction(transaction) {
                 proxy.scrollTo("transcript-end", anchor: .bottom)
             }
+        }
+    }
+
+    private func requestFollowTurn(_ proxy: ScrollViewProxy) {
+        guard let targetID = followState.followingTurnTargetID, !followQueued else { return }
+        followQueued = true
+        NotificationCenter.default.post(name: .transcriptProgrammaticScrollStarted, object: nil)
+        OverlayPulse.shared.onNextFrame {
+            followQueued = false
+            guard followState.followingTurnTargetID == targetID else { return }
+            withAnimation(OverlayMotion.scroll) {
+                proxy.scrollTo(
+                    targetID,
+                    anchor: UnitPoint(x: 0.5, y: TranscriptTurnAlignmentPolicy.viewportAnchorY)
+                )
+            }
+        }
+    }
+
+    private func requestCurrentFollowTarget(
+        _ proxy: ScrollViewProxy,
+        allowsLatest: Bool = true
+    ) {
+        if followState.followingTurnTargetID != nil {
+            requestFollowTurn(proxy)
+        } else if allowsLatest {
+            requestFollowLatest(proxy)
         }
     }
 
@@ -2819,7 +2900,7 @@ private struct ScrollToEndChip: View {
             .padding(.vertical, 6)
             .background(
                 Capsule(style: .continuous)
-                    .fill(OverlaySurface.userCardFill.opacity(0.84))
+                    .fill(OverlaySurface.userCardFill)
                     .shadow(
                         color: .black.opacity(0.07),
                         radius: 4,
@@ -2834,6 +2915,134 @@ private struct ScrollToEndChip: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Scroll to end")
+        .onHover { hovering in
+            hovered = hovering
+            if hovering {
+                NSCursor.pointingHand.set()
+            } else {
+                NSCursor.arrow.set()
+            }
+        }
+        .animation(OverlayMotion.quick, value: hovered)
+    }
+}
+
+private struct SessionSwitchLoadingMask: View {
+    var body: some View {
+        ZStack {
+            Rectangle()
+                .fill(.regularMaterial)
+            BubbleOpeningPlaceholder(text: "Opening session…")
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Opening session")
+    }
+}
+
+private struct BubbleOpeningPlaceholder: View {
+    let text: String
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(nsImage: NSApp.applicationIconImage)
+                .resizable()
+                .interpolation(.high)
+                .scaledToFit()
+                .frame(width: 46, height: 46)
+                .opacity(0.72)
+            Text(text)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.tertiary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+private struct ResumeDestinationCard: View {
+    let prompt: ResumeDestinationPrompt
+    let choose: (ResumeDestinationChoice) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Resume session")
+                    .font(.system(size: 13, weight: .semibold))
+                Text("Open this conversation in a side session, or replace the current session?")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack(spacing: 8) {
+                ResumeDestinationButton(
+                    title: "Open Side Session",
+                    symbol: "rectangle.split.2x1",
+                    emphasized: true
+                ) {
+                    choose(.side)
+                }
+                ResumeDestinationButton(
+                    title: "Replace Current",
+                    symbol: "arrow.triangle.2.circlepath"
+                ) {
+                    choose(.replaceCurrent)
+                }
+                Button("Cancel") {
+                    choose(.cancel)
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 6)
+                .contentShape(Rectangle())
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: 500, alignment: .leading)
+        .background {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(OverlaySurface.userCardFill.opacity(0.82))
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(OverlaySurface.hairline, lineWidth: 1)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Choose where to resume session \(prompt.sessionID)")
+    }
+}
+
+private struct ResumeDestinationButton: View {
+    let title: String
+    let symbol: String
+    var emphasized = false
+    let action: () -> Void
+
+    @State private var hovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Label(title, systemImage: symbol)
+                .font(.system(size: 11.5, weight: .semibold))
+                .foregroundStyle(emphasized ? Color.white : OverlayMetrics.ink.opacity(0.78))
+                .padding(.horizontal, 11)
+                .frame(height: 30)
+                .background {
+                    Capsule(style: .continuous)
+                        .fill(
+                            emphasized
+                                ? Color.accentColor.opacity(hovered ? 0.88 : 0.78)
+                                : OverlaySurface.userCardFill.opacity(hovered ? 1 : 0.72)
+                        )
+                }
+                .overlay {
+                    if !emphasized {
+                        Capsule(style: .continuous)
+                            .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+                    }
+                }
+                .contentShape(Capsule(style: .continuous))
+        }
+        .buttonStyle(.plain)
         .onHover { hovering in
             hovered = hovering
             if hovering {
@@ -2935,11 +3144,11 @@ private final class ComposerDragView: NSView {
 
 private struct EquatableSection<Value: Equatable, Content: View>: View, Equatable {
     let value: Value
-    let content: Content
+    let content: () -> Content
 
-    init(value: Value, @ViewBuilder content: () -> Content) {
+    init(value: Value, @ViewBuilder content: @escaping () -> Content) {
         self.value = value
-        self.content = content()
+        self.content = content
     }
 
     static func == (lhs: Self, rhs: Self) -> Bool {
@@ -2947,11 +3156,11 @@ private struct EquatableSection<Value: Equatable, Content: View>: View, Equatabl
     }
 
     var body: some View {
-        content
+        content()
     }
 }
 
-private struct HoverSelectableTranscriptRow<Content: View>: View {
+private struct TranscriptSelectionScope<Content: View>: View {
     @State private var selectionEnabled = false
     @State private var releaseGeneration = 0
     private let content: Content
@@ -2963,37 +3172,40 @@ private struct HoverSelectableTranscriptRow<Content: View>: View {
     var body: some View {
         content
             .environment(\.bubbleTextSelectionEnabled, selectionEnabled)
-            .onContinuousHover { phase in
-                guard case .active = phase,
-                      NSApp.currentEvent?.type == .mouseMoved,
-                      !selectionEnabled else { return }
-                releaseGeneration += 1
-                selectionEnabled = TranscriptTextSelectionPolicy.isEnabled(
-                    isHovering: true,
-                    primaryButtonPressed: NSEvent.pressedMouseButtons & 1 != 0,
-                    pointerMoved: true
+            .background {
+                TranscriptPointerTrackingView(
+                    pointerMoved: enableSelection,
+                    pointerExited: releaseSelection
                 )
             }
-            .onHover { hovering in
-                // SwiftUI also emits hover-entry callbacks when scrolling moves
-                // a lazy row under a stationary pointer. Enabling text selection
-                // there rebuilds the row while it is being mounted and can turn
-                // one wheel event into an unbounded update loop. Actual pointer
-                // movement is handled by onContinuousHover above.
-                guard !hovering else { return }
-                releaseGeneration += 1
-                let primaryButtonPressed = NSEvent.pressedMouseButtons & 1 != 0
-                let hasSettledSelection = QuoteSelectionMonitor.shared.snapshot != nil
-                selectionEnabled = TranscriptTextSelectionPolicy.isEnabled(
-                    isHovering: false,
-                    primaryButtonPressed: primaryButtonPressed,
-                    pointerMoved: false,
-                    hasSettledSelection: hasSettledSelection
-                )
-                if primaryButtonPressed || hasSettledSelection {
-                    disarmAfterSelectionUse(generation: releaseGeneration)
-                }
+            .onReceive(NotificationCenter.default.publisher(for: .transcriptUserScrollStarted)) { _ in
+                releaseSelection()
             }
+    }
+
+    private func enableSelection() {
+        guard !selectionEnabled else { return }
+        releaseGeneration += 1
+        selectionEnabled = TranscriptTextSelectionPolicy.isEnabled(
+            isHovering: true,
+            primaryButtonPressed: NSEvent.pressedMouseButtons & 1 != 0,
+            pointerMoved: true
+        )
+    }
+
+    private func releaseSelection() {
+        releaseGeneration += 1
+        let primaryButtonPressed = NSEvent.pressedMouseButtons & 1 != 0
+        let hasSettledSelection = QuoteSelectionMonitor.shared.snapshot != nil
+        selectionEnabled = TranscriptTextSelectionPolicy.isEnabled(
+            isHovering: false,
+            primaryButtonPressed: primaryButtonPressed,
+            pointerMoved: false,
+            hasSettledSelection: hasSettledSelection
+        )
+        if primaryButtonPressed || hasSettledSelection {
+            disarmAfterSelectionUse(generation: releaseGeneration)
+        }
     }
 
     private func disarmAfterSelectionUse(generation: Int) {
@@ -3007,6 +3219,53 @@ private struct HoverSelectableTranscriptRow<Content: View>: View {
                 disarmAfterSelectionUse(generation: generation)
             }
         }
+    }
+}
+
+private struct TranscriptPointerTrackingView: NSViewRepresentable {
+    let pointerMoved: () -> Void
+    let pointerExited: () -> Void
+
+    func makeNSView(context: Context) -> TranscriptPointerTrackingNSView {
+        let view = TranscriptPointerTrackingNSView()
+        view.pointerMoved = pointerMoved
+        view.pointerExited = pointerExited
+        return view
+    }
+
+    func updateNSView(_ view: TranscriptPointerTrackingNSView, context: Context) {
+        view.pointerMoved = pointerMoved
+        view.pointerExited = pointerExited
+    }
+}
+
+private final class TranscriptPointerTrackingNSView: NSView {
+    var pointerMoved: (() -> Void)?
+    var pointerExited: (() -> Void)?
+    private var pointerTrackingArea: NSTrackingArea?
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let pointerTrackingArea {
+            removeTrackingArea(pointerTrackingArea)
+        }
+        let trackingArea = NSTrackingArea(
+            rect: .zero,
+            options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+            owner: self
+        )
+        addTrackingArea(trackingArea)
+        pointerTrackingArea = trackingArea
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        pointerMoved?()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        pointerExited?()
     }
 }
 
@@ -3741,6 +4000,7 @@ private final class ComposerWidthProbe: NSView {
 
 struct OverlayLayoutKey: PreferenceKey {
     static var defaultValue = OverlayLayout(
+        sessionID: nil,
         totalHeight: 0,
         transcriptHeight: 0,
         pickerHeight: 0,
@@ -3748,10 +4008,14 @@ struct OverlayLayoutKey: PreferenceKey {
         transcriptWidth: OverlayMetrics.transcriptWidthDefault,
         composerHeight: OverlayMetrics.minHeight,
         previewWidth: 0,
-        chromeVisible: false
+        chromeVisible: false,
+        sessionTabCount: 0
     )
     static func reduce(value: inout OverlayLayout, nextValue: () -> OverlayLayout) {
-        value = nextValue()
+        value = OverlayRenderPolicy.reduceLayoutPreference(
+            current: value,
+            next: nextValue()
+        )
     }
 }
 

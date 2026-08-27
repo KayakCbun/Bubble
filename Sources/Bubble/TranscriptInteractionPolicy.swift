@@ -58,12 +58,28 @@ enum TranscriptStackPolicy {
     }
 }
 
+enum TranscriptScrollSequencePolicy {
+    static func suppressesEventAfterProgrammaticScroll(
+        isScrollWheel: Bool,
+        beginsNewGesture: Bool,
+        isDiscreteWheel: Bool,
+        isDirectChange: Bool,
+        hasMomentum: Bool
+    ) -> Bool {
+        guard isScrollWheel else { return false }
+        if beginsNewGesture || isDiscreteWheel { return false }
+        if isDirectChange, !hasMomentum { return false }
+        return true
+    }
+}
+
 struct TranscriptFollowState: Equatable {
     private enum Mode: Equatable {
         case followingEnd
         case freeScrolling
         case returningToEnd
         case navigatingHistory(targetID: String)
+        case followingTurn(targetID: String)
     }
 
     private var mode: Mode = .followingEnd
@@ -72,11 +88,16 @@ struct TranscriptFollowState: Equatable {
     var showsScrollToEnd: Bool {
         if case .followingEnd = mode { return false }
         if case .returningToEnd = mode { return false }
+        if case .followingTurn = mode { return false }
         return true
     }
     var maintainsVisibleContent: Bool { mode == .freeScrolling }
     var historyNavigationTargetID: String? {
         guard case .navigatingHistory(let targetID) = mode else { return nil }
+        return targetID
+    }
+    var followingTurnTargetID: String? {
+        guard case .followingTurn(let targetID) = mode else { return nil }
         return targetID
     }
 
@@ -100,6 +121,10 @@ struct TranscriptFollowState: Equatable {
         mode = .navigatingHistory(targetID: targetID)
     }
 
+    mutating func beginFollowingTurn(targetID: String) {
+        mode = .followingTurn(targetID: targetID)
+    }
+
     @discardableResult
     mutating func finishHistoryNavigation(targetID: String, atEnd: Bool) -> Bool {
         guard case .navigatingHistory(let pendingID) = mode,
@@ -113,6 +138,11 @@ struct TranscriptFollowState: Equatable {
     /// actually reaches the end.
     @discardableResult
     mutating func viewportChanged(atEnd: Bool, userDriven: Bool) -> Bool {
+        if case .followingTurn = mode {
+            guard userDriven else { return false }
+            mode = atEnd ? .followingEnd : .freeScrolling
+            return true
+        }
         if case .navigatingHistory = mode {
             guard userDriven else { return false }
             mode = atEnd ? .followingEnd : .freeScrolling
@@ -135,6 +165,10 @@ struct TranscriptFollowState: Equatable {
     func shouldFollowRevision(isBusy: Bool) -> Bool {
         followsLatest && TranscriptFollowPolicy.followsRevisionChange(isBusy: isBusy)
     }
+}
+
+enum TranscriptTurnAlignmentPolicy {
+    static let viewportAnchorY = 0.08
 }
 
 enum TranscriptViewportAnchorPolicy {

@@ -42,6 +42,30 @@ enum CheckHistoryRail {
         precondition(HistoryRailPolicy.width(distance: 1) == 12)
         precondition(HistoryRailPolicy.width(distance: 2) == 8)
         precondition(HistoryRailPolicy.width(distance: 3) == 6)
+        precondition(
+            HistoryRailPolicy.hoveredIndex(
+                at: CGPoint(x: 12, y: layout.y(for: 50)),
+                layout: layout,
+                gutter: 22
+            ) == 50
+        )
+        precondition(
+            HistoryRailPolicy.hoveredIndex(
+                at: CGPoint(x: 36, y: layout.y(for: 50)),
+                layout: layout,
+                gutter: 22
+            ) == nil,
+            "blank transcript margin must not activate history"
+        )
+        let sparse = HistoryRailLayout(count: 3, viewportHeight: 220)
+        precondition(
+            HistoryRailPolicy.hoveredIndex(
+                at: CGPoint(x: 12, y: 60),
+                layout: sparse,
+                gutter: 22
+            ) == nil,
+            "vertical space between visible ticks must not activate history"
+        )
 
         print("history rail policy checks passed")
     }

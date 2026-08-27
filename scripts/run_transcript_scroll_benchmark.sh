@@ -5,12 +5,14 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP_BIN="${BUBBLE_BENCHMARK_APP_BIN:-$ROOT/dist/Bubble.app/Contents/MacOS/Bubble}"
 TURNS="${BUBBLE_BENCHMARK_TURNS:-600}"
 MODE="${BUBBLE_BENCHMARK_MODE:-display}"
-MAX_P95_MS="${BUBBLE_BENCHMARK_MAX_P95_MS:-20}"
-MAX_P99_MS="${BUBBLE_BENCHMARK_MAX_P99_MS:-34}"
+MAX_P95_MS="${BUBBLE_BENCHMARK_MAX_P95_MS:-17}"
+MAX_P99_MS="${BUBBLE_BENCHMARK_MAX_P99_MS:-18}"
+MAX_READY_MS="${BUBBLE_BENCHMARK_MAX_READY_MS:-1500}"
 MAX_PEAK_ANCHORS="${BUBBLE_BENCHMARK_MAX_PEAK_ANCHORS:-250}"
 SCROLL_STEP="${BUBBLE_BENCHMARK_SCROLL_STEP:-32}"
 MAX_JUMP_BLANK_SAMPLES="${BUBBLE_BENCHMARK_MAX_JUMP_BLANK_SAMPLES:-6}"
 MAX_JUMP_BLANK_STREAK="${BUBBLE_BENCHMARK_MAX_JUMP_BLANK_STREAK:-1}"
+HISTORY_TURNS="${BUBBLE_BENCHMARK_HISTORY_TURNS:-}"
 
 if [[ "$MODE" != "display" && "$MODE" != "wheel" && "$MODE" != "mount-audit" && "$MODE" != "history-navigation-audit" ]]; then
   echo "FAIL: BUBBLE_BENCHMARK_MODE must be display, wheel, mount-audit, or history-navigation-audit" >&2
@@ -61,7 +63,7 @@ history_target=""
 if [[ "$MODE" == "history-navigation-audit" ]]; then
   diagnostics_mode="history-navigation-audit"
   benchmark_pattern="history navigation audit"
-  history_target="$(printf '00000000-0000-0000-0001-%012d' "$((TURNS / 2))")"
+  history_target="$(printf '00000000-0000-0000-0001-%012d' "$((TURNS - 5))")"
 fi
 benchmark_env=(
   HOME="$BENCH_HOME"
@@ -69,6 +71,9 @@ benchmark_env=(
   BUBBLE_SCROLL_DIAGNOSTICS="$diagnostics_mode"
   BUBBLE_SCROLL_DIAGNOSTIC_STEP="$SCROLL_STEP"
 )
+if [[ -n "$HISTORY_TURNS" ]]; then
+  benchmark_env+=(BUBBLE_TRANSCRIPT_HISTORY_TURNS="$HISTORY_TURNS")
+fi
 if [[ -n "$history_target" ]]; then
   benchmark_env+=(BUBBLE_HISTORY_NAVIGATION_AUDIT_TARGET="$history_target")
 fi
@@ -118,8 +123,14 @@ fi
 peak_anchors="$(sed -E 's/.* peakAnchors=([0-9]+).*/\1/' <<<"$benchmark_line")"
 
 if [[ "$MODE" == "display" || "$MODE" == "wheel" ]]; then
+  ready="$(sed -E 's/.* ready=([0-9.]+)ms.*/\1/' <<<"$benchmark_line")"
   p95="$(sed -E 's/.* p95=([0-9.]+)ms.*/\1/' <<<"$benchmark_line")"
   p99="$(sed -E 's/.* p99=([0-9.]+)ms.*/\1/' <<<"$benchmark_line")"
+  if ! awk -v actual="$ready" -v limit="$MAX_READY_MS" 'BEGIN { exit !(actual <= limit) }'; then
+    echo "FAIL: first transcript window ${ready}ms exceeds ${MAX_READY_MS}ms" >&2
+    echo "$benchmark_line" >&2
+    exit 1
+  fi
   if ! awk -v actual="$p95" -v limit="$MAX_P95_MS" 'BEGIN { exit !(actual <= limit) }'; then
     echo "FAIL: scroll p95 ${p95}ms exceeds ${MAX_P95_MS}ms" >&2
     echo "$benchmark_line" >&2

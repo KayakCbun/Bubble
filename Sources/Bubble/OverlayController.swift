@@ -2,7 +2,8 @@ import AppKit
 import SwiftUI
 
 final class OverlayController: NSObject, NSWindowDelegate {
-    let store = ChatStore()
+    let sessions = SessionTabsStore()
+    var store: ChatStore { sessions.activeStore }
 
     private let panel = OverlayPanel()
     private let rootView = OverlayRootView(frame: .zero)
@@ -11,7 +12,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
     private var mouseMonitor: Any?
     private var localMouseMonitor: Any?
     private var localKeys: Any?
-    private var connecting = false
+    private var connectingRuntimeIDs: Set<UUID> = []
     private var restoredPosition = false
     private var isUpdatingFrame = false
     private var isHiding = false
@@ -24,6 +25,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
     private var pendingLayout: OverlayLayout?
     private var layoutQueued = false
     private var lastAppliedLayout: OverlayLayout?
+    private var pendingSessionPresentationID: UUID?
     private let frameAnimator = OverlayFrameAnimator()
     private var commandReturnApplication: NSRunningApplication?
     private var workspaceRevealGeneration = 0
@@ -49,11 +51,27 @@ final class OverlayController: NSObject, NSWindowDelegate {
         }
         localMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
             guard let self, event.window === self.panel else { return event }
-            let visible = self.rootView.containsVisibleCard(atScreenPoint: NSEvent.mouseLocation)
-            if OverlayHitTestPolicy.shouldHide(
-                panelContainsClick: true,
-                visibleCardContainsClick: visible
-            ) {
+            if event.type == .leftMouseDown {
+                let closeableIndices = self.sessions.isSwitchingSession
+                    ? Set<Int>()
+                    : Set(self.sessions.tabs.indices.filter { self.sessions.tabs[$0].ordinal != 1 })
+                if let target = self.rootView.sessionTabTarget(
+                    atWindowPoint: event.locationInWindow,
+                    closeableIndices: closeableIndices
+                ) {
+                    switch target {
+                    case .select(let index) where self.sessions.tabs.indices.contains(index):
+                        self.sessions.select(self.sessions.tabs[index].id)
+                        return nil
+                    case .close(let index) where self.sessions.tabs.indices.contains(index):
+                        self.sessions.requestCloseSideSession(self.sessions.tabs[index].id)
+                        return nil
+                    default:
+                        break
+                    }
+                }
+            }
+            if self.rootView.shouldHideLocalPanelClick(atWindowPoint: event.locationInWindow) {
                 self.hide()
                 return nil
             }
@@ -112,9 +130,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
             }
             return event
         }
-        Task { @MainActor in
-            await connectIfNeeded()
-        }
+        connectAllIfNeeded()
     }
 
     func stop() {
@@ -122,8 +138,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         if let mouseMonitor { NSEvent.removeMonitor(mouseMonitor) }
         if let localMouseMonitor { NSEvent.removeMonitor(localMouseMonitor) }
         if let localKeys { NSEvent.removeMonitor(localKeys) }
-        store.prepareToQuit()
-        store.client.stop()
+        sessions.prepareToQuit()
         frameAnimator.cancel()
         hide(animated: false)
     }
@@ -217,6 +232,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
 
     private func hide(animated: Bool, returningFocusTo application: NSRunningApplication?) {
         commandReturnApplication = nil
+        store.cancelPendingResumeAction()
         store.setStreamUISuspended(true)
         ImageZoomController.shared.close()
         MermaidZoomController.shared.close()
@@ -268,24 +284,21 @@ final class OverlayController: NSObject, NSWindowDelegate {
     }
 
     private func installView() {
-        store.onHideOverlay = { [weak self] in
-            self?.hide()
+        for runtime in sessions.allRuntimes {
+            configureRuntime(runtime)
         }
-        store.onWorkspacePanePresentationRequested = { [weak self] in
-            self?.requestWorkspacePaneReveal()
+        sessions.onRuntimeCreated = { [weak self] runtime in
+            self?.configureRuntime(runtime)
         }
-        store.onSideStageChromePresentationRequested = { [weak self] in
-            self?.requestSideStageChromeReveal()
-            self?.position()
+        sessions.onSelectionChanged = { [weak self] _, next in
+            guard let self else { return }
+            self.configureRuntime(next)
+            next.visibleScreenWidth = self.currentVisibleFrame()?.width ?? next.visibleScreenWidth
+            next.setStreamUISuspended(!self.panel.isVisible || self.isHiding)
+            self.position(confirmsSessionPresentation: false)
         }
-        store.onSideStageChromeDismissalRequested = { [weak self] in
-            self?.requestSideStageChromeHide()
-        }
-        store.onSideStageChromeInvalidated = { [weak self] in
-            self?.invalidateSideStageChrome()
-        }
-        let root = OverlayView(
-            store: store,
+        let root = SessionOverlayView(
+            sessions: sessions,
             onEscape: { [weak self] in self?.hide() },
             onToggleWidth: { [weak self] in self?.requestTranscriptWidthToggle() }
         )
@@ -335,8 +348,35 @@ final class OverlayController: NSObject, NSWindowDelegate {
         rootView.applyCardMask(transcriptHeight: 0, pickerHeight: 0, composerHeight: OverlayMetrics.minHeight)
     }
 
+    private func configureRuntime(_ runtime: ChatStore) {
+        runtime.onHideOverlay = { [weak self] in
+            self?.hide()
+        }
+        runtime.onWorkspacePanePresentationRequested = { [weak self] in
+            self?.requestWorkspacePaneReveal()
+        }
+        runtime.onSideStageChromePresentationRequested = { [weak self] in
+            self?.requestSideStageChromeReveal()
+            self?.position()
+        }
+        runtime.onSideStageChromeDismissalRequested = { [weak self] in
+            self?.requestSideStageChromeHide()
+        }
+        runtime.onSideStageChromeInvalidated = { [weak self] in
+            self?.invalidateSideStageChrome()
+        }
+    }
+
     private func scheduleApply(_ layout: OverlayLayout) {
-        guard OverlayRenderPolicy.layoutNeedsApply(previous: lastAppliedLayout, next: layout) else {
+        guard OverlayRenderPolicy.acceptsSessionLayout(
+            layoutSessionID: layout.sessionID,
+            selectedSessionID: store.runtimeID
+        ) else {
+            return
+        }
+        let confirmsSessionPresentation = sessions.isAwaitingSelectedLayout(layout.sessionID)
+        guard confirmsSessionPresentation
+                || OverlayRenderPolicy.layoutNeedsApply(previous: lastAppliedLayout, next: layout) else {
             return
         }
         let previousPreviewWidth = lastAppliedLayout?.previewWidth ?? 0
@@ -369,8 +409,16 @@ final class OverlayController: NSObject, NSWindowDelegate {
         }
     }
 
-    private func apply(_ layout: OverlayLayout) {
-        guard !isHiding, layout.totalHeight > 1 else { return }
+    private func apply(
+        _ layout: OverlayLayout,
+        confirmsSessionPresentation: Bool = true
+    ) {
+        guard !isHiding,
+              layout.totalHeight > 1,
+              OverlayRenderPolicy.acceptsSessionLayout(
+                  layoutSessionID: layout.sessionID,
+                  selectedSessionID: store.runtimeID
+              ) else { return }
         let height = max(OverlayMetrics.minHeight, min(layout.totalHeight.rounded(), OverlayMetrics.maxHeight))
         let hasTranscript = layout.transcriptHeight > 1
             || !store.visibleItems.isEmpty
@@ -411,6 +459,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
                 || abs(panel.frame.origin.x - frame.origin.x) > 0.5
         )
         let applied = OverlayLayout(
+            sessionID: layout.sessionID,
             totalHeight: height,
             transcriptHeight: layout.transcriptHeight,
             pickerHeight: layout.pickerHeight,
@@ -418,7 +467,8 @@ final class OverlayController: NSObject, NSWindowDelegate {
             transcriptWidth: chatWidth,
             composerHeight: layout.composerHeight,
             previewWidth: layout.previewWidth,
-            chromeVisible: layout.chromeVisible
+            chromeVisible: layout.chromeVisible,
+            sessionTabCount: layout.sessionTabCount
         )
         let animateFrame = panel.isVisible && OverlayRenderPolicy.shouldAnimatePanelFrame(
             previous: lastAppliedLayout,
@@ -434,13 +484,22 @@ final class OverlayController: NSObject, NSWindowDelegate {
         if needsMask, !destChanged || animateFrame {
             applyMask(layout: applied, width: chatWidth)
         }
-        lastAppliedLayout = applied
+        if confirmsSessionPresentation {
+            lastAppliedLayout = applied
+        }
+        if confirmsSessionPresentation, let sessionID = applied.sessionID {
+            if isUpdatingFrame || frameAnimator.isAnimating {
+                pendingSessionPresentationID = sessionID
+            } else {
+                sessions.selectedLayoutDidApply(sessionID)
+            }
+        }
         if workspaceRevealPending, layout.previewWidth > 0, !destChanged {
             scheduleWorkspacePaneRevealOnNextFrame()
         }
     }
 
-    private func position() {
+    private func position(confirmsSessionPresentation: Bool = true) {
         let contentHeight = max(
             OverlayMetrics.minHeight,
             panel.frame.height - OverlayMetrics.shadowInset * 2
@@ -452,8 +511,9 @@ final class OverlayController: NSObject, NSWindowDelegate {
             visibleWidth: store.visibleScreenWidth
         )
         apply(OverlayLayout(
+            sessionID: store.runtimeID,
             totalHeight: contentHeight,
-            transcriptHeight: (store.visibleItems.isEmpty && !store.isStartingSession && !store.sideStagePresented)
+            transcriptHeight: (store.visibleItems.isEmpty && !store.isStartingSession && !store.sideStagePresented && !sessions.showsTabs)
                 ? 0
                 : max(0, contentHeight - OverlayMetrics.minHeight - OverlayMetrics.stackSpacing),
             pickerHeight: store.showAvatarPicker ? OverlayMetrics.pickerHeight : 0,
@@ -461,8 +521,9 @@ final class OverlayController: NSObject, NSWindowDelegate {
             transcriptWidth: transcriptWidth,
             composerHeight: store.composerChromeHeight,
             previewWidth: previewWidth,
-            chromeVisible: store.sideStageChromeVisible
-        ))
+            chromeVisible: store.sideStageChromeVisible,
+            sessionTabCount: sessions.showsTabs ? sessions.tabs.count : 0
+        ), confirmsSessionPresentation: confirmsSessionPresentation)
     }
 
     private func applyMask(layout: OverlayLayout, width: CGFloat) {
@@ -477,7 +538,8 @@ final class OverlayController: NSObject, NSWindowDelegate {
                 previewWidth: layout.previewWidth
             ),
             previewIsMarkdown: store.markdownPreview != nil,
-            previewHasBack: store.canReturnToWorkspace
+            previewHasBack: store.canReturnToWorkspace,
+            sessionTabCount: layout.sessionTabCount
         )
     }
 
@@ -558,6 +620,10 @@ final class OverlayController: NSObject, NSWindowDelegate {
         }
         targetPanelFrame = nil
         isUpdatingFrame = false
+        if let sessionID = pendingSessionPresentationID {
+            pendingSessionPresentationID = nil
+            sessions.selectedLayoutDidApply(sessionID)
+        }
         if workspaceRevealPending,
            OverlayRenderPolicy.shouldRefreshHostingSurfaceAfterFrameSettle {
             hostingView?.needsDisplay = true
@@ -842,10 +908,20 @@ final class OverlayController: NSObject, NSWindowDelegate {
         }
     }
 
-    private func connectIfNeeded() async {
-        if store.isConnected || connecting { return }
-        connecting = true
-        await store.connect()
-        connecting = false
+    private func connectAllIfNeeded() {
+        for runtime in sessions.allRuntimes {
+            Task { @MainActor [weak self, weak runtime] in
+                guard let self, let runtime else { return }
+                await self.connectIfNeeded(runtime)
+            }
+        }
+    }
+
+    private func connectIfNeeded(_ runtime: ChatStore? = nil) async {
+        let runtime = runtime ?? store
+        if runtime.isConnected || connectingRuntimeIDs.contains(runtime.runtimeID) { return }
+        connectingRuntimeIDs.insert(runtime.runtimeID)
+        await runtime.connect()
+        connectingRuntimeIDs.remove(runtime.runtimeID)
     }
 }

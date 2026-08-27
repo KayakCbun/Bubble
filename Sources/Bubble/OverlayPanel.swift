@@ -1,4 +1,5 @@
 import AppKit
+import BubbleSessions
 
 final class OverlayRootView: NSView {
     var hitRegions: [OverlayCardHitRegion] = []
@@ -16,6 +17,7 @@ final class OverlayRootView: NSView {
     private var maskPreviewWidth: CGFloat = 0
     private var maskPreviewIsMarkdown = false
     private var maskPreviewHasBack = false
+    private var maskSessionTabCount = 0
 
     override var isFlipped: Bool { true }
     override var isOpaque: Bool { false }
@@ -80,6 +82,41 @@ final class OverlayRootView: NSView {
         let localPoint = convert(windowPoint, from: nil)
         return control(at: localPoint) != nil
             || hitRegions.contains(where: { $0.contains(localPoint) })
+    }
+
+    func shouldHideLocalPanelClick(atWindowPoint windowPoint: NSPoint) -> Bool {
+        let localPoint = convert(windowPoint, from: nil)
+        guard control(at: localPoint) == nil else { return false }
+        return OverlayHitTestPolicy.shouldHideLocalPanelClick(
+            atWindowPoint: localPoint,
+            visibleCardRegions: hitRegions
+        )
+    }
+
+    func sessionTabTarget(
+        atWindowPoint windowPoint: NSPoint,
+        closeableIndices: Set<Int>
+    ) -> SessionTabHitTarget? {
+        guard maskSessionTabCount > 0, maskTranscriptHeight > 1 else { return nil }
+        let localPoint = convert(windowPoint, from: nil)
+        let inputHeight = maskComposerHeight > 1
+            ? maskComposerHeight
+            : OverlayMetrics.minHeight
+        let inputY = max(
+            OverlayMetrics.shadowInset,
+            bounds.height - OverlayMetrics.shadowInset - inputHeight
+        )
+        let transcriptY = max(
+            OverlayMetrics.shadowInset,
+            inputY - OverlayMetrics.stackSpacing - maskTranscriptHeight
+        )
+        return SessionTabLayout.target(
+            at: localPoint,
+            count: maskSessionTabCount,
+            closeableIndices: closeableIndices,
+            transcriptOriginY: transcriptY,
+            trailingX: OverlayMetrics.shadowInset
+        )
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -192,7 +229,8 @@ final class OverlayRootView: NSView {
         composerHeight: CGFloat = OverlayMetrics.minHeight,
         previewWidth: CGFloat = 0,
         previewIsMarkdown: Bool = false,
-        previewHasBack: Bool = false
+        previewHasBack: Bool = false,
+        sessionTabCount: Int = 0
     ) {
         maskTranscriptHeight = transcriptHeight
         maskPickerHeight = pickerHeight
@@ -202,6 +240,7 @@ final class OverlayRootView: NSView {
         maskPreviewWidth = previewWidth
         maskPreviewIsMarkdown = previewIsMarkdown
         maskPreviewHasBack = previewHasBack
+        maskSessionTabCount = sessionTabCount
         rebuildCardMask()
     }
 
@@ -238,6 +277,18 @@ final class OverlayRootView: NSView {
                 CGRect(x: inset, y: chatY, width: chatW, height: transcriptHeight),
                 cornerRadius: OverlayMetrics.transcriptCornerRadius
             )
+            if maskSessionTabCount > 0 {
+                for rect in SessionTabLayout.hitRegions(
+                    count: maskSessionTabCount,
+                    transcriptOriginY: chatY,
+                    trailingX: inset
+                ) {
+                    addRect(
+                        rect,
+                        cornerRadius: SessionTabLayoutMetrics.bubble.cornerRadius
+                    )
+                }
+            }
             if maskPreviewWidth > 1 {
                 addRect(
                     CGRect(

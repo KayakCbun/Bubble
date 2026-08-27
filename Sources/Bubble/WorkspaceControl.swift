@@ -9,6 +9,11 @@ final class WorkspaceControlServer: @unchecked Sendable {
     private var listener: NWListener?
     private var token = UUID().uuidString
     private var connections: [ObjectIdentifier: NWConnection] = [:]
+    private let controlFile: URL
+
+    init(controlFile: URL = OverlayPaths.controlFile) {
+        self.controlFile = controlFile
+    }
 
     func start() {
         queue.async { [weak self] in
@@ -24,7 +29,7 @@ final class WorkspaceControlServer: @unchecked Sendable {
                 connection.cancel()
             }
             connections.removeAll()
-            try? FileManager.default.removeItem(at: OverlayPaths.controlFile)
+            try? FileManager.default.removeItem(at: controlFile)
         }
     }
 
@@ -66,7 +71,11 @@ final class WorkspaceControlServer: @unchecked Sendable {
             return
         }
         OverlayPaths.bootstrap()
-        try? data.write(to: OverlayPaths.controlFile, options: .atomic)
+        try? FileManager.default.createDirectory(
+            at: controlFile.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try? data.write(to: controlFile, options: .atomic)
     }
 
     private func accept(_ connection: NWConnection) {

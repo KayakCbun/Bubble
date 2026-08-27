@@ -9,8 +9,8 @@ enum WorkspaceTranscriptChunker {
 
     private static let cache: NSCache<NSString, WorkspaceTextChunksBox> = {
         let cache = NSCache<NSString, WorkspaceTextChunksBox>()
-        cache.countLimit = 128
-        cache.totalCostLimit = 8 * 1_024 * 1_024
+        cache.countLimit = 2_048
+        cache.totalCostLimit = 24 * 1_024 * 1_024
         return cache
     }()
 

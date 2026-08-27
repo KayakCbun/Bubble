@@ -30,6 +30,13 @@ swiftc -O -parse-as-library \
   -o /tmp/bubble-check-transcript-render-plan
 /tmp/bubble-check-transcript-render-plan
 
+swiftc -parse-as-library \
+  Sources/Bubble/TranscriptHistoryWindow.swift \
+  Sources/Bubble/TranscriptRestoreMerge.swift \
+  scripts/check_transcript_history_window.swift \
+  -o /tmp/bubble-check-transcript-history-window
+/tmp/bubble-check-transcript-history-window
+
 swiftc -parse-as-library Sources/Bubble/TranscriptStream.swift Sources/Bubble/ProseFormat.swift scripts/check_transcript_stream.swift -o /tmp/bubble-check-stream
 /tmp/bubble-check-stream
 
@@ -64,6 +71,8 @@ swiftc -parse-as-library Sources/Bubble/PromptTriggerPolicy.swift scripts/check_
 /tmp/bubble-check-prompt-palette
 
 swift run DiagramChecks
+
+swift run SessionTabsChecks
 
 swiftc -parse-as-library Sources/Bubble/MessageDelivery.swift scripts/check_message_delivery.swift -o /tmp/bubble-check-message-delivery
 /tmp/bubble-check-message-delivery

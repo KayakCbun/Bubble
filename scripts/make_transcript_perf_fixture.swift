@@ -21,6 +21,18 @@ private struct FixtureEnvelope: Codable {
     var richItems: [FixtureItem]? = nil
 }
 
+private struct FixtureSessionTab: Codable {
+    var runtimeID: UUID
+    var sessionID: String
+    var role: String
+    var ordinal: Int
+}
+
+private struct FixtureSessionTabs: Codable {
+    var entries: [FixtureSessionTab]
+    var selectedRuntimeID: UUID
+}
+
 @main
 private enum TranscriptPerfFixture {
     static func main() throws {
@@ -36,7 +48,8 @@ private enum TranscriptPerfFixture {
             }
             return Int(arguments[index + 1]) ?? 600
         }()
-        let sessionID = "bubble-perf-600-turns"
+        let includesSideSession = arguments.contains("--side-session")
+        let sessionID = includesSideSession ? "bubble-perf-main" : "bubble-perf-600-turns"
         let root = home.appendingPathComponent(".bubble", isDirectory: true)
         let transcripts = root.appendingPathComponent("transcripts", isDirectory: true)
         try FileManager.default.createDirectory(at: transcripts, withIntermediateDirectories: true)
@@ -93,6 +106,33 @@ private enum TranscriptPerfFixture {
         try Data(sessionID.utf8).write(to: root.appendingPathComponent("session-id"), options: .atomic)
         try data.write(to: root.appendingPathComponent("transcript.json"), options: .atomic)
         try data.write(to: transcripts.appendingPathComponent("\(sessionID).json"), options: .atomic)
+        if includesSideSession {
+            var sideItems = items
+            for index in sideItems.indices {
+                sideItems[index].id = UUID(
+                    uuidString: String(format: "00000000-0000-0000-0002-%012d", index)
+                )!
+            }
+            let sideSessionID = "bubble-perf-side"
+            let sideEnvelope = FixtureEnvelope(sessionId: sideSessionID, items: sideItems)
+            try encoder.encode(sideEnvelope).write(
+                to: transcripts.appendingPathComponent("\(sideSessionID).json"),
+                options: .atomic
+            )
+            let primaryRuntimeID = UUID(uuidString: "00000000-0000-0000-0003-000000000001")!
+            let sideRuntimeID = UUID(uuidString: "00000000-0000-0000-0003-000000000002")!
+            let tabs = FixtureSessionTabs(
+                entries: [
+                    FixtureSessionTab(runtimeID: primaryRuntimeID, sessionID: sessionID, role: "main", ordinal: 1),
+                    FixtureSessionTab(runtimeID: sideRuntimeID, sessionID: sideSessionID, role: "side", ordinal: 2),
+                ],
+                selectedRuntimeID: primaryRuntimeID
+            )
+            try encoder.encode(tabs).write(
+                to: root.appendingPathComponent("session-tabs.json"),
+                options: .atomic
+            )
+        }
         print("Wrote \(items.count) items / \(data.count) bytes to \(root.path)")
     }
 }

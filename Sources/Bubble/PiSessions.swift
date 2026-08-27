@@ -13,6 +13,11 @@ struct PiTreeTurn: Equatable {
     var text: String
 }
 
+struct PiFirstUserInput: Equatable {
+    var text: String
+    var imageCount: Int
+}
+
 enum PiSessions {
     static func directory(for cwd: URL = OverlayPaths.workspace) -> URL {
         let slug = String(cwd.path.drop(while: { $0 == "/" })).replacingOccurrences(of: "/", with: "-")
@@ -53,6 +58,11 @@ enum PiSessions {
             turns.append(PiTreeTurn(index: turns.count + 1, id: object.string("id") ?? "", text: clipped))
         }
         return turns
+    }
+
+    static func firstUserInput(sessionId: String, cwd: URL = OverlayPaths.workspace) -> PiFirstUserInput? {
+        guard let file = exactFile(for: sessionId, cwd: cwd) else { return nil }
+        return firstUserInput(file)
     }
 
     static func conversationTree(sessionId: String, cwd: URL) -> ConversationTreeSnapshot? {
@@ -119,15 +129,27 @@ enum PiSessions {
     }
 
     private static func firstUserText(_ url: URL) -> String? {
+        guard let input = firstUserInput(url) else { return nil }
+        let fallback = input.imageCount == 1 ? "Image" : "\(input.imageCount) images"
+        let value = input.text.isEmpty ? fallback : input.text
+        let clipped = clip(value.replacingOccurrences(of: "\n", with: " "), 56)
+        return clipped.isEmpty ? nil : clipped
+    }
+
+    private static func firstUserInput(_ url: URL) -> PiFirstUserInput? {
         guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
         for line in text.split(separator: "\n", omittingEmptySubsequences: false).prefix(80) {
             guard let object = parseLine(String(line)) else { continue }
             guard object.string("type") == "message" else { continue }
             let message = object.dictionary("message") ?? [:]
             guard message.string("role") == "user" else { continue }
-            let value = firstText(message["content"])
-            let clipped = clip(value.replacingOccurrences(of: "\n", with: " "), 56)
-            if !clipped.isEmpty { return clipped }
+            let value = ConversationTreeSnapshot.displayUserText(firstText(message["content"]))
+            let imageCount = (message["content"] as? [Any])?.reduce(into: 0) { count, block in
+                if JSONValue.object(block)?.string("type") == "image" { count += 1 }
+            } ?? 0
+            if !value.isEmpty || imageCount > 0 {
+                return PiFirstUserInput(text: value, imageCount: imageCount)
+            }
         }
         return nil
     }

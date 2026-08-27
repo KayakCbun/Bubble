@@ -22,6 +22,12 @@ final class AcpClient: @unchecked Sendable {
     private var nextId = 1
     private var pending: [RPCID: CheckedContinuation<Any?, Error>] = [:]
     private var inFlightPrompt: [String: RPCID] = [:]
+    private let controlFile: URL
+
+    init(controlFile: URL = OverlayPaths.controlFile, initialSessionID: String? = nil) {
+        self.controlFile = controlFile
+        sessionId = initialSessionID
+    }
 
     private(set) var sessionId: String?
     private(set) var canLoad = false
@@ -60,7 +66,7 @@ final class AcpClient: @unchecked Sendable {
             process.executableURL = launch.executable
             process.arguments = launch.arguments
             process.currentDirectoryURL = OverlayPaths.workspace
-            process.environment = OverlayPaths.processEnvironment()
+            process.environment = OverlayPaths.processEnvironment(controlFile: controlFile)
             process.standardInput = stdinPipe
             process.standardOutput = stdoutPipe
             process.standardError = stderrPipe
@@ -106,23 +112,50 @@ final class AcpClient: @unchecked Sendable {
     }
 
     func connectAndResume() async throws -> String {
+        let preferredSessionID = sessionId
         if !isRunning() {
             try start()
         }
         try await initialize()
-        let id = try await ensureSession()
+        let id: String
+        if let preferredSessionID,
+           try await attach(preferredSessionID, cwd: OverlayPaths.workspace) {
+            sessionId = preferredSessionID
+            persistSessionId(preferredSessionID)
+            id = preferredSessionID
+        } else {
+            id = try await ensureSession()
+        }
         try? await applyBubblePreferences()
         return id
     }
 
-    func switchToSession(_ id: String) async throws -> String {
+    func reconnectSideSession() async throws -> String {
+        let existing = sessionId
+        if !isRunning() {
+            try start()
+        }
+        try await initialize()
+        if let existing, try await attach(existing, cwd: OverlayPaths.workspace) {
+            try? await applyBubblePreferences()
+            return existing
+        }
+        let created = try await newSession(cwd: OverlayPaths.workspace, persistAsMain: false)
+        sessionId = created
+        try? await applyBubblePreferences()
+        return created
+    }
+
+    func switchToSession(_ id: String, persistAsMain: Bool = true) async throws -> String {
         if !isRunning() {
             try start()
             try await initialize()
         }
         if try await attach(id, cwd: OverlayPaths.workspace) {
             sessionId = id
-            persistSessionId(id)
+            if persistAsMain {
+                persistSessionId(id)
+            }
             try? await applyBubblePreferences()
             return id
         }
@@ -142,14 +175,16 @@ final class AcpClient: @unchecked Sendable {
         }
     }
 
-    func startFreshSession() async throws -> String {
+    func startFreshSession(persistAsMain: Bool = true) async throws -> String {
         if !isRunning() {
             try start()
             try await initialize()
         }
-        let created = try await newSession(cwd: OverlayPaths.workspace, persistAsMain: true)
+        let created = try await newSession(cwd: OverlayPaths.workspace, persistAsMain: persistAsMain)
         sessionId = created
-        persistSessionId(created)
+        if persistAsMain {
+            persistSessionId(created)
+        }
         try? await applyBubblePreferences()
         return created
     }
