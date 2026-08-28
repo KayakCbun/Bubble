@@ -208,17 +208,16 @@ struct OverlayView: View {
                             insertion: .move(edge: .bottom).combined(with: .opacity),
                             removal: .opacity.combined(with: .offset(y: 8))
                         ))
-                } else if store.slashMenuPresented {
+                } else {
                     slashPalette
                         .offset(y: -(composerHeight + OverlayMetrics.stackSpacing))
-                        .transition(.asymmetric(
-                            insertion: .move(edge: .bottom).combined(with: .opacity),
-                            removal: .opacity.combined(with: .offset(y: 6))
-                        ))
+                        .opacity(store.slashMenuPresented ? 1 : 0)
+                        .offset(y: store.slashMenuPresented ? 0 : 6)
+                        .allowsHitTesting(store.slashMenuPresented)
+                        .accessibilityHidden(!store.slashMenuPresented)
                 }
             }
             .animation(OverlayMotion.snappy, value: store.showAvatarPicker)
-            .animation(OverlayMotion.quick, value: store.slashMenuPresented)
         }
         .frame(
             maxWidth: .infinity,
@@ -758,6 +757,10 @@ struct OverlayView: View {
                     followState = next
                 }
             }
+            .onReceive(NotificationCenter.default.publisher(for: .transcriptUserScrollStarted)) { _ in
+                followQueued = false
+                followState.userNavigated(atEnd: false)
+            }
             .onAppear {
                 requestFollowLatest(proxy)
                 if let targetID = ProcessInfo.processInfo.environment[
@@ -1026,17 +1029,12 @@ struct OverlayView: View {
         let isMount = store.isMountPalette
         let needsScroll = OverlayPalettePolicy.needsScroll(items: items.count, isMount: isMount)
         let listHeight = OverlayPalettePolicy.listHeight(items: items.count, isMount: isMount)
-        let rows = VStack(alignment: .leading, spacing: OverlayPalettePolicy.rowSpacing) {
-            ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
-                paletteRow(item, highlighted: index == store.slashHighlight)
-                    .id(index)
-                    .animation(OverlayMotion.quick, value: store.slashHighlight)
-            }
-        }
         if needsScroll {
             ScrollViewReader { proxy in
                 ScrollView {
-                    rows
+                    LazyVStack(alignment: .leading, spacing: OverlayPalettePolicy.rowSpacing) {
+                        paletteRowContent(items)
+                    }
                 }
                 .scrollIndicators(.visible)
                 .frame(height: listHeight)
@@ -1054,7 +1052,18 @@ struct OverlayView: View {
                 }
             }
         } else {
-            rows
+            VStack(alignment: .leading, spacing: OverlayPalettePolicy.rowSpacing) {
+                paletteRowContent(items)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func paletteRowContent(_ items: [PaletteItem]) -> some View {
+        ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+            paletteRow(item, highlighted: index == store.slashHighlight)
+                .id(index)
+                .animation(OverlayMotion.quick, value: store.slashHighlight)
         }
     }
 

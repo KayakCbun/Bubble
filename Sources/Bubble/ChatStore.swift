@@ -180,6 +180,7 @@ final class ChatStore {
     var composerChromeHeight: CGFloat = OverlayMetrics.minHeight
     var slashMenuPresented = false
     var slashPaletteChromeHeight: CGFloat = 0
+    private var paletteSnapshot: [PaletteItem] = []
     var isStartingSession = false
     var isConnected = false
     var status: String = "starting"
@@ -1195,7 +1196,19 @@ final class ChatStore {
             workspaceState.active = nil
         }
         refreshMountSkills()
-        refreshCatalog()
+        paletteSnapshot = slashPaletteItems
+        if ProcessInfo.processInfo.environment["BUBBLE_PALETTE_DIAGNOSTICS"] == "1" {
+            skills = (0..<59).map { index in
+                PiSkill(
+                    name: "diagnostic-skill-\(index)",
+                    description: "Synthetic skill used to match the real slash palette catalog size.",
+                    path: "/diagnostic/skill-\(index)/SKILL.md"
+                )
+            }
+            paletteSnapshot = slashPaletteItems
+        } else {
+            refreshCatalog()
+        }
         client.onUpdate = { [weak self] update in
             guard update.shouldDeliverToTranscript else { return }
             DispatchQueue.main.async {
@@ -1388,7 +1401,7 @@ final class ChatStore {
     }
 
     var visiblePaletteItems: [PaletteItem] {
-        paletteItems
+        paletteSnapshot
     }
 
     var paletteCaption: String {
@@ -1448,18 +1461,24 @@ final class ChatStore {
         if OverlayComposer.chromeHeightNeedsUpdate(previous: composerChromeHeight, next: nextComposer) {
             composerChromeHeight = nextComposer
         }
-        let visible = PromptTriggerPolicy.hasActiveTrigger(in: draft)
+        let paletteEligible = PromptTriggerPolicy.hasActiveTrigger(in: draft)
             && !paletteSuppressed
             && !showAvatarPicker
             && !isBusy
-            && !visiblePaletteItems.isEmpty
+        if paletteEligible {
+            let nextPaletteItems = paletteItems
+            if nextPaletteItems != paletteSnapshot {
+                paletteSnapshot = nextPaletteItems
+            }
+        }
+        let visible = paletteEligible && !paletteSnapshot.isEmpty
         if visible != slashMenuPresented {
             slashMenuPresented = visible
         }
         let paletteHeight: CGFloat
         if visible {
             paletteHeight = OverlayPalettePolicy.chromeHeight(
-                items: visiblePaletteItems.count,
+                items: paletteSnapshot.count,
                 isMount: isMountPalette,
                 hasSearch: isAppPalette || isMountPalette
             )
@@ -1738,6 +1757,9 @@ final class ChatStore {
                 self.installedApps = apps
                 self.sessions = sessions
                 self.macEpoch += 1
+                if PromptPalette.activeToken(in: self.draft) == nil {
+                    self.paletteSnapshot = self.slashPaletteItems
+                }
                 self.syncOverlayChrome()
                 OverlayLog.write("catalog skills=\(skills.count) prompts=\(prompts.count) files=\(files.count) apps=\(apps.count) sessions=\(sessions.count)")
             }

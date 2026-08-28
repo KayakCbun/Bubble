@@ -486,3 +486,93 @@ final class WindowPresentationDiagnostics: NSObject {
         return values[index]
     }
 }
+
+final class PalettePresentationDiagnostics: NSObject {
+    private weak var panel: NSPanel?
+    private var link: CADisplayLink?
+    private var lastTimestamp: CFTimeInterval = 0
+    private var intervals: [TimeInterval] = []
+    private var showIntervals: [TimeInterval] = []
+    private var hideIntervals: [TimeInterval] = []
+    private var latencies: [TimeInterval] = []
+    private var mutationDurations: [TimeInterval] = []
+    private var cycleStartedAt: TimeInterval?
+    private var phase = "idle"
+
+    func attach(panel: NSPanel) {
+        self.panel = panel
+    }
+
+    func start() {
+        guard link == nil, let panel else { return }
+        let link = panel.displayLink(target: self, selector: #selector(tick(_:)))
+        link.preferredFrameRateRange = OverlayMotion.frameRate
+        link.add(to: .main, forMode: .common)
+        self.link = link
+    }
+
+    func beginCycle() {
+        phase = "show"
+        cycleStartedAt = CACurrentMediaTime()
+    }
+
+    func beginHide() {
+        phase = "hide"
+    }
+
+    func markPresented() {
+        guard let cycleStartedAt else { return }
+        latencies.append(CACurrentMediaTime() - cycleStartedAt)
+        self.cycleStartedAt = nil
+    }
+
+    func recordMutationDuration(_ duration: TimeInterval) {
+        mutationDurations.append(duration)
+    }
+
+    func summary(cycles: Int) -> String {
+        link?.invalidate()
+        link = nil
+        let frameMilliseconds = intervals.sorted().map { $0 * 1_000 }
+        let showMilliseconds = showIntervals.sorted().map { $0 * 1_000 }
+        let hideMilliseconds = hideIntervals.sorted().map { $0 * 1_000 }
+        let latencyMilliseconds = latencies.sorted().map { $0 * 1_000 }
+        let mutationMilliseconds = mutationDurations.sorted().map { $0 * 1_000 }
+        return String(
+            format: "palette presentation benchmark cycles=%d presented=%d p95=%.2fms p99=%.2fms max=%.2fms showP99=%.2fms hideP99=%.2fms latencyP95=%.2fms latencyMax=%.2fms mutationP95=%.2fms mutationMax=%.2fms",
+            cycles,
+            latencies.count,
+            percentile(frameMilliseconds, 0.95),
+            percentile(frameMilliseconds, 0.99),
+            frameMilliseconds.last ?? 0,
+            percentile(showMilliseconds, 0.99),
+            percentile(hideMilliseconds, 0.99),
+            percentile(latencyMilliseconds, 0.95),
+            latencyMilliseconds.last ?? 0,
+            percentile(mutationMilliseconds, 0.95),
+            mutationMilliseconds.last ?? 0
+        )
+    }
+
+    @objc private func tick(_ link: CADisplayLink) {
+        if lastTimestamp > 0 {
+            let interval = max(0, link.timestamp - lastTimestamp)
+            intervals.append(interval)
+            if phase == "show" {
+                showIntervals.append(interval)
+            } else if phase == "hide" {
+                hideIntervals.append(interval)
+            }
+        }
+        lastTimestamp = link.timestamp
+    }
+
+    private func percentile(_ values: [Double], _ percentile: Double) -> Double {
+        guard !values.isEmpty else { return .infinity }
+        let index = min(
+            values.count - 1,
+            max(0, Int((Double(values.count - 1) * percentile).rounded(.up)))
+        )
+        return values[index]
+    }
+}

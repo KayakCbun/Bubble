@@ -173,29 +173,38 @@ private enum TranscriptInteractionCheck {
                 hasPreciseDeltas: false,
                 minimum: 0,
                 maximum: 200
-            ) == 88,
-            "one discrete mouse-wheel notch remains large enough to feel immediate"
+            ) == 76,
+            "one discrete mouse-wheel notch has enough distance to interpolate visibly"
         )
         expect(
-            TranscriptWheelFramePolicy.queuedDelta(pending: 200, incoming: 400)
-                == TranscriptWheelFramePolicy.maximumPendingDelta,
+            TranscriptWheelFramePolicy.queuedDelta(
+                pending: 200,
+                incoming: 400,
+                maximumPendingDelta: TranscriptWheelFramePolicy.maximumPendingDelta(
+                    hasPreciseDeltas: true
+                )
+            ) == 96,
             "same-direction trackpad packets coalesce without creating a long post-input tail"
         )
         expect(
-            TranscriptWheelFramePolicy.queuedDelta(pending: 200, incoming: -40) == -40,
+            TranscriptWheelFramePolicy.queuedDelta(
+                pending: 200,
+                incoming: -40,
+                maximumPendingDelta: 96
+            ) == -40,
             "a direction reversal discards stale queued motion immediately"
         )
         expect(
             TranscriptWheelFramePolicy.nextFrame(
                 pending: 600,
-                maximumStep: TranscriptWheelFramePolicy.maximumStep
+                maximumStep: TranscriptWheelFramePolicy.maximumStep(hasPreciseDeltas: true)
             ) == TranscriptWheelFrameStep(applied: 32, remaining: 568),
             "one display refresh cannot realize an unbounded LazyVStack jump"
         )
         expect(
             TranscriptWheelFramePolicy.nextFrame(
                 pending: -600,
-                maximumStep: TranscriptWheelFramePolicy.maximumStep
+                maximumStep: TranscriptWheelFramePolicy.maximumStep(hasPreciseDeltas: true)
             ) == TranscriptWheelFrameStep(applied: -32, remaining: -568),
             "the per-frame movement bound is symmetric in both directions"
         )
@@ -203,6 +212,17 @@ private enum TranscriptInteractionCheck {
             TranscriptWheelFramePolicy.nextFrame(pending: 40, maximumStep: 96)
                 == TranscriptWheelFrameStep(applied: 40, remaining: 0),
             "a small direct gesture is fully visible on the first refresh"
+        )
+        expect(
+            TranscriptWheelFramePolicy.nextFrame(
+                pending: 24,
+                maximumStep: TranscriptWheelFramePolicy.maximumStep(hasPreciseDeltas: false)
+            ) == TranscriptWheelFrameStep(applied: 12, remaining: 12),
+            "one mouse-wheel notch is interpolated across more than one display refresh"
+        )
+        expect(
+            TranscriptWheelFramePolicy.maximumPendingDelta(hasPreciseDeltas: false) == 48,
+            "mouse interpolation remains bounded to four display refreshes"
         )
         expect(
             TranscriptViewportReportPolicy.minimumInterval >= 1.0 / 60.0,

@@ -35,6 +35,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
     private var chromeHideGeneration = 0
     private let presentationAnimator = OverlayPresentationAnimator()
     private var presentationDiagnostics: WindowPresentationDiagnostics?
+    private var paletteDiagnostics: PalettePresentationDiagnostics?
     private var isPreparingShow = false
     private var presentationPreflightScheduled = false
     private var showGeneration = 0
@@ -46,11 +47,14 @@ final class OverlayController: NSObject, NSWindowDelegate {
     private var runsPresentationDiagnostics: Bool {
         ProcessInfo.processInfo.environment["BUBBLE_PRESENTATION_DIAGNOSTICS"] == "1"
     }
+    private var runsPaletteDiagnostics: Bool {
+        ProcessInfo.processInfo.environment["BUBBLE_PALETTE_DIAGNOSTICS"] == "1"
+    }
 
     func start() {
         OverlayPaths.bootstrap()
         installView()
-        if runsPresentationDiagnostics { return }
+        if runsPresentationDiagnostics || runsPaletteDiagnostics { return }
         tapMonitor.onDoubleTap = { [weak self] in
             self?.toggleFromCommandTap()
         }
@@ -334,6 +338,41 @@ final class OverlayController: NSObject, NSWindowDelegate {
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
             runCycle(max(cycles, 1))
+        }
+    }
+
+    func runPaletteBenchmark(cycles: Int = 20) {
+        guard runsPaletteDiagnostics else { return }
+        let diagnostics = PalettePresentationDiagnostics()
+        diagnostics.attach(panel: panel)
+        paletteDiagnostics = diagnostics
+
+        func runCycle(_ remaining: Int) {
+            diagnostics.beginCycle()
+            let mutationStartedAt = CACurrentMediaTime()
+            store.draft = "/"
+            diagnostics.recordMutationDuration(CACurrentMediaTime() - mutationStartedAt)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) { [weak self] in
+                guard let self else { return }
+                diagnostics.beginHide()
+                self.store.draft = ""
+                if remaining > 1 {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+                        runCycle(remaining - 1)
+                    }
+                } else {
+                    let summary = diagnostics.summary(cycles: cycles)
+                    OverlayLog.write(summary)
+                    self.paletteDiagnostics = nil
+                }
+            }
+        }
+
+        show(returningFocusTo: nil) {
+            diagnostics.start()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) {
+                runCycle(max(cycles, 1))
+            }
         }
     }
 
@@ -652,6 +691,9 @@ final class OverlayController: NSObject, NSWindowDelegate {
             chromeVisible: layout.chromeVisible,
             sessionTabCount: layout.sessionTabCount
         )
+        if applied.commandPaletteHeight > 1 {
+            paletteDiagnostics?.markPresented()
+        }
         let animateFrame = panel.isVisible
             && !isPreparingShow
             && !isHiding

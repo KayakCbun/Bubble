@@ -16,8 +16,8 @@ MAX_JUMP_BLANK_SAMPLES="${BUBBLE_BENCHMARK_MAX_JUMP_BLANK_SAMPLES:-6}"
 MAX_JUMP_BLANK_STREAK="${BUBBLE_BENCHMARK_MAX_JUMP_BLANK_STREAK:-1}"
 HISTORY_TURNS="${BUBBLE_BENCHMARK_HISTORY_TURNS:-}"
 
-if [[ "$MODE" != "display" && "$MODE" != "wheel" && "$MODE" != "wheel-timer" && "$MODE" != "mount-audit" && "$MODE" != "history-navigation-audit" ]]; then
-  echo "FAIL: BUBBLE_BENCHMARK_MODE must be display, wheel, wheel-timer, mount-audit, or history-navigation-audit" >&2
+if [[ "$MODE" != "display" && "$MODE" != "wheel" && "$MODE" != "wheel-timer" && "$MODE" != "wheel-discrete-timer" && "$MODE" != "mount-audit" && "$MODE" != "history-navigation-audit" ]]; then
+  echo "FAIL: BUBBLE_BENCHMARK_MODE must be display, wheel, wheel-timer, wheel-discrete-timer, mount-audit, or history-navigation-audit" >&2
   exit 2
 fi
 
@@ -59,6 +59,9 @@ if [[ "$MODE" == "wheel" ]]; then
 fi
 if [[ "$MODE" == "wheel-timer" ]]; then
   diagnostics_mode="wheel-timer"
+fi
+if [[ "$MODE" == "wheel-discrete-timer" ]]; then
+  diagnostics_mode="wheel-discrete-timer"
 fi
 if [[ "$MODE" == "mount-audit" ]]; then
   diagnostics_mode="mount-audit"
@@ -127,7 +130,7 @@ fi
 
 peak_anchors="$(sed -E 's/.* peakAnchors=([0-9]+).*/\1/' <<<"$benchmark_line")"
 
-if [[ "$MODE" == "display" || "$MODE" == "wheel" || "$MODE" == "wheel-timer" ]]; then
+if [[ "$MODE" == "display" || "$MODE" == "wheel" || "$MODE" == "wheel-timer" || "$MODE" == "wheel-discrete-timer" ]]; then
   ready="$(sed -E 's/.* ready=([0-9.]+)ms.*/\1/' <<<"$benchmark_line")"
   p95="$(sed -E 's/.* p95=([0-9.]+)ms.*/\1/' <<<"$benchmark_line")"
   p99="$(sed -E 's/.* p99=([0-9.]+)ms.*/\1/' <<<"$benchmark_line")"
@@ -152,7 +155,7 @@ if [[ "$MODE" == "display" || "$MODE" == "wheel" || "$MODE" == "wheel-timer" ]];
     echo "$benchmark_line" >&2
     exit 1
   fi
-  if [[ "$MODE" == "wheel" || "$MODE" == "wheel-timer" ]]; then
+  if [[ "$MODE" == "wheel" || "$MODE" == "wheel-timer" || "$MODE" == "wheel-discrete-timer" ]]; then
     first_input="$(sed -E 's/.* firstInput=([0-9.]+)ms.*/\1/' <<<"$benchmark_line")"
     first_moved="$(sed -E 's/.* firstMoved=([01]).*/\1/' <<<"$benchmark_line")"
     if (( first_moved != 1 )); then

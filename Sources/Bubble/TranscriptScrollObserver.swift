@@ -122,6 +122,7 @@ final class TranscriptScrollProbe: NSView {
     private var userSettleTimer: Timer?
     private var suppressingPriorScrollSequence = false
     private var pendingWheelDeltaY: CGFloat = 0
+    private var pendingWheelHasPreciseDeltas = true
     private var wheelDisplayLink: CADisplayLink?
     private var pendingHistoryTargetID: String?
     private var historyAlignmentQueued = false
@@ -271,7 +272,8 @@ final class TranscriptScrollProbe: NSView {
             }
             if self.diagnosticsMode == "drive"
                 || self.diagnosticsMode == "wheel"
-                || self.diagnosticsMode == "wheel-timer" {
+                || self.diagnosticsMode == "wheel-timer"
+                || self.diagnosticsMode == "wheel-discrete-timer" {
                 self.startDiagnosticDrive()
             } else if self.diagnosticsMode == "mount-audit" {
                 self.startMountAudit()
@@ -372,9 +374,13 @@ final class TranscriptScrollProbe: NSView {
         )
 
         recordAcceptedUserEvent()
+        pendingWheelHasPreciseDeltas = event.hasPreciseScrollingDeltas
         pendingWheelDeltaY = TranscriptWheelFramePolicy.queuedDelta(
             pending: pendingWheelDeltaY,
-            incoming: deltaY
+            incoming: deltaY,
+            maximumPendingDelta: TranscriptWheelFramePolicy.maximumPendingDelta(
+                hasPreciseDeltas: pendingWheelHasPreciseDeltas
+            )
         )
         let beginsFrameSequence = wheelDisplayLink == nil
         schedulePendingWheelScroll(in: scrollView)
@@ -421,7 +427,9 @@ final class TranscriptScrollProbe: NSView {
               let document = scrollView.documentView else { return false }
         let frameStep = TranscriptWheelFramePolicy.nextFrame(
             pending: pendingWheelDeltaY,
-            maximumStep: TranscriptWheelFramePolicy.maximumStep
+            maximumStep: TranscriptWheelFramePolicy.maximumStep(
+                hasPreciseDeltas: pendingWheelHasPreciseDeltas
+            )
         )
         let visible = scrollView.contentView.bounds
         let minimumY = document.bounds.minY
@@ -441,6 +449,7 @@ final class TranscriptScrollProbe: NSView {
 
     private func cancelPendingWheelScroll() {
         pendingWheelDeltaY = 0
+        pendingWheelHasPreciseDeltas = true
         wheelDisplayLink?.invalidate()
         wheelDisplayLink = nil
     }
@@ -873,7 +882,7 @@ final class TranscriptScrollProbe: NSView {
         diagnosticCoverageMismatches = 0
         visibleAnchor = nil
         userEventDeadline = CACurrentMediaTime() + 120
-        if diagnosticsMode == "wheel-timer" {
+        if diagnosticsMode == "wheel-timer" || diagnosticsMode == "wheel-discrete-timer" {
             let timer = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] timer in
                 guard self?.performDiagnosticTick() == true else {
                     timer.invalidate()
@@ -1081,22 +1090,26 @@ final class TranscriptScrollProbe: NSView {
                 max(minimumY, visible.minY + diagnosticDirection * diagnosticScrollStep)
             )
         }
-        if (diagnosticsMode == "wheel" || diagnosticsMode == "wheel-timer"),
+        if (diagnosticsMode == "wheel"
+                || diagnosticsMode == "wheel-timer"
+                || diagnosticsMode == "wheel-discrete-timer"),
            let cgEvent = CGEvent(
                scrollWheelEvent2Source: nil,
-               units: .pixel,
+               units: diagnosticsMode == "wheel-discrete-timer" ? .line : .pixel,
                wheelCount: 1,
                wheel1: Int32(-diagnosticDirection * diagnosticScrollStep),
                wheel2: 0,
                wheel3: 0
            ) {
-            cgEvent.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
-            cgEvent.setIntegerValueField(
-                .scrollWheelEventScrollPhase,
-                value: Int64(
-                    (diagnosticWheelBeginsGesture ? CGScrollPhase.began : .changed).rawValue
+            if diagnosticsMode != "wheel-discrete-timer" {
+                cgEvent.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
+                cgEvent.setIntegerValueField(
+                    .scrollWheelEventScrollPhase,
+                    value: Int64(
+                        (diagnosticWheelBeginsGesture ? CGScrollPhase.began : .changed).rawValue
+                    )
                 )
-            )
+            }
             diagnosticWheelBeginsGesture = false
             guard let event = NSEvent(cgEvent: cgEvent) else { return true }
             let originBeforeInput = scrollView.contentView.bounds.minY

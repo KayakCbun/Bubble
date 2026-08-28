@@ -120,7 +120,7 @@ enum TranscriptScrollAnimationPolicy {
 }
 
 enum TranscriptWheelScrollPolicy {
-    private static let discreteStep: CGFloat = 12
+    private static let discreteStep: CGFloat = 24
 
     static func resolvedDelta(
         scrollingDeltaY: CGFloat,
@@ -152,10 +152,19 @@ struct TranscriptWheelFrameStep: Equatable {
 enum TranscriptWheelFramePolicy {
     /// Keep one LazyVStack realization slice below a 60 fps frame budget on
     /// ProMotion displays while still allowing several thousand points/second.
-    static let maximumStep: CGFloat = 32
-    static let maximumPendingDelta = maximumStep * 3
+    static func maximumStep(hasPreciseDeltas: Bool) -> CGFloat {
+        hasPreciseDeltas ? 32 : 12
+    }
 
-    static func queuedDelta(pending: CGFloat, incoming: CGFloat) -> CGFloat {
+    static func maximumPendingDelta(hasPreciseDeltas: Bool) -> CGFloat {
+        maximumStep(hasPreciseDeltas: hasPreciseDeltas) * (hasPreciseDeltas ? 3 : 4)
+    }
+
+    static func queuedDelta(
+        pending: CGFloat,
+        incoming: CGFloat,
+        maximumPendingDelta: CGFloat
+    ) -> CGFloat {
         let combined: CGFloat
         if pending == 0 || incoming == 0 || (pending > 0) == (incoming > 0) {
             combined = pending + incoming
