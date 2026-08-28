@@ -9,6 +9,9 @@ extension Notification.Name {
     static let fileChangeDiagnosticPresented = Notification.Name(
         "BubbleFileChangeDiagnosticPresented"
     )
+    static let fileChangeDiagnosticContentMeasured = Notification.Name(
+        "BubbleFileChangeDiagnosticContentMeasured"
+    )
     static let fileChangeExpansionChanged = Notification.Name(
         "BubbleFileChangeExpansionChanged"
     )
@@ -593,11 +596,13 @@ final class FileChangePresentationDiagnostics: NSObject {
     private weak var panel: NSPanel?
     private var link: CADisplayLink?
     private var presentationObserver: NSObjectProtocol?
+    private var contentObserver: NSObjectProtocol?
     private var lastTimestamp: CFTimeInterval = 0
     private var cycleStartedAt: CFTimeInterval?
     private var cyclePresented = false
     private var frameIntervals: [TimeInterval] = []
     private var firstFrameLatencies: [TimeInterval] = []
+    private var expandedContentHeights: [CGFloat] = []
 
     func attach(panel: NSPanel) {
         self.panel = panel
@@ -611,6 +616,14 @@ final class FileChangePresentationDiagnostics: NSObject {
             queue: .main
         ) { [weak self] note in
             self?.recordPresentation()
+        }
+        contentObserver = NotificationCenter.default.addObserver(
+            forName: .fileChangeDiagnosticContentMeasured,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            guard let height = note.userInfo?["height"] as? CGFloat else { return }
+            self?.expandedContentHeights.append(height)
         }
         let link = panel.displayLink(target: self, selector: #selector(tick(_:)))
         link.preferredFrameRateRange = OverlayMotion.frameRate
@@ -634,12 +647,18 @@ final class FileChangePresentationDiagnostics: NSObject {
             NotificationCenter.default.removeObserver(presentationObserver)
             self.presentationObserver = nil
         }
+        if let contentObserver {
+            NotificationCenter.default.removeObserver(contentObserver)
+            self.contentObserver = nil
+        }
         let frameMilliseconds = frameIntervals.sorted().map { $0 * 1_000 }
         let latencyMilliseconds = firstFrameLatencies.sorted().map { $0 * 1_000 }
         return String(
-            format: "file change presentation benchmark cycles=%d presented=%d frameP95=%.2fms frameP99=%.2fms frameMax=%.2fms latencyP95=%.2fms latencyMax=%.2fms",
+            format: "file change presentation benchmark cycles=%d presented=%d expanded=%d expandedMinHeight=%.2f frameP95=%.2fms frameP99=%.2fms frameMax=%.2fms latencyP95=%.2fms latencyMax=%.2fms",
             cycles,
             firstFrameLatencies.count,
+            expandedContentHeights.count,
+            expandedContentHeights.min() ?? 0,
             percentile(frameMilliseconds, 0.95),
             percentile(frameMilliseconds, 0.99),
             frameMilliseconds.last ?? 0,

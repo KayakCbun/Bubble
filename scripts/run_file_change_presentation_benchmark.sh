@@ -10,6 +10,7 @@ MAX_FRAME_P95_MS="${BUBBLE_FILE_CHANGE_MAX_FRAME_P95_MS:-17}"
 MAX_FRAME_P99_MS="${BUBBLE_FILE_CHANGE_MAX_FRAME_P99_MS:-34}"
 MAX_LATENCY_P95_MS="${BUBBLE_FILE_CHANGE_MAX_LATENCY_P95_MS:-25}"
 FILES="${BUBBLE_FILE_CHANGE_FILES:-1}"
+MIN_EXPANDED_HEIGHT="${BUBBLE_FILE_CHANGE_MIN_EXPANDED_HEIGHT:-20}"
 
 if [[ ! -x "$APP_BIN" ]]; then
   echo "FAIL: build Bubble first with ./scripts/package.sh" >&2
@@ -66,12 +67,25 @@ if [[ -z "$benchmark_line" ]]; then
 fi
 
 presented="$(sed -E 's/.* presented=([0-9]+).*/\1/' <<<"$benchmark_line")"
+expanded="$(sed -E 's/.* expanded=([0-9]+).*/\1/' <<<"$benchmark_line")"
+expanded_min_height="$(sed -E 's/.* expandedMinHeight=([0-9.]+).*/\1/' <<<"$benchmark_line")"
 frame_p95="$(sed -E 's/.* frameP95=([0-9.]+)ms.*/\1/' <<<"$benchmark_line")"
 frame_p99="$(sed -E 's/.* frameP99=([0-9.]+)ms.*/\1/' <<<"$benchmark_line")"
 latency_p95="$(sed -E 's/.* latencyP95=([0-9.]+)ms.*/\1/' <<<"$benchmark_line")"
 
 if (( presented != CYCLES )); then
   echo "FAIL: only $presented of $CYCLES file change toggles presented" >&2
+  echo "$benchmark_line" >&2
+  exit 1
+fi
+expected_expansions=$(((CYCLES + 1) / 2))
+if (( expanded != expected_expansions )); then
+  echo "FAIL: only $expanded of $expected_expansions expansions exposed measurable content" >&2
+  echo "$benchmark_line" >&2
+  exit 1
+fi
+if ! awk -v actual="$expanded_min_height" -v limit="$MIN_EXPANDED_HEIGHT" 'BEGIN { exit !(actual >= limit) }'; then
+  echo "FAIL: expanded file content height ${expanded_min_height}pt is below ${MIN_EXPANDED_HEIGHT}pt" >&2
   echo "$benchmark_line" >&2
   exit 1
 fi

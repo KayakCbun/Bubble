@@ -2594,7 +2594,10 @@ struct OverlayView: View {
     }
 
     private func fileChangesCard(_ summary: FileChangeSummary) -> some View {
-        FileChangeCardExpansionHost(id: summary.id) { expanded, toggle in
+        FileChangeCardExpansionHost(
+            id: summary.id,
+            animatesExpansion: summary.files.count <= 20
+        ) { expanded, toggle in
             fileChangesCardContent(summary, expanded: expanded, toggle: toggle)
         }
     }
@@ -2654,15 +2657,15 @@ struct OverlayView: View {
                 Rectangle()
                     .fill(OverlaySurface.hairline)
                     .frame(height: 0.5)
-                VStack(alignment: .leading, spacing: 8) {
-                    ForEach(summary.groups) { group in
-                        FileChangeFolderBlock(group: group, plus: plus, minus: minus) { file in
-                            openChangedFile(file, workspaceRoot: summary.workspaceRoot)
-                        }
+                if summary.files.count > 20 {
+                    ScrollView {
+                        fileChangeGroups(summary, plus: plus, minus: minus)
                     }
+                    .scrollIndicators(.never)
+                    .frame(height: 360)
+                } else {
+                    fileChangeGroups(summary, plus: plus, minus: minus)
                 }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
             }
         }
         .background(
@@ -2687,6 +2690,22 @@ struct OverlayView: View {
                 .font(.system(size: 12, weight: .medium).monospacedDigit())
                 .foregroundStyle(minus)
         }
+    }
+
+    private func fileChangeGroups(
+        _ summary: FileChangeSummary,
+        plus: Color,
+        minus: Color
+    ) -> some View {
+        LazyVStack(alignment: .leading, spacing: 8) {
+            ForEach(summary.groups) { group in
+                FileChangeFolderBlock(group: group, plus: plus, minus: minus) { file in
+                    openChangedFile(file, workspaceRoot: summary.workspaceRoot)
+                }
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
     }
 
     private func openChangedFile(_ file: FileChange, workspaceRoot: String? = nil) {
@@ -2748,14 +2767,17 @@ private struct QuoteChipLayer: View {
 
 private struct FileChangeCardExpansionHost<Content: View>: View {
     let id: String
+    let animatesExpansion: Bool
     let content: (Bool, FileChangeCardToggleAction) -> Content
     @State private var expanded = false
 
     init(
         id: String,
+        animatesExpansion: Bool,
         @ViewBuilder content: @escaping (Bool, FileChangeCardToggleAction) -> Content
     ) {
         self.id = id
+        self.animatesExpansion = animatesExpansion
         self.content = content
     }
 
@@ -2770,8 +2792,15 @@ private struct FileChangeCardExpansionHost<Content: View>: View {
     }
 
     private func toggle() {
-        withAnimation(OverlayMotion.snappy) {
+        let mutation = {
             expanded.toggle()
+        }
+        if animatesExpansion {
+            withAnimation(OverlayMotion.snappy, mutation)
+        } else {
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction, mutation)
         }
         NotificationCenter.default.post(
             name: .fileChangeExpansionChanged,
@@ -2799,18 +2828,10 @@ private struct FileChangeCardToggleAction {
     }
 }
 
-private struct FileChangeTreeHeightKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
-    }
-}
-
 private struct FileChangeTreeReveal<Content: View>: View {
     let expanded: Bool
     let content: Content
-    @State private var naturalHeight: CGFloat = 0
+    @State private var presentedHeight: CGFloat = 0
 
     init(expanded: Bool, @ViewBuilder content: () -> Content) {
         self.expanded = expanded
@@ -2818,29 +2839,99 @@ private struct FileChangeTreeReveal<Content: View>: View {
     }
 
     var body: some View {
-        content
-            .fixedSize(horizontal: false, vertical: true)
-            .background {
+        FileChangeTreeRevealLayout(expanded: expanded) {
+            content
+        }
+        .clipped()
+        .opacity(expanded ? 1 : 0)
+        .allowsHitTesting(expanded)
+        .accessibilityHidden(!expanded)
+        .background {
+            if ProcessInfo.processInfo.environment["BUBBLE_FILE_CHANGE_DIAGNOSTICS"] == "1" {
                 GeometryReader { geometry in
-                    Color.clear.preference(
-                        key: FileChangeTreeHeightKey.self,
-                        value: geometry.size.height
-                    )
+                    Color.clear
+                        .onAppear { presentedHeight = geometry.size.height }
+                        .onChange(of: geometry.size.height) { _, height in
+                            presentedHeight = height
+                        }
                 }
             }
-            .frame(height: expanded ? naturalHeight : 0, alignment: .top)
-            .clipped()
-            .opacity(expanded ? 1 : 0)
-            .allowsHitTesting(expanded)
-            .accessibilityHidden(!expanded)
-            .onPreferenceChange(FileChangeTreeHeightKey.self) { height in
-                guard height > 0, abs(height - naturalHeight) > 0.25 else { return }
-                var transaction = Transaction()
-                transaction.disablesAnimations = true
-                withTransaction(transaction) {
-                    naturalHeight = height
-                }
+        }
+        .onChange(of: expanded) { _, isExpanded in
+            guard isExpanded,
+                  ProcessInfo.processInfo.environment["BUBBLE_FILE_CHANGE_DIAGNOSTICS"] == "1" else {
+                return
             }
+            reportPresentedHeight(attempt: 0)
+        }
+    }
+
+    private func reportPresentedHeight(attempt: Int) {
+        OverlayPulse.shared.onNextFrame {
+            if presentedHeight >= 20 || attempt >= 2 {
+                NotificationCenter.default.post(
+                    name: .fileChangeDiagnosticContentMeasured,
+                    object: nil,
+                    userInfo: ["height": presentedHeight]
+                )
+            } else {
+                reportPresentedHeight(attempt: attempt + 1)
+            }
+        }
+    }
+}
+
+private struct FileChangeTreeRevealLayout: Layout {
+    var expanded: Bool
+
+    struct Cache {
+        var sizes: [CGSize] = []
+        var proposedWidth: CGFloat?
+    }
+
+    func makeCache(subviews: Subviews) -> Cache {
+        Cache()
+    }
+
+    func sizeThatFits(
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout Cache
+    ) -> CGSize {
+        if cache.sizes.count != subviews.count
+            || cache.proposedWidth.map({ abs($0 - (proposal.width ?? 0)) > 0.25 }) != false {
+            cache.sizes = subviews.map {
+                $0.sizeThatFits(ProposedViewSize(width: proposal.width, height: nil))
+            }
+            cache.proposedWidth = proposal.width
+        }
+        let width = proposal.width ?? cache.sizes.map(\.width).max() ?? 0
+        let height = cache.sizes.reduce(CGFloat.zero) { $0 + $1.height }
+        return CGSize(
+            width: width,
+            height: expanded ? height : 0
+        )
+    }
+
+    func placeSubviews(
+        in bounds: CGRect,
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout Cache
+    ) {
+        var y = bounds.minY
+        for (index, content) in subviews.enumerated() {
+            let size = cache.sizes.indices.contains(index) ? cache.sizes[index] : .zero
+            content.place(
+                at: CGPoint(x: bounds.minX, y: y),
+                anchor: .topLeading,
+                proposal: ProposedViewSize(
+                    width: bounds.width,
+                    height: size.height
+                )
+            )
+            y += size.height
+        }
     }
 }
 
