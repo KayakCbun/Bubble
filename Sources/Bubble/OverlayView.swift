@@ -72,6 +72,8 @@ struct OverlayView: View {
     @FocusState private var focused: Bool
     @State private var followState = TranscriptFollowState()
     @State private var followQueued = false
+    @State private var transcriptSurfaceCommand: AppKitTranscriptSurfaceOperation?
+    @State private var transcriptSurfaceCommandToken: UInt64 = 0
     private var inputShape: RoundedRectangle {
         RoundedRectangle(cornerRadius: OverlayMetrics.cornerRadius, style: .continuous)
     }
@@ -273,6 +275,8 @@ struct OverlayView: View {
     private func resetSessionPresentationState() {
         followState = TranscriptFollowState()
         followQueued = false
+        transcriptSurfaceCommand = nil
+        transcriptSurfaceCommandToken &+= 1
         QuoteSelectionMonitor.shared.dismiss()
     }
 
@@ -672,30 +676,7 @@ struct OverlayView: View {
     private var transcriptList: some View {
         let rows = mainTranscriptRows
         let ticks = historyTicks
-        if TranscriptStackPolicy.usesLazyStack(
-            rowCount: rows.count,
-            sourceItemCount: store.visibleItems.count
-        ) {
-            transcriptScroll(rows: rows, ticks: ticks) { proxy in
-                transcriptStackStyle(
-                    LazyVStack(alignment: .leading, spacing: OverlaySurface.rowSpacing) {
-                        transcriptStackContent(rows)
-                    },
-                    hasHistoryTicks: !ticks.isEmpty,
-                    proxy: proxy
-                )
-            }
-        } else {
-            transcriptScroll(rows: rows, ticks: ticks) { proxy in
-                transcriptStackStyle(
-                    VStack(alignment: .leading, spacing: OverlaySurface.rowSpacing) {
-                        transcriptStackContent(rows)
-                    },
-                    hasHistoryTicks: !ticks.isEmpty,
-                    proxy: proxy
-                )
-            }
-        }
+        transcriptAppKitScroll(rows: rows, ticks: ticks)
     }
 
     private func transcriptScroll<Content: View>(
@@ -809,6 +790,405 @@ struct OverlayView: View {
                 }
             }
         }
+    }
+
+    /// AppKit owns the scroll viewport and the reusable row window.  SwiftUI
+    /// still owns each mounted row's rich content, so Markdown, media,
+    /// branches, tool/file cards, selection, and custom environment actions
+    /// remain exactly the same views users saw in the old stack.
+    @ViewBuilder
+    private func transcriptAppKitScroll(
+        rows: [MainTranscriptRenderRow],
+        ticks: [HistoryTick]
+    ) -> some View {
+        let entries = appKitTranscriptEntries(rows)
+        let snapshot = TranscriptSurfaceSnapshot(
+            session: TranscriptSessionHandle(
+                sessionID: store.runtimeID.uuidString,
+                generation: 0,
+                revision: store.transcriptRevision
+            ),
+            rows: entries.map(\.snapshot),
+            followsLatest: followState.followsLatest
+        )
+        let surfaceSignal = appKitTranscriptSurfaceSignal(snapshot)
+        OverlayTranscriptSurfaceRepresentable(
+            snapshot: snapshot,
+            entries: entries,
+            viewportSize: NSSize(width: chatWidth, height: transcriptHeight),
+            leadingInset: ticks.isEmpty ? OverlayMetrics.transcriptInset : HistoryLimits.gutter + 16,
+            surfaceSignal: surfaceSignal,
+            command: transcriptSurfaceCommand,
+            commandToken: transcriptSurfaceCommandToken,
+            onOpenFilePreview: { path in
+                store.openFilePreview(path)
+            },
+            onViewportChanged: { atEnd, userDriven in
+                if userDriven {
+                    // The adapter invokes this before AppKit applies the
+                    // wheel delta.  Detach immediately; the following neutral
+                    // bounds callback will not re-enter the policy.  A
+                    // post-wheel user callback carries the actual atEnd state
+                    // and can restore following when the wheel reaches tail.
+                    followQueued = false
+                    if atEnd {
+                        var next = followState
+                        if next.viewportChanged(atEnd: true, userDriven: true) {
+                            followState = next
+                            transcriptSurfaceCommand = .setFollowLatest(true)
+                            transcriptSurfaceCommandToken &+= 1
+                        }
+                    } else {
+                        followState.userNavigated(atEnd: false)
+                    }
+                    NotificationCenter.default.post(
+                        name: .transcriptUserScrollStarted,
+                        object: nil
+                    )
+                } else if followState.historyNavigationTargetID == nil {
+                    // Bounds changes are intentionally passive.  They keep the
+                    // end chip's state observable without interpreting window
+                    // resize or measurement clamps as user intent.
+                    _ = atEnd
+                }
+            },
+            onCommandCompleted: { operation, atEnd in
+                switch operation {
+                case .scrollToEnd:
+                    followState.resumeAtEnd()
+                case let .reveal(rowID, _):
+                    var next = followState
+                    var changed = next.finishHistoryNavigation(targetID: rowID, atEnd: atEnd)
+                    if next.followingTurnTargetID == rowID {
+                        changed = next.finishFollowingTurn(targetID: rowID) || changed
+                        if changed {
+                            transcriptSurfaceCommand = .scrollToEnd(animated: false)
+                            transcriptSurfaceCommandToken &+= 1
+                        }
+                    }
+                    if changed {
+                        followState = next
+                    }
+                    NotificationCenter.default.post(
+                        name: .transcriptHistoryNavigationSettled,
+                        object: nil,
+                        userInfo: [
+                            TranscriptViewportUserInfoKey.targetID: rowID,
+                            TranscriptViewportUserInfoKey.atEnd: atEnd
+                        ]
+                    )
+                case let .setFollowLatest(enabled):
+                    if enabled {
+                        followState.resumeAtEnd()
+                    } else {
+                        followState.userNavigated(atEnd: false)
+                    }
+                case .invalidate:
+                    break
+                }
+            }
+        )
+        .id("transcript-surface-\(store.runtimeID.uuidString)")
+        .overlay {
+            if store.isStartingSession {
+                ProgressView()
+                    .controlSize(.small)
+                    .accessibilityLabel("Starting Bubble")
+            }
+        }
+        .overlay(alignment: .leading) {
+            if !ticks.isEmpty {
+                HistoryTickRail(ticks: ticks, viewportHeight: transcriptHeight) { id in
+                    followState.beginHistoryNavigation(targetID: id.uuidString)
+                    transcriptSurfaceCommand = .reveal(rowID: id.uuidString, animated: false)
+                    transcriptSurfaceCommandToken &+= 1
+                }
+            }
+        }
+        .overlay(alignment: .bottom) {
+            if followState.showsScrollToEnd {
+                ScrollToEndChip {
+                    followState.beginScrollToEnd()
+                    transcriptSurfaceCommand = .scrollToEnd(animated: false)
+                    transcriptSurfaceCommandToken &+= 1
+                    restoreFocus()
+                }
+                .padding(.bottom, 10)
+            }
+        }
+        .onAppear {
+            if followState.followsLatest {
+                transcriptSurfaceCommand = .scrollToEnd(animated: false)
+                transcriptSurfaceCommandToken &+= 1
+            }
+            if let targetID = ProcessInfo.processInfo.environment[
+                "BUBBLE_HISTORY_NAVIGATION_AUDIT_TARGET"
+            ], !targetID.isEmpty {
+                followState.beginHistoryNavigation(targetID: targetID)
+                transcriptSurfaceCommand = .reveal(rowID: targetID, animated: false)
+                transcriptSurfaceCommandToken &+= 1
+            }
+        }
+        .onChange(of: store.runtimeID) { _, _ in
+            transcriptSurfaceCommand = nil
+            transcriptSurfaceCommandToken &+= 1
+        }
+        .onChange(of: store.transcriptRevision) { _, _ in
+            // The snapshot's revision drives row application.  Keep a
+            // following viewport at the tail after each streamed revision;
+            // detached users remain on their current anchor.
+            if followState.followsLatest {
+                transcriptSurfaceCommand = .scrollToEnd(animated: false)
+                transcriptSurfaceCommandToken &+= 1
+            }
+        }
+        .onChange(of: store.items.count) { _, _ in
+            guard let item = store.items.last, item.kind == .user else { return }
+            followState.beginFollowingTurn(targetID: item.id.uuidString)
+            transcriptSurfaceCommand = .reveal(rowID: item.id.uuidString, animated: false)
+            transcriptSurfaceCommandToken &+= 1
+        }
+        .onChange(of: store.isBusy) { wasBusy, isBusy in
+            guard wasBusy, !isBusy, followState.followsLatest else { return }
+            // A turn may settle after its final content revision.  If the
+            // user stayed at the tail, make the end position explicit; a
+            // detached viewport remains untouched.
+            if followState.followingTurnTargetID == nil {
+                transcriptSurfaceCommand = .scrollToEnd(animated: false)
+                transcriptSurfaceCommandToken &+= 1
+            }
+        }
+        .onChange(of: store.resumeDestination.prompt?.sessionID) { _, sessionID in
+            guard sessionID != nil else { return }
+            transcriptSurfaceCommand = .reveal(rowID: "resume-destination", animated: false)
+            transcriptSurfaceCommandToken &+= 1
+        }
+        .onChange(of: store.branchDraft?.sourceItemID) { _, sourceID in
+            guard let sourceID else { return }
+            followState.userNavigated(atEnd: false)
+            transcriptSurfaceCommand = .reveal(rowID: sourceID.uuidString, animated: false)
+            transcriptSurfaceCommandToken &+= 1
+        }
+        .onChange(of: composerHeight) { _, _ in
+            if followState.followsLatest {
+                transcriptSurfaceCommand = .scrollToEnd(animated: false)
+                transcriptSurfaceCommandToken &+= 1
+            }
+        }
+    }
+
+    private func appKitTranscriptEntries(
+        _ rows: [MainTranscriptRenderRow]
+    ) -> [OverlayTranscriptSurfaceEntry] {
+        var entries: [OverlayTranscriptSurfaceEntry] = []
+        entries.reserveCapacity(rows.count + 6)
+
+        // The old SwiftUI stack applied a transcript-wide top inset.  Keep it
+        // as a real document row so AppKit's height index and history anchors
+        // see the same coordinate origin.
+        entries.append(OverlayTranscriptSurfaceEntry(
+            snapshot: appKitTranscriptSnapshot(
+                id: "transcript-top-spacer",
+                kind: .other,
+                text: nil,
+                estimatedHeight: OverlayMetrics.transcriptInset,
+                fingerprint: "transcript-top-spacer-v1"
+            ),
+            render: { AnyView(Color.clear.frame(height: OverlayMetrics.transcriptInset)) }
+        ))
+
+        if store.hasEarlierTranscriptItems {
+            entries.append(OverlayTranscriptSurfaceEntry(
+                snapshot: appKitTranscriptSnapshot(
+                    id: "load-earlier-transcript",
+                    kind: .system,
+                    text: "Load earlier conversation turns",
+                    estimatedHeight: 44,
+                    fingerprint: "load-earlier-v1"
+                ),
+                render: { [self] in AnyView(loadEarlierTranscriptButton) }
+            ))
+        }
+        if store.lastTurnDuration >= 1, !store.isBusy {
+            let duration = store.lastTurnDuration
+            entries.append(OverlayTranscriptSurfaceEntry(
+                snapshot: appKitTranscriptSnapshot(
+                    id: "worked-header",
+                    kind: .system,
+                    text: "Worked for \(formatDuration(duration))",
+                    estimatedHeight: 40,
+                    fingerprint: "worked-\(duration)"
+                ),
+                render: { [self] in AnyView(workedHeader(duration)) }
+            ))
+        }
+
+        for row in rows {
+            if row.startsAfterBranchPoint {
+                let dividerID = "branch-divider-\(row.id)"
+                entries.append(OverlayTranscriptSurfaceEntry(
+                    snapshot: appKitTranscriptSnapshot(
+                        id: dividerID,
+                        kind: .system,
+                        text: "Later messages stay on the original path",
+                        estimatedHeight: 28,
+                        fingerprint: dividerID
+                    ),
+                    render: { [self] in AnyView(branchCutoverDivider) }
+                ))
+            }
+            let key = mainRowRenderKey(row)
+            let fingerprint = String(describing: key)
+            entries.append(OverlayTranscriptSurfaceEntry(
+                snapshot: appKitTranscriptSnapshot(
+                    id: row.id,
+                    kind: appKitTranscriptRowKind(row),
+                    text: row.text,
+                    estimatedHeight: appKitTranscriptEstimatedHeight(row.text),
+                    fingerprint: fingerprint,
+                    isCompleted: row.isTerminal && !row.isStreaming
+                ),
+                render: { [self] in
+                    AnyView(
+                        TranscriptSelectionScope {
+                            mainTranscriptRow(row)
+                                .background {
+                                    if row.id == row.historyTickID {
+                                        TranscriptRowAnchor(
+                                            id: row.id,
+                                            historyTickID: row.historyTickID
+                                        )
+                                    }
+                                }
+                                .padding(.top, row.isContinuation ? -10 : 0)
+                                .opacity(row.isAfterBranchPoint ? 0.34 : 1)
+                        }
+                        .environment(\.openFilePreview) { path in
+                            store.openFilePreview(path)
+                        }
+                        .foregroundStyle(OverlaySurface.conversationInk)
+                    )
+                }
+            ))
+        }
+
+        if let prompt = store.resumeDestination.prompt {
+            entries.append(OverlayTranscriptSurfaceEntry(
+                snapshot: appKitTranscriptSnapshot(
+                    id: "resume-destination",
+                    kind: .system,
+                    text: "Resume session \(prompt.sessionID)",
+                    estimatedHeight: 72,
+                    fingerprint: String(describing: prompt),
+                    isCompleted: false
+                ),
+                render: { [self] in
+                    AnyView(ResumeDestinationCard(
+                        prompt: prompt,
+                        choose: store.resolveResumeDestination
+                    ))
+                }
+            ))
+        }
+        if store.isBusy {
+            let startedAt = store.turnStartedAt ?? Date()
+            entries.append(OverlayTranscriptSurfaceEntry(
+                snapshot: appKitTranscriptSnapshot(
+                    id: "working",
+                    kind: .system,
+                    text: "Working",
+                    estimatedHeight: 30,
+                    fingerprint: "working-v1",
+                    isCompleted: false
+                ),
+                render: { AnyView(WorkingRow(startedAt: startedAt)) }
+            ))
+        }
+        for message in store.queuedMessages {
+            entries.append(OverlayTranscriptSurfaceEntry(
+                snapshot: appKitTranscriptSnapshot(
+                    id: "waiting-\(message.id.uuidString)",
+                    kind: .user,
+                    text: message.text,
+                    estimatedHeight: appKitTranscriptEstimatedHeight(message.text) + 34,
+                    fingerprint: String(describing: message),
+                    isCompleted: false
+                ),
+                render: { [self] in AnyView(queuedUserBubble(message)) }
+            ))
+        }
+        entries.append(OverlayTranscriptSurfaceEntry(
+            snapshot: appKitTranscriptSnapshot(
+                id: "transcript-end",
+                kind: .other,
+                text: nil,
+                estimatedHeight: OverlayMetrics.transcriptCornerRadius,
+                fingerprint: "transcript-end-v1"
+            ),
+            render: { AnyView(Color.clear.frame(height: OverlayMetrics.transcriptCornerRadius)) }
+        ))
+        return entries
+    }
+
+    private func appKitTranscriptSnapshot(
+        id: String,
+        kind: TranscriptRowKind,
+        text: String?,
+        estimatedHeight: CGFloat,
+        fingerprint: String,
+        isCompleted: Bool = true
+    ) -> TranscriptRowSnapshot {
+        let hash = TranscriptRowSnapshot.stableHash(fingerprint)
+        return TranscriptRowSnapshot(
+            id: id,
+            contentVersion: UInt64(hash, radix: 16) ?? 0,
+            contentHash: hash,
+            estimatedHeight: estimatedHeight,
+            isCompleted: isCompleted,
+            kind: kind,
+            text: text
+        )
+    }
+
+    private func appKitTranscriptSurfaceSignal(_ snapshot: TranscriptSurfaceSnapshot) -> UInt64 {
+        var value: UInt64 = 14_695_981_039_346_656_037
+        func mix(_ byte: UInt8) {
+            value ^= UInt64(byte)
+            value &*= 1_099_511_628_211
+        }
+        for byte in snapshot.session.revision.description.utf8 { mix(byte) }
+        mix(snapshot.followsLatest ? 1 : 0)
+        for row in snapshot.rows {
+            for byte in row.id.utf8 { mix(byte) }
+            for byte in row.contentVersion.description.utf8 { mix(byte) }
+            mix(0)
+        }
+        return value
+    }
+
+    private func appKitTranscriptRowKind(_ row: MainTranscriptRenderRow) -> TranscriptRowKind {
+        switch row.source {
+        case .message(let item):
+            switch item.kind {
+            case .user: return .user
+            case .assistant: return .assistant
+            case .thought, .system: return .system
+            case .workspaceRun: return .other
+            case .tool: return .tool
+            }
+        case .tool:
+            return .tool
+        case .collapsedTools:
+            return .tool
+        case .fileChanges:
+            return .system
+        }
+    }
+
+    private func appKitTranscriptEstimatedHeight(_ text: String) -> CGFloat {
+        let lineCount = max(1, text.split(whereSeparator: \.isNewline).count)
+        let roughLines = min(18, max(lineCount, Int(ceil(Double(text.count) / 92.0))))
+        return max(42, min(420, CGFloat(roughLines) * 19 + 26))
     }
 
     private func transcriptStackStyle<Content: View>(
@@ -3552,6 +3932,317 @@ private struct MainTranscriptRenderRow: Identifiable {
     var startsAfterBranchPoint: Bool { unit.startsAfterBranchPoint }
     var isAssistantChunk: Bool {
         unit.kind == .assistant && unit.isChunked
+    }
+}
+
+private struct OverlayTranscriptSurfaceEntry {
+    let snapshot: TranscriptRowSnapshot
+    let render: () -> AnyView
+}
+
+private final class OverlayTranscriptRenderBox {
+    private var renderers: [String: () -> AnyView] = [:]
+    var decorator: ((_ rowID: String, _ content: AnyView) -> AnyView)?
+    var onMeasuredHeight: ((_ rowID: String, _ height: CGFloat) -> Void)?
+
+    func update(entries: [OverlayTranscriptSurfaceEntry]) {
+        renderers = Dictionary(uniqueKeysWithValues: entries.map { ($0.snapshot.id, $0.render) })
+    }
+
+    func render(rowID: String) -> AnyView {
+        let content = renderers[rowID]?() ?? AnyView(EmptyView())
+        return decorator?(rowID, content) ?? content
+    }
+}
+
+private final class OverlayTranscriptRowHost: AppKitTranscriptRowHost {
+    private let hostingView: NSHostingView<AnyView>
+    private let rootFactory: (TranscriptRowSnapshot) -> AnyView
+    private let onMeasuredHeight: (String, CGFloat) -> Void
+    private var lastMeasuredHeight: CGFloat = -.greatestFiniteMagnitude
+
+    init(
+        row: TranscriptRowSnapshot,
+        key: AppKitTranscriptRowReuseKey,
+        rootFactory: @escaping (TranscriptRowSnapshot) -> AnyView,
+        onMeasuredHeight: @escaping (String, CGFloat) -> Void
+    ) {
+        self.rootFactory = rootFactory
+        self.onMeasuredHeight = onMeasuredHeight
+        self.hostingView = NSHostingView(rootView: rootFactory(row))
+        super.init(row: row, key: key)
+
+        // The base host retains a plain-text fallback for deterministic
+        // standalone checks.  Production rows cover it with the rich hosting
+        // view; hiding the fallback avoids double text while keeping the
+        // subclass independent of the base class's private label.
+        subviews.first?.isHidden = true
+        hostingView.translatesAutoresizingMaskIntoConstraints = true
+        hostingView.appearance = NSApp.effectiveAppearance
+        addSubview(hostingView)
+    }
+
+    override func configure(row: TranscriptRowSnapshot, key: AppKitTranscriptRowReuseKey) {
+        super.configure(row: row, key: key)
+        subviews.first?.isHidden = true
+        hostingView.rootView = rootFactory(row)
+        hostingView.appearance = NSApp.effectiveAppearance
+        lastMeasuredHeight = -.greatestFiniteMagnitude
+        invalidateIntrinsicContentSize()
+        needsLayout = true
+    }
+
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        // Drop the old SwiftUI tree while this pooled cell is detached.  This
+        // releases images, Markdown storage, and store-capturing closures
+        // across session switches instead of retaining up to 144 stale rows.
+        hostingView.rootView = AnyView(EmptyView())
+        lastMeasuredHeight = -.greatestFiniteMagnitude
+    }
+
+    override func layout() {
+        super.layout()
+        hostingView.frame = bounds
+        hostingView.layoutSubtreeIfNeeded()
+        let fittingHeight = hostingView.fittingSize.height
+        guard fittingHeight.isFinite, fittingHeight > 0 else { return }
+        let measuredHeight = max(1, fittingHeight)
+        guard abs(measuredHeight - lastMeasuredHeight) > 0.5 else { return }
+        lastMeasuredHeight = measuredHeight
+        onMeasuredHeight(row.id, measuredHeight)
+    }
+
+    override var intrinsicContentSize: NSSize {
+        let fitting = hostingView.fittingSize
+        return NSSize(
+            width: NSView.noIntrinsicMetric,
+            height: max(1, fitting.height.isFinite ? fitting.height : 1)
+        )
+    }
+}
+
+private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
+    let snapshot: TranscriptSurfaceSnapshot
+    let entries: [OverlayTranscriptSurfaceEntry]
+    let viewportSize: NSSize
+    let leadingInset: CGFloat
+    let surfaceSignal: UInt64
+    let command: AppKitTranscriptSurfaceOperation?
+    let commandToken: UInt64
+    let onOpenFilePreview: (String) -> Void
+    let onViewportChanged: (_ atEnd: Bool, _ userDriven: Bool) -> Void
+    let onCommandCompleted: (_ operation: AppKitTranscriptSurfaceOperation, _ atEnd: Bool) -> Void
+
+    final class Coordinator {
+        let renderBox: OverlayTranscriptRenderBox
+        let adapter: AppKitTranscriptSurfaceAdapter
+        private var diagnosticsProbe: TranscriptScrollProbe?
+        private var viewportHandler: ((_ atEnd: Bool, _ userDriven: Bool) -> Void)?
+        var lastCommandToken: UInt64 = 0
+        var lastSurfaceSignal: UInt64?
+
+        init(snapshot: TranscriptSurfaceSnapshot) {
+            let box = OverlayTranscriptRenderBox()
+            self.renderBox = box
+            let emptySnapshot = TranscriptSurfaceSnapshot(
+                session: snapshot.session,
+                rows: [],
+                followsLatest: snapshot.followsLatest
+            )
+            self.adapter = AppKitTranscriptSurfaceAdapter(
+                // Do not mount before the render box receives entries.  An
+                // initial full snapshot would create EmptyView hosts whose
+                // content identity then appears stable and would never be
+                // configured with the real SwiftUI rows.
+                snapshot: emptySnapshot,
+                overscan: 720,
+                maximumMountedRows: 96,
+                maximumReusableHosts: 144,
+                renderer: { row, key in
+                    OverlayTranscriptRowHost(
+                        row: row,
+                        key: key,
+                        rootFactory: { [weak box] row in
+                            box?.render(rowID: row.id) ?? AnyView(EmptyView())
+                        },
+                        onMeasuredHeight: { [weak box] rowID, height in
+                            box?.onMeasuredHeight?(rowID, height)
+                        }
+                    )
+                }
+            )
+            if ProcessInfo.processInfo.environment["BUBBLE_SCROLL_DIAGNOSTICS"] != nil,
+               let document = adapter.scrollView.documentView {
+                let probe = TranscriptScrollProbe(frame: .zero)
+                probe.autoresizingMask = [.width, .height]
+                probe.onChange = { [weak self] atEnd, userDriven in
+                    self?.viewportHandler?(atEnd, userDriven)
+                }
+                document.addSubview(probe)
+                diagnosticsProbe = probe
+            }
+        }
+
+        func configureCallbacks(
+            onOpenFilePreview: @escaping (String) -> Void,
+            onViewportChanged: @escaping (_ atEnd: Bool, _ userDriven: Bool) -> Void,
+            onCommandCompleted: @escaping (_ operation: AppKitTranscriptSurfaceOperation, _ atEnd: Bool) -> Void
+        ) {
+            // The rich row closures already carry the current store's
+            // openFilePreview environment.  Keep this callback parameter in
+            // the bridge so future extracted rows can use the same seam.
+            _ = onOpenFilePreview
+            viewportHandler = { [weak self] atEnd, userDriven in
+                guard let self else { return }
+                if userDriven {
+                    // Physical wheel input must detach before the event is
+                    // applied; this path intentionally remains synchronous.
+                    onViewportChanged(atEnd, true)
+                } else {
+                    // AppKit layout/resize callbacks never mutate SwiftUI
+                    // state during representable updates.
+                    DispatchQueue.main.async { [weak self] in
+                        guard self != nil else { return }
+                        onViewportChanged(atEnd, false)
+                    }
+                }
+            }
+            adapter.onViewportChanged = { [weak self] atEnd, userDriven in
+                self?.viewportHandler?(atEnd, userDriven)
+            }
+            renderBox.onMeasuredHeight = { [weak self] rowID, height in
+                guard let self, self.adapter.updateMeasuredHeight(rowID: rowID, height: height) else {
+                    return
+                }
+                // A measurement can move the clip origin or tail immediately;
+                // report it through the neutral viewport path on the next
+                // AppKit pass without mutating SwiftUI during layout.
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    onViewportChanged(self.adapter.contentOffsetY >= max(
+                        0,
+                        self.adapter.currentHeightIndex.totalHeight - self.adapter.scrollView.contentView.bounds.height - 1
+                    ), false)
+                }
+            }
+        }
+
+        func update(
+            snapshot: TranscriptSurfaceSnapshot,
+            entries: [OverlayTranscriptSurfaceEntry],
+            viewportSize: NSSize,
+            leadingInset: CGFloat,
+            surfaceSignal: UInt64,
+            command: AppKitTranscriptSurfaceOperation?,
+            commandToken: UInt64,
+            onOpenFilePreview: @escaping (String) -> Void,
+            onViewportChanged: @escaping (_ atEnd: Bool, _ userDriven: Bool) -> Void,
+            onCommandCompleted: @escaping (_ operation: AppKitTranscriptSurfaceOperation, _ atEnd: Bool) -> Void
+        ) {
+            renderBox.update(entries: entries)
+            renderBox.decorator = { rowID, content in
+                guard rowID != "transcript-top-spacer", rowID != "transcript-end" else {
+                    return content
+                }
+                return AnyView(
+                    content
+                        .padding(.leading, leadingInset)
+                        .padding(.trailing, OverlayMetrics.transcriptInset)
+                        .padding(.bottom, OverlaySurface.rowSpacing)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .foregroundStyle(OverlaySurface.conversationInk)
+                )
+            }
+            configureCallbacks(
+                onOpenFilePreview: onOpenFilePreview,
+                onViewportChanged: onViewportChanged,
+                onCommandCompleted: onCommandCompleted
+            )
+            adapter.setViewportSize(viewportSize)
+            diagnosticsProbe?.frame = adapter.scrollView.documentView?.bounds ?? .zero
+
+            let current = adapter.currentHandle
+            let surfaceChanged = lastSurfaceSignal != surfaceSignal
+            if surfaceChanged {
+                // Store revisions are a change signal, not the adapter's
+                // ordering authority: auxiliary rows (working/queued/resume)
+                // can change without a transcriptRevision bump.  Allocate a
+                // strictly newer local revision for every changed surface.
+                let nextRevision = max(
+                    current.revision == UInt64.max ? current.revision : current.revision + 1,
+                    snapshot.session.revision
+                )
+                let localSnapshot = TranscriptSurfaceSnapshot(
+                    session: TranscriptSessionHandle(
+                        sessionID: snapshot.session.sessionID,
+                        generation: snapshot.session.generation,
+                        revision: nextRevision
+                    ),
+                    rows: snapshot.rows,
+                    followsLatest: snapshot.followsLatest
+                )
+                if snapshot.session.sessionID == current.sessionID {
+                    _ = adapter.apply(.replace(snapshot: localSnapshot))
+                }
+                lastSurfaceSignal = surfaceSignal
+            }
+            diagnosticsProbe?.frame = adapter.scrollView.documentView?.bounds ?? .zero
+
+            guard commandToken != lastCommandToken, let command else { return }
+            lastCommandToken = commandToken
+            _ = adapter.perform(command)
+            // Never mutate SwiftUI state while NSViewRepresentable is being
+            // updated.  A token guard drops a completion from a superseded
+            // command (for example a follow request immediately followed by a
+            // session replacement).
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.lastCommandToken == commandToken else { return }
+                let atEnd = abs(
+                    self.adapter.contentOffsetY - max(
+                        0,
+                        self.adapter.currentHeightIndex.totalHeight - self.adapter.scrollView.contentView.bounds.height
+                    )
+                ) <= 1
+                onCommandCompleted(command, atEnd)
+            }
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(snapshot: snapshot)
+    }
+
+    func makeNSView(context: Context) -> AppKitTranscriptScrollView {
+        context.coordinator.update(
+            snapshot: snapshot,
+            entries: entries,
+            viewportSize: viewportSize,
+            leadingInset: leadingInset,
+            surfaceSignal: surfaceSignal,
+            command: command,
+            commandToken: commandToken,
+            onOpenFilePreview: onOpenFilePreview,
+            onViewportChanged: onViewportChanged,
+            onCommandCompleted: onCommandCompleted
+        )
+        return context.coordinator.adapter.scrollView
+    }
+
+    func updateNSView(_ nsView: AppKitTranscriptScrollView, context: Context) {
+        _ = nsView
+        context.coordinator.update(
+            snapshot: snapshot,
+            entries: entries,
+            viewportSize: viewportSize,
+            leadingInset: leadingInset,
+            surfaceSignal: surfaceSignal,
+            command: command,
+            commandToken: commandToken,
+            onOpenFilePreview: onOpenFilePreview,
+            onViewportChanged: onViewportChanged,
+            onCommandCompleted: onCommandCompleted
+        )
     }
 }
 

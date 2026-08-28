@@ -255,10 +255,12 @@ struct AppKitTranscriptSurfaceMetrics {
 /// whether the event is user-driven or programmatic.
 final class AppKitTranscriptScrollView: NSScrollView {
     var onUserScroll: (() -> Void)?
+    var onUserScrollDidApply: (() -> Void)?
 
     override func scrollWheel(with event: NSEvent) {
         onUserScroll?()
         super.scrollWheel(with: event)
+        onUserScrollDidApply?()
     }
 }
 
@@ -299,11 +301,14 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
     private var mounted: [String: AppKitTranscriptMountedCell] = [:]
     private var reusableHosts: [AppKitTranscriptRowHost] = []
     private var measuredHeights: [String: (identity: TranscriptRowIdentity, height: CGFloat)] = [:]
+    private var rowIndexByID: [String: Int] = [:]
     private var heightIndex: TranscriptHeightIndex
     private var layingOut = false
     private var followsLatest = false
     private var userDetachedFromLatest = false
     private var widthBucket: Int = 0
+    private var lastVisibleRowIDs: Set<String> = []
+    private var viewportReportQueued = false
     private(set) var metrics = AppKitTranscriptSurfaceMetrics()
 
     let scrollView: AppKitTranscriptScrollView
@@ -328,6 +333,9 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
         self.heightIndex = TranscriptHeightIndex(
             heights: (snapshot?.rows ?? []).map(\.estimatedHeight)
         )
+        self.rowIndexByID = Dictionary(
+            uniqueKeysWithValues: (snapshot?.rows ?? []).enumerated().map { ($0.element.id, $0.offset) }
+        )
         self.followsLatest = snapshot?.followsLatest ?? false
         self.scrollView = AppKitTranscriptScrollView(frame: NSRect(x: 0, y: 0, width: 640, height: 480))
         super.init()
@@ -342,6 +350,9 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
         scrollView.contentView.postsBoundsChangedNotifications = true
         scrollView.onUserScroll = { [weak self] in
             self?.userDidScroll()
+        }
+        scrollView.onUserScrollDidApply = { [weak self] in
+            self?.userScrollDidApply()
         }
 
         document = AppKitTranscriptDocumentView(frame: .zero)
@@ -389,6 +400,17 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
     var mountedRowIDs: [String] { mounted.keys.sorted() }
     var reusableHostCount: Int { reusableHosts.count }
     var currentHeightIndex: TranscriptHeightIndex { heightIndex }
+    var visibleRowIDs: [String] {
+        let viewport = scrollView.contentView.bounds
+        let range = heightIndex.rows(
+            intersecting: viewport.minY,
+            viewportHeight: viewport.height,
+            overscan: 0
+        )
+        return range.compactMap { index in
+            snapshot.rows.indices.contains(index) ? snapshot.rows[index].id : nil
+        }
+    }
 
     /// A cheap viewport helper used by deterministic checks and by the future
     /// NSViewRepresentable bridge.  It never waits for row measurement.
@@ -434,7 +456,7 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
 
     @discardableResult
     func updateMeasuredHeight(rowID: String, height: CGFloat) -> Bool {
-        guard let index = snapshot.rows.firstIndex(where: { $0.id == rowID }) else { return false }
+        guard let index = rowIndexByID[rowID], snapshot.rows.indices.contains(index) else { return false }
         let anchor = currentVisibleAnchor()
         let row = snapshot.rows[index]
         measuredHeights[rowID] = (row.contentIdentity, height)
@@ -507,6 +529,8 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
         switch operation {
         case let .scrollToEnd(animated):
             _ = animated // Always immediate: wheel input must not be overwritten.
+            userDetachedFromLatest = false
+            followsLatest = true
             scrollToEnd()
             return [.followLatestRequested(session: snapshot.session, animated: false)]
         case let .reveal(rowID, animated):
@@ -531,7 +555,7 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
     }
 
     func reveal(rowID: String) {
-        guard let index = snapshot.rows.firstIndex(where: { $0.id == rowID }) else { return }
+        guard let index = rowIndexByID[rowID], snapshot.rows.indices.contains(index) else { return }
         let top = heightIndex.offset(of: index)
         let bottom = top + (heightIndex.height(at: index) ?? 0)
         let viewportTop = contentOffsetY
@@ -560,6 +584,13 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
     func userDidScroll() {
         userDetachedFromLatest = true
         followsLatest = false
+        // The callback is intentionally sent before `super.scrollWheel` so
+        // SwiftUI can detach immediately.  The post-super callback below
+        // reports the actual end state after AppKit applies the delta.
+        onViewportChanged?(false, true)
+    }
+
+    func userScrollDidApply() {
         onViewportChanged?(isAtEnd, true)
     }
 
@@ -611,6 +642,9 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
     ) {
         let oldRows = Dictionary(uniqueKeysWithValues: oldSnapshot.rows.map { ($0.id, $0) })
         let newRows = Dictionary(uniqueKeysWithValues: newSnapshot.rows.map { ($0.id, $0) })
+        rowIndexByID = Dictionary(
+            uniqueKeysWithValues: newSnapshot.rows.enumerated().map { ($0.element.id, $0.offset) }
+        )
         for id in Array(mounted.keys) {
             guard let cell = mounted[id] else { continue }
             guard let row = newRows[id] else {
@@ -722,11 +756,12 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
             metrics.recordMount(count: 1, peak: mounted.count, reused: reused)
         }
         updateMountedFramesWithoutMounting()
+        reportVisibleRows()
     }
 
     private func updateMountedFramesWithoutMounting() {
         for (id, cell) in mounted {
-            guard let index = snapshot.rows.firstIndex(where: { $0.id == id }) else { continue }
+            guard let index = rowIndexByID[id], snapshot.rows.indices.contains(index) else { continue }
             position(cell.host, at: index)
         }
     }
@@ -743,14 +778,38 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
     private func unmount(id: String, cell: AppKitTranscriptMountedCell) {
         mounted.removeValue(forKey: id)
         cell.host.removeFromSuperview()
+        cell.host.prepareForReuse()
         if reusableHosts.count < maximumReusableHosts {
             reusableHosts.append(cell.host)
         }
         metrics.recordUnmount(count: 1)
     }
 
+    private func reportVisibleRows() {
+        let ids = Set(visibleRowIDs)
+        guard ids != lastVisibleRowIDs else { return }
+        lastVisibleRowIDs = ids
+        guard !viewportReportQueued else { return }
+        viewportReportQueued = true
+        // The rail only needs settled visibility and should never mutate
+        // SwiftUI state from inside an AppKit layout/update pass.  Coalescing
+        // to the next main turn also caps notifications at the display's
+        // natural cadence during a wheel burst.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.viewportReportQueued = false
+            NotificationCenter.default.post(
+                name: Notification.Name("BubbleTranscriptViewportChanged"),
+                object: self.scrollView,
+                userInfo: [
+                    "visibleRowIDs": self.visibleRowIDs
+                ]
+            )
+        }
+    }
+
     private func restore(_ anchor: TranscriptSurfaceAnchor) {
-        guard let index = snapshot.rows.firstIndex(where: { $0.id == anchor.rowID }) else { return }
+        guard let index = rowIndexByID[anchor.rowID], snapshot.rows.indices.contains(index) else { return }
         let next = heightIndex.offset(of: index) - anchor.offset
         setContentOffset(y: next)
     }

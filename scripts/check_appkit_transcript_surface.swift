@@ -64,7 +64,7 @@ private enum AppKitTranscriptSurfaceCheck {
         assertNear(index.offset(of: 2), 21, "prepend preserves new prefix offsets")
 
         let session = TranscriptSessionHandle(sessionID: "appkit-check", generation: 1, revision: 0)
-        let rows = (0..<240).map { row("row-" + String($0), height: 30 + CGFloat($0 % 3)) }
+        let rows = (0..<4_000).map { row("row-" + String($0), height: 30 + CGFloat($0 % 3)) }
         let initial = TranscriptSurfaceSnapshot(session: session, rows: rows, followsLatest: false)
         let adapter = AppKitTranscriptSurfaceAdapter(
             snapshot: initial,
@@ -78,6 +78,7 @@ private enum AppKitTranscriptSurfaceCheck {
         expect(adapter.mountedRowIDs.count <= 18, "mounted rows stay within the bounded pool")
         expect(!adapter.mountedRowIDs.contains("row-239"), "offscreen rows are not mounted")
         expect(adapter.metrics.mountedPeak <= 18, "mounted peak respects the configured bound")
+        expect(adapter.visibleRowIDs.count < 18, "visible row lookup stays independent of long-session row count")
 
         guard let stableID = adapter.mountedRowIDs.dropFirst(adapter.mountedRowIDs.count / 2).first,
               let stableHost = adapter.hostObjectID(rowID: stableID) else {
@@ -138,6 +139,18 @@ private enum AppKitTranscriptSurfaceCheck {
             "stable visible row host is reused",
             tolerance: 0
         )
+
+        // The post-wheel callback reports the actual end state after a user
+        // delta, allowing the follow policy to resume when the wheel reaches
+        // the tail.
+        var lastUserAtEnd = false
+        adapter.onViewportChanged = { atEnd, userDriven in
+            if userDriven { lastUserAtEnd = atEnd }
+        }
+        adapter.setContentOffset(y: adapter.currentHeightIndex.totalHeight)
+        adapter.userScrollDidApply()
+        expect(lastUserAtEnd, "post-wheel callback reports actual viewport state")
+        adapter.setContentOffset(y: 312)
 
         // Updating one visible row remounts at most that row.  Unrelated
         // visible hosts retain their object identity.
