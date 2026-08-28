@@ -30,7 +30,7 @@ struct MessageBody: View {
 
     @ViewBuilder
     private var messageParts: some View {
-        ForEach(Array(MessagePart.displayParts(text).enumerated()), id: \.offset) { _, part in
+        ForEach(Array(MessagePart.displayParts(text, completed: !streaming).enumerated()), id: \.offset) { _, part in
             switch part {
             case .markdown(let markdown):
                 if preferClassicMarkdown || PathChipStyle.needsClassicMarkdown(markdown) {
@@ -44,7 +44,7 @@ struct MessageBody: View {
                         .bubbleTextSelection()
                         .frame(maxWidth: .infinity, alignment: .leading)
                 } else {
-                    ProseDocument(text: markdown)
+                    ProseDocument(text: markdown, streaming: streaming)
                 }
             case .code(let language, let body):
                 CodeBlockView(
@@ -74,8 +74,9 @@ enum MessagePart {
     case mermaid(String)
     case math(String)
 
-    static func displayParts(_ text: String) -> [MessagePart] {
-        MessagePartCache.shared.parts(for: text) {
+    static func displayParts(_ text: String, completed: Bool = true) -> [MessagePart] {
+        guard completed else { return parseDisplayParts(text) }
+        return MessagePartCache.shared.parts(for: text) {
             parseDisplayParts(text)
         }
     }

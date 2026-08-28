@@ -218,8 +218,9 @@ enum ProseBlock: Equatable {
 }
 
 enum ProseParser {
-    static func blocks(in text: String) -> [ProseBlock] {
-        ProseBlockCache.shared.blocks(for: text) {
+    static func blocks(in text: String, completed: Bool = true) -> [ProseBlock] {
+        guard completed else { return parseBlocks(in: text) }
+        return ProseBlockCache.shared.blocks(for: text) {
             parseBlocks(in: text)
         }
     }
@@ -628,25 +629,54 @@ enum WorkspaceTranscriptWarmup {
     }
 }
 
+private enum ProseTypography {
+    static let themeVersion = 1
+    static let layoutVersion = 2
+
+    static func fingerprint(fontSize: CGFloat, weight: Double) -> ProseTypographyFingerprint {
+        ProseTypographyFingerprint(
+            fontSize: Double(fontSize),
+            weight: weight,
+            lineSpacing: Double(OverlaySurface.proseLineSpacing),
+            theme: themeVersion,
+            displayScale: Double(NSScreen.main?.backingScaleFactor ?? 2),
+            layoutVersion: layoutVersion
+        )
+    }
+
+    static var body: ProseTypographyFingerprint {
+        fingerprint(fontSize: OverlayMetrics.fontSize, weight: 400)
+    }
+
+    static func heading(level: Int) -> ProseTypographyFingerprint {
+        let size = level <= 1 ? OverlayMetrics.heading1Size : level == 2 ? OverlayMetrics.heading2Size : OverlayMetrics.heading3Size
+        return fingerprint(fontSize: size, weight: 600)
+    }
+}
+
 struct ProseDocument: View {
     var text: String
+    var streaming: Bool = false
 
     var body: some View {
+        let completed = !streaming
         VStack(alignment: .leading, spacing: OverlaySurface.proseBlockSpacing) {
-            ForEach(Array(ProseParser.blocks(in: text).enumerated()), id: \.offset) { _, block in
+            ForEach(Array(ProseParser.blocks(in: text, completed: completed).enumerated()), id: \.offset) { _, block in
                 switch block {
-                case .heading(let level, let runs):
-                    inlineFlow(
-                        runs,
-                        font: .system(
-                            size: level <= 1 ? OverlayMetrics.heading1Size : level == 2 ? OverlayMetrics.heading2Size : OverlayMetrics.heading3Size,
-                            weight: .semibold
+                    case .heading(let level, let runs):
+                        inlineFlow(
+                            runs,
+                            font: .system(
+                                size: level <= 1 ? OverlayMetrics.heading1Size : level == 2 ? OverlayMetrics.heading2Size : OverlayMetrics.heading3Size,
+                                weight: .semibold
+                            ),
+                            typography: ProseTypography.heading(level: level),
+                            completed: completed
                         )
-                    )
                     .padding(.top, level <= 2 ? 20 : 16)
                     .padding(.bottom, 8)
                 case .paragraph(let runs):
-                    inlineFlow(runs)
+                    inlineFlow(runs, typography: ProseTypography.body, completed: completed)
                 case .rule:
                     Divider()
                         .opacity(0.28)
@@ -655,14 +685,14 @@ struct ProseDocument: View {
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Text("•")
                             .foregroundStyle(.secondary)
-                        inlineFlow(runs)
+                        inlineFlow(runs, typography: ProseTypography.body, completed: completed)
                     }
                 case .numbered(let index, let runs):
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Text("\(index).")
                             .foregroundStyle(.secondary)
                             .frame(minWidth: 16, alignment: .trailing)
-                        inlineFlow(runs)
+                        inlineFlow(runs, typography: ProseTypography.body, completed: completed)
                     }
                 }
             }
@@ -671,9 +701,21 @@ struct ProseDocument: View {
     }
 
     @ViewBuilder
-    private func inlineFlow(_ runs: [InlineRun], font: Font = OverlayMetrics.bodyFont) -> some View {
+    private func inlineFlow(
+        _ runs: [InlineRun],
+        font: Font = OverlayMetrics.bodyFont,
+        typography: ProseTypographyFingerprint = ProseTypography.body,
+        completed: Bool
+    ) -> some View {
         if InlineRun.usesNativeTextLayout(runs) {
-            Text(Self.nativeAttributedText(runs, font: font))
+            let key = ProseRenderKey(runs: runs, width: 0, typography: typography)
+            let prepared = ProseRenderCache.shared.preparedInline(for: key, completed: completed) {
+                ProsePreparedInline(
+                    runs: runs,
+                    attributedString: Self.semanticNativeAttributedText(runs, font: font)
+                )
+            }
+            Text(Self.styledNativeAttributedText(prepared))
                 .font(font)
                 .foregroundStyle(OverlaySurface.conversationInk)
                 .lineSpacing(OverlaySurface.proseLineSpacing)
@@ -681,18 +723,36 @@ struct ProseDocument: View {
                 .bubbleTextSelection()
         } else {
             FlowWidthReader { width in
-                FlowLayout(horizontalSpacing: 5, verticalSpacing: OverlaySurface.proseLineSpacing) {
-                    ForEach(Array(Self.breakRuns(runs, width: width).enumerated()), id: \.offset) { _, run in
+                let sourceKey = ProseRenderKey(runs: runs, width: Double(width), typography: typography)
+                let prepared = ProseRenderCache.shared.preparedInline(for: sourceKey, completed: completed) {
+                    ProsePreparedInline(runs: runs)
+                }
+                let wrappedKey = ProseRenderKey(
+                    content: sourceKey.content,
+                    width: Double(width),
+                    typography: typography,
+                    variant: 1
+                )
+                let wrapped = ProseRenderCache.shared.preparedInline(for: wrappedKey, completed: completed) {
+                    ProsePreparedInline(runs: Self.breakRuns(prepared.runs, width: width))
+                }
+                FlowLayout(
+                    horizontalSpacing: 5,
+                    verticalSpacing: OverlaySurface.proseLineSpacing,
+                    renderKey: wrappedKey,
+                    completed: completed
+                ) {
+                    ForEach(Array(wrapped.runs.enumerated()), id: \.offset) { _, run in
                         switch run {
                         case .text(let text):
-                            Text(inlineMarkdown(text))
+                            Text(Self.cachedInlineMarkdown(text, typography: typography, completed: completed))
                                 .font(font)
                                 .foregroundStyle(OverlaySurface.conversationInk)
                                 .lineLimit(1)
                                 .fixedSize(horizontal: true, vertical: true)
                                 .bubbleTextSelection()
                         case .strong(let text):
-                            Text(inlineMarkdown(text))
+                            Text(Self.cachedInlineMarkdown(text, typography: typography, completed: completed))
                                 .font(font)
                                 .fontWeight(.semibold)
                                 .foregroundStyle(OverlaySurface.conversationInk)
@@ -708,7 +768,7 @@ struct ProseDocument: View {
         }
     }
 
-    private static func nativeAttributedText(_ runs: [InlineRun], font: Font) -> AttributedString {
+    private static func semanticNativeAttributedText(_ runs: [InlineRun], font: Font) -> AttributedString {
         var result = AttributedString()
         for run in runs {
             let text: String
@@ -717,7 +777,6 @@ struct ProseDocument: View {
                 text = value
             }
             var part = AttributedString(text)
-            part.foregroundColor = OverlaySurface.conversationInk
             switch run {
             case .text:
                 break
@@ -725,11 +784,36 @@ struct ProseDocument: View {
                 part.font = font.weight(.semibold)
             case .chip(_, .code):
                 part.font = .system(size: OverlayMetrics.chipSize, weight: .regular, design: .monospaced)
-                part.backgroundColor = OverlaySurface.chipFill
             case .chip:
                 break
             }
             result.append(part)
+        }
+        return result
+    }
+
+    private static func styledNativeAttributedText(_ prepared: ProsePreparedInline) -> AttributedString {
+        var result = prepared.attributedString
+        var index = result.startIndex
+        for run in prepared.runs {
+            let text: String
+            switch run {
+            case .text(let value), .strong(let value), .chip(let value, _):
+                text = value
+            }
+            guard !text.isEmpty else { continue }
+            var end = index
+            for _ in 0..<text.count {
+                guard end < result.endIndex else { break }
+                end = result.index(afterCharacter: end)
+            }
+            guard end > index else { continue }
+            let range = index..<end
+            result[range].foregroundColor = OverlaySurface.conversationInk
+            if case .chip(_, .code) = run {
+                result[range].backgroundColor = OverlaySurface.chipFill
+            }
+            index = end
         }
         return result
     }
@@ -840,9 +924,17 @@ struct ProseDocument: View {
         return glued
     }
 
-    private func inlineMarkdown(_ text: String) -> AttributedString {
-        let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
-        return (try? AttributedString(markdown: text, options: options)) ?? AttributedString(text)
+    private static func cachedInlineMarkdown(
+        _ text: String,
+        typography: ProseTypographyFingerprint,
+        completed: Bool
+    ) -> AttributedString {
+        let key = ProseRenderKey(text: text, width: 0, typography: typography, variant: 2)
+        return ProseRenderCache.shared.preparedInline(for: key, completed: completed) {
+            let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+            let attributed = (try? AttributedString(markdown: text, options: options)) ?? AttributedString(text)
+            return ProsePreparedInline(runs: [.text(text)], attributedString: attributed)
+        }.attributedString
     }
 }
 
@@ -1008,6 +1100,8 @@ private struct FlowWidthReader<Content: View>: View {
 struct FlowLayout: Layout {
     var horizontalSpacing: CGFloat = 5
     var verticalSpacing: CGFloat = OverlaySurface.proseLineSpacing
+    var renderKey: ProseRenderKey?
+    var completed: Bool = true
 
     struct Cache {
         var width: CGFloat?
@@ -1055,7 +1149,37 @@ struct FlowLayout: Layout {
            let result = cache.result {
             return result
         }
-        let result = arrange(proposal: proposal, subviews: subviews)
+        let result: (size: CGSize, frames: [CGRect])
+        if let renderKey,
+           let width,
+           width.isFinite,
+           width > 0 {
+            let measuredKey = ProseRenderKey(
+                content: renderKey.content,
+                width: Double(width),
+                typography: renderKey.typography,
+                variant: renderKey.variant + 2
+            )
+            let measured = ProseRenderCache.shared.measuredLayout(for: measuredKey, completed: completed) {
+                let arranged = arrange(proposal: proposal, subviews: subviews)
+                return ProseMeasuredLayout(
+                    width: Double(arranged.size.width),
+                    height: Double(arranged.size.height),
+                    lineCount: arranged.frames.count,
+                    frames: arranged.frames
+                )
+            }
+            if measured.frames.count == subviews.count {
+                result = (
+                    CGSize(width: measured.width, height: measured.height),
+                    measured.frames
+                )
+            } else {
+                result = arrange(proposal: proposal, subviews: subviews)
+            }
+        } else {
+            result = arrange(proposal: proposal, subviews: subviews)
+        }
         cache.width = width
         cache.subviewCount = subviews.count
         cache.result = result

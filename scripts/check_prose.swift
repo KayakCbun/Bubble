@@ -20,6 +20,7 @@ struct ProseCheck {
     static func main() {
         testCodeTokens()
         testNativeTextLayoutRouting()
+        testPreparedRenderCache()
         testWallReflow()
         testChecklistReflow()
         testCodeSpanProtected()
@@ -31,6 +32,115 @@ struct ProseCheck {
         testTableReflow()
         testCodeDisplayChunks()
         print("PASS: prose reflow and code tokens")
+    }
+
+    static func testPreparedRenderCache() {
+        let runs: [InlineRun] = [
+            .text("Stable "),
+            .strong("prose"),
+            .chip("inline_code", .code),
+        ]
+        let typography = ProseTypographyFingerprint(
+            fontSize: 14,
+            weight: 400,
+            lineSpacing: 6,
+            theme: 1,
+            displayScale: 2,
+            layoutVersion: 1
+        )
+        let cache = ProseRenderCache(maxEntries: 2, maxEstimatedBytes: 4_096)
+        let key = ProseRenderKey(runs: runs, width: 320.10, typography: typography)
+        var builds = 0
+        let first = cache.preparedInline(for: key, completed: true) {
+            builds += 1
+            return ProsePreparedInline(runs: runs)
+        }
+        let second = cache.preparedInline(for: key, completed: true) {
+            builds += 1
+            return ProsePreparedInline(runs: runs)
+        }
+        expect(builds == 1, "completed inline artifacts are reused across view lifetimes")
+        expect(first == second, "cache hit preserves prepared output")
+        expect(first.plainText == "Stable proseinline_code", "prepared output keeps run text parity")
+        expect(String(first.attributedString.characters) == first.plainText, "prepared attributed text keeps output parity")
+
+        let nearby = ProseRenderKey(runs: runs, width: 320.20, typography: typography)
+        _ = cache.preparedInline(for: nearby, completed: true) {
+            builds += 1
+            return ProsePreparedInline(runs: runs)
+        }
+        expect(builds == 1, "sub-pixel width noise is quantized into one layout key")
+
+        let wider = ProseRenderKey(runs: runs, width: 320.60, typography: typography)
+        _ = cache.preparedInline(for: wider, completed: true) {
+            builds += 1
+            return ProsePreparedInline(runs: runs)
+        }
+        expect(builds == 2, "a width bucket change invalidates measured artifacts")
+
+        let heavier = ProseTypographyFingerprint(
+            fontSize: 14,
+            weight: 600,
+            lineSpacing: 6,
+            theme: 1,
+            displayScale: 2,
+            layoutVersion: 1
+        )
+        let fontChanged = ProseRenderKey(runs: runs, width: 320.10, typography: heavier)
+        _ = cache.preparedInline(for: fontChanged, completed: true) {
+            builds += 1
+            return ProsePreparedInline(runs: runs)
+        }
+        expect(builds == 3, "typography changes invalidate prepared artifacts")
+
+        let contentChanged = ProseRenderKey(text: "Stable prose changed", width: 320.10, typography: typography)
+        _ = cache.preparedInline(for: contentChanged, completed: true) {
+            builds += 1
+            return ProsePreparedInline(runs: [.text("Stable prose changed")])
+        }
+        expect(builds == 4, "content changes invalidate prepared artifacts")
+
+        var liveBuilds = 0
+        _ = cache.preparedInline(for: key, completed: false) {
+            liveBuilds += 1
+            return ProsePreparedInline(runs: runs)
+        }
+        _ = cache.preparedInline(for: key, completed: false) {
+            liveBuilds += 1
+            return ProsePreparedInline(runs: runs)
+        }
+        expect(liveBuilds == 2, "streaming rows bypass the completed render cache")
+
+        let eviction = ProseRenderCache(maxEntries: 2, maxEstimatedBytes: 1_024)
+        let a = ProseRenderKey(text: "A", width: 300, typography: typography)
+        let b = ProseRenderKey(text: "B", width: 300, typography: typography)
+        let c = ProseRenderKey(text: "C", width: 300, typography: typography)
+        for key in [a, b, c] {
+            _ = eviction.preparedInline(for: key, completed: true) {
+                ProsePreparedInline(runs: [.text(key.contentText)])
+            }
+        }
+        expect(eviction.entryCount <= 2, "render cache stays within its count bound")
+        expect(eviction.estimatedBytes <= 1_024, "render cache stays within its byte bound")
+        expect(!eviction.contains(a), "least-recently-used completed artifact is evicted first")
+
+        let layoutCache = ProseRenderCache(maxEntries: 4, maxEstimatedBytes: 4_096)
+        var layoutBuilds = 0
+        let layoutKey = ProseRenderKey(text: "measured", width: 480.1, typography: typography)
+        let measured = layoutCache.measuredLayout(for: layoutKey, completed: true) {
+            layoutBuilds += 1
+            return ProseMeasuredLayout(
+                width: layoutKey.quantizedWidth,
+                height: 42,
+                lineCount: 2
+            )
+        }
+        let measuredAgain = layoutCache.measuredLayout(for: layoutKey, completed: true) {
+            layoutBuilds += 1
+            return ProseMeasuredLayout(width: layoutKey.quantizedWidth, height: 99, lineCount: 9)
+        }
+        expect(layoutBuilds == 1, "completed measured layout is reused across view lifetimes")
+        expect(measured == measuredAgain && measured.height == 42, "measured height cache preserves its original result")
     }
 
     static func testNativeTextLayoutRouting() {

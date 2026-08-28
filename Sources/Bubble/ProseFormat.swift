@@ -1,6 +1,6 @@
 import Foundation
 
-enum PathChipKind: Equatable {
+enum PathChipKind: Hashable {
     case code
     case file(String)
     case folder
@@ -67,7 +67,7 @@ private final class CodeDisplayChunksBox {
     }
 }
 
-enum InlineRun: Equatable {
+enum InlineRun: Hashable {
     case text(String)
     case strong(String)
     case chip(String, PathChipKind)
@@ -88,6 +88,408 @@ enum InlineRun: Equatable {
             guard case .chip(_, let kind) = run else { return true }
             return kind == .code
         }
+    }
+}
+
+/// A stable, value-only description of the typography that participates in a
+/// transcript layout.  Keeping the fingerprint independent of SwiftUI's
+/// `Font`/`Color` values means it can safely be used from the lock-protected
+/// render cache and from background warm-up work.
+struct ProseTypographyFingerprint: Hashable {
+    var fontSizeMilliPoints: Int
+    var weightMilli: Int
+    var lineSpacingMilliPoints: Int
+    var themeVersion: Int
+    var displayScaleMilli: Int
+    var layoutVersion: Int
+
+    init(
+        fontSize: Double,
+        weight: Double,
+        lineSpacing: Double,
+        theme: Int = 1,
+        displayScale: Double = 2,
+        layoutVersion: Int = 1
+    ) {
+        fontSizeMilliPoints = Self.quantize(fontSize)
+        weightMilli = Self.quantize(weight)
+        lineSpacingMilliPoints = Self.quantize(lineSpacing)
+        themeVersion = theme
+        displayScaleMilli = Self.quantize(displayScale)
+        self.layoutVersion = layoutVersion
+    }
+
+    private static func quantize(_ value: Double) -> Int {
+        guard value.isFinite else { return 0 }
+        return Int((value * 1_000).rounded())
+    }
+}
+
+/// Content identity is deliberately exact in addition to carrying a stable
+/// digest.  The text protects the cache from the practical consequences of a
+/// digest collision while still allowing cache keys to be compared cheaply in
+/// the hot path via their precomputed fields.
+struct ProseContentFingerprint: Hashable {
+    let text: String
+    let digest: UInt64
+    let byteCount: Int
+
+    init(text: String) {
+        self.text = text
+        digest = Self.fnv1a(text.utf8)
+        byteCount = text.utf8.count
+    }
+
+    init(runs: [InlineRun]) {
+        var canonical = ""
+        canonical.reserveCapacity(runs.reduce(into: 0) { $0 += $1.proseText.count + 2 })
+        for run in runs {
+            switch run {
+            case .text(let value):
+                canonical += "t:\(value)\u{1e}"
+            case .strong(let value):
+                canonical += "s:\(value)\u{1e}"
+            case .chip(let value, let kind):
+                canonical += "c:\(kind.proseTag):\(value)\u{1e}"
+            }
+        }
+        self.init(text: canonical)
+    }
+
+    private static func fnv1a<S: Sequence>(_ bytes: S) -> UInt64 where S.Element == UInt8 {
+        var hash: UInt64 = 14_695_981_039_346_656_037
+        for byte in bytes {
+            hash ^= UInt64(byte)
+            hash &*= 1_099_511_628_211
+        }
+        return hash
+    }
+}
+
+private extension InlineRun {
+    var proseText: String {
+        switch self {
+        case .text(let value), .strong(let value), .chip(let value, _): return value
+        }
+    }
+}
+
+private extension PathChipKind {
+    var proseTag: String {
+        switch self {
+        case .code: return "code"
+        case .file(let ext): return "file:\(ext)"
+        case .folder: return "folder"
+        case .url: return "url"
+        }
+    }
+}
+
+/// The complete key for a prepared inline artifact or measured layout.
+/// Width is quantized to half-point buckets so AppKit/SwiftUI's fractional
+/// geometry updates do not create a new entry on every frame.
+struct ProseRenderKey: Hashable {
+    let content: ProseContentFingerprint
+    let widthBucket: Int
+    let typography: ProseTypographyFingerprint
+    let variant: Int
+
+    init(
+        text: String,
+        width: Double,
+        typography: ProseTypographyFingerprint,
+        variant: Int = 0
+    ) {
+        self.init(content: ProseContentFingerprint(text: text), width: width, typography: typography, variant: variant)
+    }
+
+    init(
+        runs: [InlineRun],
+        width: Double,
+        typography: ProseTypographyFingerprint,
+        variant: Int = 0
+    ) {
+        self.init(content: ProseContentFingerprint(runs: runs), width: width, typography: typography, variant: variant)
+    }
+
+    init(
+        content: ProseContentFingerprint,
+        width: Double,
+        typography: ProseTypographyFingerprint,
+        variant: Int = 0
+    ) {
+        self.content = content
+        widthBucket = Self.quantizedWidthBucket(width)
+        self.typography = typography
+        self.variant = variant
+    }
+
+    var contentText: String { content.text }
+
+    var quantizedWidth: Double {
+        Double(widthBucket) / 2
+    }
+
+    static func quantizedWidthBucket(_ width: Double) -> Int {
+        guard width.isFinite, width > 0 else { return 0 }
+        return max(0, Int((width * 2).rounded()))
+    }
+
+    fileprivate var cacheToken: String {
+        [
+            String(content.digest, radix: 16),
+            String(content.byteCount),
+            String(widthBucket),
+            String(typography.fontSizeMilliPoints),
+            String(typography.weightMilli),
+            String(typography.lineSpacingMilliPoints),
+            String(typography.themeVersion),
+            String(typography.displayScaleMilli),
+            String(typography.layoutVersion),
+            String(variant),
+        ].joined(separator: ":")
+    }
+}
+
+/// Prepared inline content is intentionally semantic.  The cache stores the
+/// parsed AttributedString and run boundaries, but does not capture any
+/// SwiftUI `Color` or environment object.  Visual colors are applied by the
+/// view at render time, so theme changes invalidate via the fingerprint rather
+/// than retaining thread-unsafe color values in a shared cache.
+struct ProsePreparedInline: Equatable {
+    let runs: [InlineRun]
+    let attributedString: AttributedString
+    let plainText: String
+    let nativeTextLayout: Bool
+
+    init(runs: [InlineRun], attributedString: AttributedString? = nil) {
+        self.runs = runs
+        plainText = runs.map { run in
+            switch run {
+            case .text(let value), .strong(let value), .chip(let value, _): return value
+            }
+        }.joined()
+        self.attributedString = attributedString ?? AttributedString(plainText)
+        nativeTextLayout = InlineRun.usesNativeTextLayout(runs)
+    }
+
+    var estimatedBytes: Int {
+        // AttributedString's internal storage is implementation-defined.  A
+        // conservative text/run estimate keeps the bounded cache from growing
+        // without retaining the heavyweight SwiftUI view graph.
+        max(128, plainText.utf8.count * 2) + runs.count * 64
+    }
+}
+
+struct ProseMeasuredLayout: Equatable {
+    var width: Double
+    var height: Double
+    var lineCount: Int
+    var frames: [CGRect] = []
+
+    var estimatedBytes: Int { 64 + frames.count * 64 }
+
+    static func == (lhs: ProseMeasuredLayout, rhs: ProseMeasuredLayout) -> Bool {
+        guard lhs.width == rhs.width,
+              lhs.height == rhs.height,
+              lhs.lineCount == rhs.lineCount,
+              lhs.frames.count == rhs.frames.count
+        else { return false }
+        return zip(lhs.frames, rhs.frames).allSatisfy { left, right in
+            left.origin.x == right.origin.x
+                && left.origin.y == right.origin.y
+                && left.size.width == right.size.width
+                && left.size.height == right.size.height
+        }
+    }
+}
+
+private enum ProseRenderArtifact: Equatable {
+    case inline(ProsePreparedInline)
+    case measured(ProseMeasuredLayout)
+
+    var estimatedBytes: Int {
+        switch self {
+        case .inline(let value): return value.estimatedBytes
+        case .measured(let value): return value.estimatedBytes
+        }
+    }
+}
+
+private final class ProseRenderArtifactBox: NSObject {
+    let value: ProseRenderArtifact
+    let cost: Int
+
+    init(value: ProseRenderArtifact) {
+        self.value = value
+        cost = value.estimatedBytes
+    }
+}
+
+/// A small LRU in front of NSCache.  NSCache provides automatic purging under
+/// memory pressure; the explicit order/cost bookkeeping gives deterministic
+/// count and byte bounds for normal operation and for focused checks.
+final class ProseRenderCache {
+    static let shared = ProseRenderCache(maxEntries: 512, maxEstimatedBytes: 16 * 1_024 * 1_024)
+
+    private let maxEntries: Int
+    private let maxEstimatedBytes: Int
+    private let cache = NSCache<NSString, ProseRenderArtifactBox>()
+    private let lock = NSLock()
+    private var order: [String] = []
+    private var costs: [String: Int] = [:]
+    private var identities: [String: ProseRenderKey] = [:]
+    private var totalCost = 0
+
+    init(maxEntries: Int = 512, maxEstimatedBytes: Int = 16 * 1_024 * 1_024) {
+        self.maxEntries = max(1, maxEntries)
+        self.maxEstimatedBytes = max(1, maxEstimatedBytes)
+        cache.countLimit = self.maxEntries
+        cache.totalCostLimit = self.maxEstimatedBytes
+        cache.evictsObjectsWithDiscardedContent = true
+    }
+
+    func preparedInline(
+        for key: ProseRenderKey,
+        completed: Bool,
+        build: () -> ProsePreparedInline
+    ) -> ProsePreparedInline {
+        guard completed else { return build() }
+        let token = "inline|\(key.cacheToken)"
+        if let value = inlineValue(for: token, key: key) {
+            return value
+        }
+        let built = build()
+        insert(.inline(built), token: token, key: key)
+        return built
+    }
+
+    func measuredLayout(
+        for key: ProseRenderKey,
+        completed: Bool,
+        build: () -> ProseMeasuredLayout
+    ) -> ProseMeasuredLayout {
+        guard completed else { return build() }
+        let token = "measured|\(key.cacheToken)"
+        if let value = measuredValue(for: token, key: key) {
+            return value
+        }
+        let built = build()
+        insert(.measured(built), token: token, key: key)
+        return built
+    }
+
+    func contains(_ key: ProseRenderKey) -> Bool {
+        let inline = "inline|\(key.cacheToken)"
+        let measured = "measured|\(key.cacheToken)"
+        lock.lock()
+        defer { lock.unlock() }
+        let inlineHit = identities[inline] == key && cache.object(forKey: inline as NSString) != nil
+        let measuredHit = identities[measured] == key && cache.object(forKey: measured as NSString) != nil
+        return inlineHit || measuredHit
+    }
+
+    var entryCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        pruneMissingEntriesLocked()
+        return order.count
+    }
+
+    var estimatedBytes: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        pruneMissingEntriesLocked()
+        return totalCost
+    }
+
+    func removeAll() {
+        lock.lock()
+        cache.removeAllObjects()
+        order.removeAll(keepingCapacity: true)
+        costs.removeAll(keepingCapacity: true)
+        identities.removeAll(keepingCapacity: true)
+        totalCost = 0
+        lock.unlock()
+    }
+
+    private func inlineValue(for token: String, key: ProseRenderKey) -> ProsePreparedInline? {
+        guard let artifact = object(for: token, key: key) else { return nil }
+        guard case .inline(let value) = artifact.value else { return nil }
+        return value
+    }
+
+    private func measuredValue(for token: String, key: ProseRenderKey) -> ProseMeasuredLayout? {
+        guard let artifact = object(for: token, key: key) else { return nil }
+        guard case .measured(let value) = artifact.value else { return nil }
+        return value
+    }
+
+    private func object(for token: String, key renderKey: ProseRenderKey) -> ProseRenderArtifactBox? {
+        lock.lock()
+        defer { lock.unlock() }
+        let cacheKey = token as NSString
+        guard identities[token] == renderKey else {
+            removeMetadataLocked(for: token)
+            return nil
+        }
+        guard let box = cache.object(forKey: cacheKey) else {
+            removeMetadataLocked(for: token)
+            return nil
+        }
+        touchLocked(token)
+        return box
+    }
+
+    private func insert(_ value: ProseRenderArtifact, token: String, key: ProseRenderKey) {
+        let box = ProseRenderArtifactBox(value: value)
+        let cost = min(maxEstimatedBytes, max(1, box.cost))
+        lock.lock()
+        if let previous = costs[token] {
+            totalCost -= previous
+            order.removeAll { $0 == token }
+        }
+        cache.setObject(box, forKey: token as NSString, cost: cost)
+        costs[token] = cost
+        identities[token] = key
+        totalCost += cost
+        order.append(token)
+        trimLocked()
+        lock.unlock()
+    }
+
+    private func trimLocked() {
+        while order.count > maxEntries || totalCost > maxEstimatedBytes {
+            guard let oldest = order.first else { break }
+            order.removeFirst()
+            let cost = costs.removeValue(forKey: oldest) ?? 0
+            identities.removeValue(forKey: oldest)
+            totalCost = max(0, totalCost - cost)
+            cache.removeObject(forKey: oldest as NSString)
+        }
+    }
+
+    private func touchLocked(_ token: String) {
+        guard let index = order.firstIndex(of: token) else { return }
+        order.remove(at: index)
+        order.append(token)
+    }
+
+    private func removeMetadataLocked(for token: String) {
+        guard costs.removeValue(forKey: token) != nil else { return }
+        identities.removeValue(forKey: token)
+        order.removeAll { $0 == token }
+        totalCost = costs.values.reduce(0, +)
+    }
+
+    private func pruneMissingEntriesLocked() {
+        let live = order.filter { cache.object(forKey: $0 as NSString) != nil }
+        guard live.count != order.count else { return }
+        order = live
+        let liveSet = Set(live)
+        costs = costs.filter { liveSet.contains($0.key) }
+        identities = identities.filter { liveSet.contains($0.key) }
+        totalCost = costs.values.reduce(0, +)
     }
 }
 
