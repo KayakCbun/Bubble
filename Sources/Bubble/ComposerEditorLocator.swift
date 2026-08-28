@@ -68,6 +68,7 @@ enum ComposerEditorLocator {
         if let editor = window.firstResponder as? NSTextView, editor.isEditable {
             guard editor.delegate as? NSTextField === composerField else { return nil }
             editor.identifier = NSUserInterfaceItemIdentifier(ComposerEditorIdentity.viewIdentifier)
+            normalizeTypography(editor, from: composerField)
             return editor
         }
 
@@ -84,6 +85,7 @@ enum ComposerEditorLocator {
             return nil
         }
         editor.identifier = NSUserInterfaceItemIdentifier(ComposerEditorIdentity.viewIdentifier)
+        normalizeTypography(editor, from: composerField)
         return editor
     }
 
@@ -109,6 +111,12 @@ enum ComposerEditorLocator {
             fields.append(contentsOf: editableTextFields(in: child))
         }
         return fields
+    }
+
+    private static func normalizeTypography(_ editor: NSTextView, from field: NSTextField) {
+        guard let font = field.font else { return }
+        editor.font = font
+        editor.typingAttributes[.font] = font
     }
 
     private static func activeTextField(in window: NSWindow?) -> NSTextField? {

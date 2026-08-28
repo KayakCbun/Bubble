@@ -25,6 +25,7 @@ struct ComposerEditorCheck {
         let search = NSTextField(frame: NSRect(x: 48, y: 110, width: 400, height: 28))
         search.placeholderString = "Search apps"
         let composer = NSTextField(frame: NSRect(x: 48, y: 20, width: 400, height: 28))
+        composer.font = NSFont.systemFont(ofSize: 14, weight: .regular)
         let probe = NSView(frame: composer.frame)
         root.addSubview(search)
         root.addSubview(composer)
@@ -50,6 +51,25 @@ struct ComposerEditorCheck {
         expect(editor.delegate as? NSTextField === composer, "the resolved editor must belong to the composer")
         type("x", keyCode: 7, into: editor)
         expect(editor.string == "x", "a working composer must accept a real key event")
+
+        let staleHeavyFont = NSFont.systemFont(ofSize: 14, weight: .semibold)
+        editor.font = staleHeavyFont
+        editor.typingAttributes[.font] = staleHeavyFont
+        guard let normalizedEditor = ComposerEditorLocator.ensureFieldEditor(
+            in: panel,
+            composerField: composer
+        ) else {
+            FileHandle.standardError.write(Data("FAIL: the composer editor must remain available while normalizing typography\n".utf8))
+            exit(1)
+        }
+        expect(
+            normalizedEditor.font?.fontName == composer.font?.fontName,
+            "a reused field editor must inherit the composer's regular font weight"
+        )
+        expect(
+            (normalizedEditor.typingAttributes[.font] as? NSFont)?.fontName == composer.font?.fontName,
+            "new composer input must use the same regular font weight as conversation text"
+        )
 
         expect(panel.makeFirstResponder(search), "the palette search field must become first responder")
         expect(
