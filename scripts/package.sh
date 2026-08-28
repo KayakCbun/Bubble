@@ -66,6 +66,9 @@ swiftc -parse-as-library Sources/Bubble/SessionReloadPolicy.swift scripts/check_
 swiftc -parse-as-library Sources/Bubble/TranscriptInteractionPolicy.swift scripts/check_transcript_interactions.swift -o /tmp/bubble-check-transcript-interactions
 /tmp/bubble-check-transcript-interactions
 
+swiftc -parse-as-library Sources/Bubble/TranscriptSurface.swift scripts/check_transcript_surface.swift -o /tmp/bubble-check-transcript-surface
+/tmp/bubble-check-transcript-surface
+
 swiftc -parse-as-library Sources/Bubble/AssistantMessageContent.swift scripts/check_assistant_message_images.swift -o /tmp/bubble-check-assistant-images
 /tmp/bubble-check-assistant-images
 
