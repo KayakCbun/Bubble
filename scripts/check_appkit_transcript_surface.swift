@@ -79,12 +79,38 @@ private enum AppKitTranscriptSurfaceCheck {
         expect(!adapter.mountedRowIDs.contains("row-239"), "offscreen rows are not mounted")
         expect(adapter.metrics.mountedPeak <= 18, "mounted peak respects the configured bound")
 
-        guard let stableID = adapter.mountedRowIDs.first,
+        guard let stableID = adapter.mountedRowIDs.dropFirst(adapter.mountedRowIDs.count / 2).first,
               let stableHost = adapter.hostObjectID(rowID: stableID) else {
             failures.append("initial viewport mounts at least one row")
             finish()
             return
         }
+
+        // A pure viewport move never reconfigures a stable rich host.
+        let stableConfigureCount = adapter.hostConfigureCount(rowID: stableID) ?? -1
+        adapter.setContentOffset(y: 312)
+        expect(
+            adapter.hostConfigureCount(rowID: stableID) == stableConfigureCount,
+            "pure viewport scrolling does not reconfigure a stable row host"
+        )
+
+        // A physical user-scroll handoff is synchronous, before AppKit applies
+        // the wheel delta, and detaches follow-latest without consuming a
+        // transcript revision.
+        var sawUserScroll = false
+        var userScrollCallbacks = 0
+        adapter.onViewportChanged = { _, userDriven in
+            if userDriven {
+                sawUserScroll = true
+                userScrollCallbacks += 1
+            }
+        }
+        adapter.userDidScroll()
+        expect(sawUserScroll, "user-scroll callback fires synchronously")
+        expect(!adapter.snapshot.followsLatest, "user scroll detaches follow-latest")
+        let userScrollCountBeforeResize = userScrollCallbacks
+        adapter.setViewportSize(NSSize(width: 480, height: 120))
+        expect(userScrollCallbacks == userScrollCountBeforeResize, "resize does not masquerade as user scroll")
 
         // A replacement with stable row identities updates hosts in place.
         let revisionOne = adapter.currentHandle.nextRevision()
@@ -145,6 +171,26 @@ private enum AppKitTranscriptSurfaceCheck {
             assertNear(afterAnchor.offset, anchor.offset, "height update retains anchor offset")
         }
         expect(adapter.contentOffsetY > beforeOffset, "height update shifts the clip origin by the preceding delta")
+
+        // When following the tail, a newly measured row keeps the viewport at
+        // the new end instead of restoring the old visible anchor.
+        adapter.setFollowLatest(true)
+        let followTarget = rows[rows.count - 1].id
+        let previousEnd = adapter.contentOffsetY
+        _ = adapter.updateMeasuredHeight(rowID: followTarget, height: 120)
+        let expectedEnd = max(0, adapter.currentHeightIndex.totalHeight - adapter.scrollView.contentView.bounds.height)
+        assertNear(adapter.contentOffsetY, expectedEnd, "follow-latest measurement remains pinned to end")
+        expect(adapter.contentOffsetY >= previousEnd, "follow-latest measurement does not move backwards")
+
+        // Width is a layout input: sub-pixel motion inside a half-point bucket
+        // keeps measurements, while crossing the bucket restores estimates.
+        let measuredID = rows[0].id
+        _ = adapter.updateMeasuredHeight(rowID: measuredID, height: 144)
+        let measuredHeight = adapter.currentHeightIndex.height(at: 0) ?? 0
+        adapter.setViewportSize(NSSize(width: 480.2, height: 120))
+        expect(adapter.currentHeightIndex.height(at: 0) == measuredHeight, "same width bucket retains measured height")
+        adapter.setViewportSize(NSSize(width: 480.8, height: 120))
+        expect(adapter.currentHeightIndex.height(at: 0) != measuredHeight, "width bucket change invalidates measured heights")
 
         // A stale revision is ignored before it can affect mounted cells.
         let staleHost = adapter.hostObjectID(rowID: stableID)

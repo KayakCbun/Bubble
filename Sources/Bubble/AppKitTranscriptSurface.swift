@@ -247,6 +247,21 @@ struct AppKitTranscriptSurfaceMetrics {
     }
 }
 
+/// The clip view used by the production surface.  AppKit's bounds-change
+/// notification is delivered after the scroll wheel has already been
+/// interpreted, which is too late for the composer/follow policy: a new wheel
+/// event must detach from the tail before the next streamed token arrives.
+/// Keep this hook at the physical input boundary and let the adapter decide
+/// whether the event is user-driven or programmatic.
+final class AppKitTranscriptScrollView: NSScrollView {
+    var onUserScroll: (() -> Void)?
+
+    override func scrollWheel(with event: NSEvent) {
+        onUserScroll?()
+        super.scrollWheel(with: event)
+    }
+}
+
 private final class AppKitTranscriptDocumentView: NSView {
     weak var owner: AppKitTranscriptSurfaceAdapter?
 
@@ -287,9 +302,14 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
     private var heightIndex: TranscriptHeightIndex
     private var layingOut = false
     private var followsLatest = false
+    private var userDetachedFromLatest = false
+    private var widthBucket: Int = 0
     private(set) var metrics = AppKitTranscriptSurfaceMetrics()
 
-    let scrollView: NSScrollView
+    let scrollView: AppKitTranscriptScrollView
+    /// Called after a viewport change.  The boolean identifies a physical
+    /// user wheel event; programmatic reveal/follow operations report false.
+    var onViewportChanged: ((_ atEnd: Bool, _ userDriven: Bool) -> Void)?
 
     init(
         snapshot: TranscriptSurfaceSnapshot? = nil,
@@ -309,7 +329,7 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
             heights: (snapshot?.rows ?? []).map(\.estimatedHeight)
         )
         self.followsLatest = snapshot?.followsLatest ?? false
-        self.scrollView = NSScrollView(frame: NSRect(x: 0, y: 0, width: 640, height: 480))
+        self.scrollView = AppKitTranscriptScrollView(frame: NSRect(x: 0, y: 0, width: 640, height: 480))
         super.init()
 
         scrollView.drawsBackground = false
@@ -320,6 +340,9 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
         scrollView.scrollerStyle = .overlay
         scrollView.verticalScrollElasticity = .allowed
         scrollView.contentView.postsBoundsChangedNotifications = true
+        scrollView.onUserScroll = { [weak self] in
+            self?.userDidScroll()
+        }
 
         document = AppKitTranscriptDocumentView(frame: .zero)
         document.owner = self
@@ -333,7 +356,13 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
             // This observer is synchronous with the clip-view bounds update;
             // direct mouse-wheel input therefore mounts rows without waiting
             // for a measurement pass or a display-linked animation.
-            self?.relayoutNow()
+            guard let self else { return }
+            self.relayoutNow()
+            // Bounds changes are deliberately neutral.  Window resizing,
+            // elastic settling, and measurement clamps all arrive through
+            // this path too; only `scrollWheel(with:)` calls userDidScroll()
+            // and reports userDriven=true.
+            self.onViewportChanged?(self.isAtEnd, false)
         }
         relayoutNow()
     }
@@ -344,7 +373,16 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
         }
     }
 
-    var snapshot: TranscriptSurfaceSnapshot { state.snapshot }
+    var snapshot: TranscriptSurfaceSnapshot {
+        let source = state.snapshot
+        guard source.followsLatest != followsLatest else { return source }
+        return TranscriptSurfaceSnapshot(
+            session: source.session,
+            rows: source.rows,
+            anchor: source.anchor,
+            followsLatest: followsLatest
+        )
+    }
     var interactionStore: TranscriptInteractionStore { state.interactionStore }
     var heightCache: TranscriptHeightCache { state.heightCache }
     var currentHandle: TranscriptSessionHandle { state.currentHandle }
@@ -355,6 +393,14 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
     /// A cheap viewport helper used by deterministic checks and by the future
     /// NSViewRepresentable bridge.  It never waits for row measurement.
     func setViewportSize(_ size: NSSize) {
+        let nextBucket = Self.widthBucket(size.width)
+        if nextBucket != widthBucket {
+            widthBucket = nextBucket
+            measuredHeights.removeAll(keepingCapacity: true)
+            // Width is part of text layout identity.  Existing measured
+            // heights are invalid even when row content versions are stable.
+            heightIndex.replace(with: snapshot.rows.map(\.estimatedHeight))
+        }
         scrollView.setFrameSize(size)
         relayoutNow()
     }
@@ -370,6 +416,10 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
 
     func hostObjectID(rowID: String) -> ObjectIdentifier? {
         mounted[rowID].map { ObjectIdentifier($0.host) }
+    }
+
+    func hostConfigureCount(rowID: String) -> Int? {
+        mounted[rowID]?.host.configureCount
     }
 
     /// Captures the first visible row and its document-to-viewport offset.
@@ -392,7 +442,14 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
         guard changed else { return false }
         updateDocumentFrame()
         relayoutNow()
-        if let anchor { restore(anchor) }
+        // A streamed tail measurement changes document height below the
+        // viewport.  Restoring the old anchor in follow mode reopens the gap
+        // that the user just asked us to keep closed; pin to the end instead.
+        if followsLatest {
+            scrollToEnd()
+        } else if let anchor {
+            restore(anchor)
+        }
         return true
     }
 
@@ -403,7 +460,10 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
         let events = state.apply(command)
         guard accepted(events) else { return events }
 
-        followsLatest = state.snapshot.followsLatest
+        if requestsFollowLatest(command.kind) {
+            userDetachedFromLatest = false
+        }
+        followsLatest = userDetachedFromLatest ? false : state.snapshot.followsLatest
         synchronizeRows(from: oldSnapshot, to: state.snapshot)
         if let event = events.first(where: {
             switch $0 {
@@ -427,7 +487,7 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
             default:
                 break
             }
-        } else if state.snapshot.followsLatest {
+        } else if followsLatest {
             scrollToEnd()
         } else if let anchor, command.anchorPolicy != .followLatest {
             restore(anchor)
@@ -454,6 +514,7 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
             reveal(rowID: rowID)
             return []
         case let .setFollowLatest(enabled):
+            userDetachedFromLatest = !enabled
             followsLatest = enabled
             if enabled { scrollToEnd() }
             return enabled
@@ -487,7 +548,19 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
     }
 
     func setFollowLatest(_ enabled: Bool) {
+        userDetachedFromLatest = !enabled
+        followsLatest = enabled
         _ = perform(.setFollowLatest(enabled))
+    }
+
+    /// Synchronously called by `AppKitTranscriptScrollView` before AppKit
+    /// applies a wheel delta.  This is intentionally not a revisioned surface
+    /// command: scrolling is viewport state, and marking the tail detached
+    /// must not reject the next producer snapshot.
+    func userDidScroll() {
+        userDetachedFromLatest = true
+        followsLatest = false
+        onViewportChanged?(isAtEnd, true)
     }
 
     func invalidate(rowIDs: [String]) {
@@ -680,6 +753,24 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
         guard let index = snapshot.rows.firstIndex(where: { $0.id == anchor.rowID }) else { return }
         let next = heightIndex.offset(of: index) - anchor.offset
         setContentOffset(y: next)
+    }
+
+    private var isAtEnd: Bool {
+        let maxY = max(0, heightIndex.totalHeight - scrollView.contentView.bounds.height)
+        return abs(contentOffsetY - maxY) <= 1
+    }
+
+    private static func widthBucket(_ width: CGFloat) -> Int {
+        Int((max(0, width) * 2).rounded())
+    }
+
+    private func requestsFollowLatest(_ kind: TranscriptSurfaceCommand.Kind) -> Bool {
+        switch kind {
+        case .followLatest, .setFollowLatest(true, _), .scrollToEnd:
+            return true
+        default:
+            return false
+        }
     }
 }
 
