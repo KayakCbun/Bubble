@@ -73,7 +73,6 @@ struct OverlayView: View {
     @State private var expandedThoughts: Set<UUID> = []
     @State private var expandedToolGroups: Set<String> = []
     @State private var expandedTools: Set<UUID> = []
-    @State private var expandedFileChanges: Set<String> = []
     @State private var followState = TranscriptFollowState()
     @State private var followQueued = false
     private var inputShape: RoundedRectangle {
@@ -278,7 +277,6 @@ struct OverlayView: View {
         expandedThoughts.removeAll(keepingCapacity: true)
         expandedToolGroups.removeAll(keepingCapacity: true)
         expandedTools.removeAll(keepingCapacity: true)
-        expandedFileChanges.removeAll(keepingCapacity: true)
         followState = TranscriptFollowState()
         followQueued = false
         QuoteSelectionMonitor.shared.dismiss()
@@ -761,6 +759,9 @@ struct OverlayView: View {
                 followQueued = false
                 followState.userNavigated(atEnd: false)
             }
+            .onReceive(NotificationCenter.default.publisher(for: .fileChangeExpansionChanged)) { _ in
+                requestFileChangeExpansionFollow(proxy)
+            }
             .onAppear {
                 requestFollowLatest(proxy)
                 if let targetID = ProcessInfo.processInfo.environment[
@@ -823,9 +824,6 @@ struct OverlayView: View {
                 requestExpansionFollow(proxy)
             }
             .onChange(of: expandedTools) { _, _ in
-                requestExpansionFollow(proxy)
-            }
-            .onChange(of: expandedFileChanges) { _, _ in
                 requestExpansionFollow(proxy)
             }
         }
@@ -1647,12 +1645,9 @@ struct OverlayView: View {
                 containerExpanded: expandedToolGroups.contains(id),
                 expandedChildIDs: items.filter { expandedTools.contains($0.id) }.map { $0.id.uuidString }
             )
-        case .fileChanges(let summary):
+        case .fileChanges:
             expansionKey = TranscriptExpansionPolicy.renderKey(
-                containerExpanded: FileChangeCardPolicy.isExpanded(
-                    id: summary.id,
-                    expandedIDs: expandedFileChanges
-                ),
+                containerExpanded: false,
                 expandedChildIDs: []
             )
         }
@@ -1841,6 +1836,28 @@ struct OverlayView: View {
             isBusy: store.isBusy
         ) else { return }
         requestSettledFollowLatest(proxy)
+    }
+
+    private func requestFileChangeExpansionFollow(_ proxy: ScrollViewProxy) {
+        guard TranscriptFollowTriggerPolicy.shouldRequestLatest(
+            trigger: .expansionSettled,
+            followsLatest: followState.followsLatest,
+            isBusy: store.isBusy
+        ) else { return }
+        func follow() {
+            OverlayPulse.shared.onNextFrame {
+                guard followState.followsLatest else { return }
+                var transaction = Transaction()
+                transaction.disablesAnimations = true
+                withTransaction(transaction) {
+                    proxy.scrollTo("transcript-end", anchor: .bottom)
+                }
+            }
+        }
+        follow()
+        DispatchQueue.main.asyncAfter(deadline: .now() + TranscriptFollowPolicy.layoutSettleDelay) {
+            follow()
+        }
     }
 
     private func requestCurrentFollowTarget(
@@ -2577,23 +2594,21 @@ struct OverlayView: View {
     }
 
     private func fileChangesCard(_ summary: FileChangeSummary) -> some View {
-        let expanded = FileChangeCardPolicy.isExpanded(
-            id: summary.id,
-            expandedIDs: expandedFileChanges
-        )
+        FileChangeCardExpansionHost(id: summary.id) { expanded, toggle in
+            fileChangesCardContent(summary, expanded: expanded, toggle: toggle)
+        }
+    }
+
+    private func fileChangesCardContent(
+        _ summary: FileChangeSummary,
+        expanded: Bool,
+        toggle: FileChangeCardToggleAction
+    ) -> some View {
         let plus = Color(red: 0.18, green: 0.62, blue: 0.32)
         let minus = Color(red: 0.82, green: 0.22, blue: 0.25)
         return VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
-                Button {
-                    withAnimation(OverlayMotion.snappy) {
-                        if expandedFileChanges.contains(summary.id) {
-                            expandedFileChanges.remove(summary.id)
-                        } else {
-                            expandedFileChanges.insert(summary.id)
-                        }
-                    }
-                } label: {
+                Button(action: toggle.callAsFunction) {
                     HStack(spacing: 8) {
                         Image(systemName: expanded ? "chevron.down" : "chevron.right")
                             .font(.system(size: 10, weight: .semibold))
@@ -2608,15 +2623,7 @@ struct OverlayView: View {
                 }
                 .buttonStyle(.plain)
                 Spacer(minLength: 8)
-                Button {
-                    withAnimation(OverlayMotion.snappy) {
-                        if expandedFileChanges.contains(summary.id) {
-                            expandedFileChanges.remove(summary.id)
-                        } else {
-                            expandedFileChanges.insert(summary.id)
-                        }
-                    }
-                } label: {
+                Button(action: toggle.callAsFunction) {
                     Text(expanded ? "Hide files" : "Show files")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(.secondary)
@@ -2643,7 +2650,7 @@ struct OverlayView: View {
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
 
-            if expanded {
+            FileChangeTreeReveal(expanded: expanded) {
                 Rectangle()
                     .fill(OverlaySurface.hairline)
                     .frame(height: 0.5)
@@ -2739,6 +2746,104 @@ private struct QuoteChipLayer: View {
     }
 }
 
+private struct FileChangeCardExpansionHost<Content: View>: View {
+    let id: String
+    let content: (Bool, FileChangeCardToggleAction) -> Content
+    @State private var expanded = false
+
+    init(
+        id: String,
+        @ViewBuilder content: @escaping (Bool, FileChangeCardToggleAction) -> Content
+    ) {
+        self.id = id
+        self.content = content
+    }
+
+    var body: some View {
+        content(expanded, FileChangeCardToggleAction(action: toggle))
+            .onReceive(NotificationCenter.default.publisher(for: .fileChangeDiagnosticToggleRequested)) { _ in
+                guard ProcessInfo.processInfo.environment["BUBBLE_FILE_CHANGE_DIAGNOSTICS"] == "1" else {
+                    return
+                }
+                toggle()
+            }
+    }
+
+    private func toggle() {
+        withAnimation(OverlayMotion.snappy) {
+            expanded.toggle()
+        }
+        NotificationCenter.default.post(
+            name: .fileChangeExpansionChanged,
+            object: id,
+            userInfo: ["expanded": expanded]
+        )
+        if ProcessInfo.processInfo.environment["BUBBLE_FILE_CHANGE_DIAGNOSTICS"] == "1" {
+            let marker = expanded ? CGFloat(1) : CGFloat(0)
+            OverlayPulse.shared.onNextFrame {
+                NotificationCenter.default.post(
+                    name: .fileChangeDiagnosticPresented,
+                    object: id,
+                    userInfo: ["height": marker]
+                )
+            }
+        }
+    }
+}
+
+private struct FileChangeCardToggleAction {
+    let action: () -> Void
+
+    func callAsFunction() {
+        action()
+    }
+}
+
+private struct FileChangeTreeHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+private struct FileChangeTreeReveal<Content: View>: View {
+    let expanded: Bool
+    let content: Content
+    @State private var naturalHeight: CGFloat = 0
+
+    init(expanded: Bool, @ViewBuilder content: () -> Content) {
+        self.expanded = expanded
+        self.content = content()
+    }
+
+    var body: some View {
+        content
+            .fixedSize(horizontal: false, vertical: true)
+            .background {
+                GeometryReader { geometry in
+                    Color.clear.preference(
+                        key: FileChangeTreeHeightKey.self,
+                        value: geometry.size.height
+                    )
+                }
+            }
+            .frame(height: expanded ? naturalHeight : 0, alignment: .top)
+            .clipped()
+            .opacity(expanded ? 1 : 0)
+            .allowsHitTesting(expanded)
+            .accessibilityHidden(!expanded)
+            .onPreferenceChange(FileChangeTreeHeightKey.self) { height in
+                guard height > 0, abs(height - naturalHeight) > 0.25 else { return }
+                var transaction = Transaction()
+                transaction.disablesAnimations = true
+                withTransaction(transaction) {
+                    naturalHeight = height
+                }
+            }
+    }
+}
+
 private struct FileChangeFolderBlock: View {
     let group: FileChangeGroup
     let plus: Color
@@ -2784,9 +2889,11 @@ private struct FileChangeFolderBlock: View {
                 .buttonStyle(.plain)
             }
             if open {
-                ForEach(group.files) { file in
-                    FileChangeFileRow(file: file, plus: plus, minus: minus, onOpen: onOpenFile)
-                        .padding(.leading, group.folder.isEmpty ? 0 : 16)
+                LazyVStack(alignment: .leading, spacing: 2) {
+                    ForEach(group.files) { file in
+                        FileChangeFileRow(file: file, plus: plus, minus: minus, onOpen: onOpenFile)
+                            .padding(.leading, group.folder.isEmpty ? 0 : 16)
+                    }
                 }
             }
         }

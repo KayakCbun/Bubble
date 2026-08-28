@@ -36,6 +36,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
     private let presentationAnimator = OverlayPresentationAnimator()
     private var presentationDiagnostics: WindowPresentationDiagnostics?
     private var paletteDiagnostics: PalettePresentationDiagnostics?
+    private var fileChangeDiagnostics: FileChangePresentationDiagnostics?
     private var isPreparingShow = false
     private var presentationPreflightScheduled = false
     private var showGeneration = 0
@@ -50,11 +51,14 @@ final class OverlayController: NSObject, NSWindowDelegate {
     private var runsPaletteDiagnostics: Bool {
         ProcessInfo.processInfo.environment["BUBBLE_PALETTE_DIAGNOSTICS"] == "1"
     }
+    private var runsFileChangeDiagnostics: Bool {
+        ProcessInfo.processInfo.environment["BUBBLE_FILE_CHANGE_DIAGNOSTICS"] == "1"
+    }
 
     func start() {
         OverlayPaths.bootstrap()
         installView()
-        if runsPresentationDiagnostics || runsPaletteDiagnostics { return }
+        if runsPresentationDiagnostics || runsPaletteDiagnostics || runsFileChangeDiagnostics { return }
         tapMonitor.onDoubleTap = { [weak self] in
             self?.toggleFromCommandTap()
         }
@@ -372,6 +376,34 @@ final class OverlayController: NSObject, NSWindowDelegate {
             diagnostics.start()
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) {
                 runCycle(max(cycles, 1))
+            }
+        }
+    }
+
+    func runFileChangeBenchmark(cycles: Int = 12) {
+        guard runsFileChangeDiagnostics else { return }
+        let diagnostics = FileChangePresentationDiagnostics()
+        diagnostics.attach(panel: panel)
+        fileChangeDiagnostics = diagnostics
+
+        show(returningFocusTo: nil) { [weak self] in
+            guard let self else { return }
+            diagnostics.start()
+            let cycleCount = max(cycles, 1)
+            for index in 0..<cycleCount {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.30 + Double(index) * 0.34) {
+                    diagnostics.beginCycle()
+                    NotificationCenter.default.post(
+                        name: .fileChangeDiagnosticToggleRequested,
+                        object: nil
+                    )
+                }
+            }
+            DispatchQueue.main.asyncAfter(
+                deadline: .now() + 0.30 + Double(cycleCount) * 0.34 + 0.20
+            ) { [weak self] in
+                OverlayLog.write(diagnostics.summary(cycles: cycleCount))
+                self?.fileChangeDiagnostics = nil
             }
         }
     }

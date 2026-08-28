@@ -2,6 +2,18 @@ import AppKit
 import QuartzCore
 import SwiftUI
 
+extension Notification.Name {
+    static let fileChangeDiagnosticToggleRequested = Notification.Name(
+        "BubbleFileChangeDiagnosticToggleRequested"
+    )
+    static let fileChangeDiagnosticPresented = Notification.Name(
+        "BubbleFileChangeDiagnosticPresented"
+    )
+    static let fileChangeExpansionChanged = Notification.Name(
+        "BubbleFileChangeExpansionChanged"
+    )
+}
+
 enum OverlayMotion {
     static let snappy = Animation.spring(
         response: OverlaySpring.snappyResponse,
@@ -575,4 +587,92 @@ final class PalettePresentationDiagnostics: NSObject {
         )
         return values[index]
     }
+}
+
+final class FileChangePresentationDiagnostics: NSObject {
+    private weak var panel: NSPanel?
+    private var link: CADisplayLink?
+    private var presentationObserver: NSObjectProtocol?
+    private var lastTimestamp: CFTimeInterval = 0
+    private var cycleStartedAt: CFTimeInterval?
+    private var cyclePresented = false
+    private var frameIntervals: [TimeInterval] = []
+    private var firstFrameLatencies: [TimeInterval] = []
+
+    func attach(panel: NSPanel) {
+        self.panel = panel
+    }
+
+    func start() {
+        guard link == nil, let panel else { return }
+        presentationObserver = NotificationCenter.default.addObserver(
+            forName: .fileChangeDiagnosticPresented,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            self?.recordPresentation()
+        }
+        let link = panel.displayLink(target: self, selector: #selector(tick(_:)))
+        link.preferredFrameRateRange = OverlayMotion.frameRate
+        link.add(to: .main, forMode: .common)
+        self.link = link
+    }
+
+    func beginCycle() {
+        if cycleStartedAt != nil {
+            finishCycle()
+        }
+        cycleStartedAt = CACurrentMediaTime()
+        cyclePresented = false
+    }
+
+    func summary(cycles: Int) -> String {
+        finishCycle()
+        link?.invalidate()
+        link = nil
+        if let presentationObserver {
+            NotificationCenter.default.removeObserver(presentationObserver)
+            self.presentationObserver = nil
+        }
+        let frameMilliseconds = frameIntervals.sorted().map { $0 * 1_000 }
+        let latencyMilliseconds = firstFrameLatencies.sorted().map { $0 * 1_000 }
+        return String(
+            format: "file change presentation benchmark cycles=%d presented=%d frameP95=%.2fms frameP99=%.2fms frameMax=%.2fms latencyP95=%.2fms latencyMax=%.2fms",
+            cycles,
+            firstFrameLatencies.count,
+            percentile(frameMilliseconds, 0.95),
+            percentile(frameMilliseconds, 0.99),
+            frameMilliseconds.last ?? 0,
+            percentile(latencyMilliseconds, 0.95),
+            latencyMilliseconds.last ?? 0
+        )
+    }
+
+    private func recordPresentation() {
+        guard !cyclePresented, let cycleStartedAt else { return }
+        cyclePresented = true
+        firstFrameLatencies.append(CACurrentMediaTime() - cycleStartedAt)
+    }
+
+    private func finishCycle() {
+        guard cycleStartedAt != nil else { return }
+        cycleStartedAt = nil
+    }
+
+    @objc private func tick(_ link: CADisplayLink) {
+        if lastTimestamp > 0, cycleStartedAt != nil {
+            frameIntervals.append(max(0, link.timestamp - lastTimestamp))
+        }
+        lastTimestamp = link.timestamp
+    }
+
+    private func percentile(_ values: [Double], _ percentile: Double) -> Double {
+        guard !values.isEmpty else { return .infinity }
+        let index = min(
+            values.count - 1,
+            max(0, Int((Double(values.count - 1) * percentile).rounded(.up)))
+        )
+        return values[index]
+    }
+
 }
