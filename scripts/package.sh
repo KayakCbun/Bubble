@@ -69,6 +69,13 @@ swiftc -parse-as-library Sources/Bubble/TranscriptInteractionPolicy.swift script
 swiftc -parse-as-library Sources/Bubble/TranscriptSurface.swift scripts/check_transcript_surface.swift -o /tmp/bubble-check-transcript-surface
 /tmp/bubble-check-transcript-surface
 
+swiftc -parse-as-library -framework AppKit \
+  Sources/Bubble/TranscriptSurface.swift \
+  Sources/Bubble/AppKitTranscriptSurface.swift \
+  scripts/check_appkit_transcript_surface.swift \
+  -o /tmp/bubble-check-appkit-transcript-surface
+/tmp/bubble-check-appkit-transcript-surface
+
 swiftc -parse-as-library Sources/Bubble/AssistantMessageContent.swift scripts/check_assistant_message_images.swift -o /tmp/bubble-check-assistant-images
 /tmp/bubble-check-assistant-images
 
