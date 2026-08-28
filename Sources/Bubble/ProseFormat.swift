@@ -119,6 +119,20 @@ struct ProseTypographyFingerprint: Hashable {
         self.layoutVersion = layoutVersion
     }
 
+    /// MarkdownUI's parsed content tree is independent of font, width, color
+    /// scheme, and display scale.  Use this neutral fingerprint when caching
+    /// that tree so style changes do not create duplicate parse artifacts.
+    static func contentOnly(layoutVersion: Int = 1) -> Self {
+        Self(
+            fontSize: 0,
+            weight: 0,
+            lineSpacing: 0,
+            theme: 0,
+            displayScale: 0,
+            layoutVersion: layoutVersion
+        )
+    }
+
     private static func quantize(_ value: Double) -> Int {
         guard value.isFinite else { return 0 }
         return Int((value * 1_000).rounded())
@@ -317,12 +331,12 @@ private enum ProseRenderArtifact: Equatable {
 }
 
 private final class ProseRenderArtifactBox: NSObject {
-    let value: ProseRenderArtifact
+    let value: Any
     let cost: Int
 
-    init(value: ProseRenderArtifact) {
+    init(value: Any, cost: Int) {
         self.value = value
-        cost = value.estimatedBytes
+        self.cost = cost
     }
 }
 
@@ -379,6 +393,33 @@ final class ProseRenderCache {
         return built
     }
 
+    /// Cache an artifact owned by another renderer (for example MarkdownUI's
+    /// parsed `MarkdownContent`) without introducing a second cache policy.
+    /// The value is opaque to this Foundation-only layer; the caller supplies
+    /// its conservative byte estimate and keeps theme/style values out of the
+    /// artifact itself.
+    func cachedObject<Value>(
+        for key: ProseRenderKey,
+        variant: String,
+        completed: Bool,
+        estimatedBytes: Int,
+        build: () -> Value
+    ) -> Value {
+        guard completed else { return build() }
+        let token = "object|\(variant)|\(key.cacheToken)"
+        if let box = object(for: token, key: key), let value = box.value as? Value {
+            return value
+        }
+        let built = build()
+        insertObject(
+            built,
+            token: token,
+            key: key,
+            estimatedBytes: estimatedBytes
+        )
+        return built
+    }
+
     func contains(_ key: ProseRenderKey) -> Bool {
         let inline = "inline|\(key.cacheToken)"
         let measured = "measured|\(key.cacheToken)"
@@ -415,13 +456,15 @@ final class ProseRenderCache {
 
     private func inlineValue(for token: String, key: ProseRenderKey) -> ProsePreparedInline? {
         guard let artifact = object(for: token, key: key) else { return nil }
-        guard case .inline(let value) = artifact.value else { return nil }
+        guard let artifactValue = artifact.value as? ProseRenderArtifact,
+              case .inline(let value) = artifactValue else { return nil }
         return value
     }
 
     private func measuredValue(for token: String, key: ProseRenderKey) -> ProseMeasuredLayout? {
         guard let artifact = object(for: token, key: key) else { return nil }
-        guard case .measured(let value) = artifact.value else { return nil }
+        guard let artifactValue = artifact.value as? ProseRenderArtifact,
+              case .measured(let value) = artifactValue else { return nil }
         return value
     }
 
@@ -442,8 +485,12 @@ final class ProseRenderCache {
     }
 
     private func insert(_ value: ProseRenderArtifact, token: String, key: ProseRenderKey) {
-        let box = ProseRenderArtifactBox(value: value)
-        let cost = min(maxEstimatedBytes, max(1, box.cost))
+        insertObject(value, token: token, key: key, estimatedBytes: value.estimatedBytes)
+    }
+
+    private func insertObject(_ value: Any, token: String, key: ProseRenderKey, estimatedBytes: Int) {
+        let cost = min(maxEstimatedBytes, max(1, estimatedBytes))
+        let box = ProseRenderArtifactBox(value: value, cost: cost)
         lock.lock()
         if let previous = costs[token] {
             totalCost -= previous

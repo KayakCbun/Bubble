@@ -5,6 +5,26 @@ import BeautifulMermaid
 import BubbleDiagramSupport
 import WebKit
 
+private enum MarkdownContentPreparation {
+    static let layoutVersion = 2
+
+    static func content(_ markdown: String, completed: Bool) -> MarkdownContent {
+        guard completed else { return MarkdownContent(markdown) }
+        // MarkdownContent only stores MarkdownUI's parsed block tree. Theme,
+        // colors, fonts, and width are applied later by the Markdown view.
+        let fingerprint = ProseTypographyFingerprint.contentOnly(layoutVersion: layoutVersion)
+        let key = ProseRenderKey(text: markdown, width: 0, typography: fingerprint, variant: 10)
+        return ProseRenderCache.shared.cachedObject(
+            for: key,
+            variant: "markdown-content",
+            completed: completed,
+            estimatedBytes: max(512, markdown.utf8.count * 4)
+        ) {
+            MarkdownContent(markdown)
+        }
+    }
+}
+
 struct MessageBody: View {
     var text: String
     var streaming: Bool = false
@@ -34,7 +54,7 @@ struct MessageBody: View {
             switch part {
             case .markdown(let markdown):
                 if preferClassicMarkdown || PathChipStyle.needsClassicMarkdown(markdown) {
-                    Markdown(markdown)
+                    Markdown(MarkdownContentPreparation.content(markdown, completed: !streaming))
                         .markdownTheme(.overlay)
                         .markdownTextStyle(\.text) {
                             FontSize(OverlayMetrics.fontSize)

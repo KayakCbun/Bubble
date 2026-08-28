@@ -13,6 +13,11 @@ func expectContains(_ haystack: String, _ needle: String, _ message: String) {
 
 @main
 struct ProseCheck {
+    private struct MarkdownArtifactFixture: Equatable {
+        var source: String
+        var renderedPlainText: String
+    }
+
     static let wall = "看完了整个工单群（8/13建单 →8/21 最新回复），这个问题的来龙去脉已经基本查清了：## 问题现象海尔租户的 Base（多维表格）自动化「推送仪表盘到群」，消息模板里**手写工号** `<at id=工号></at>` 来 @ 人。5 个工号中4 个（00593200 /01324488 /01043503 /00091916）都能正常 @，唯独 **22025220** @ 后显示为空。##排查链路（三方接力）1. **Base 乔戈亚**：`lark.im.openapi` 发送时4 个工号都转成了19 位 user_id，只有 `22025220`原样留下，日志 `failLocalOfMetas=[EntityType_USER:1, IDs=(22025220)]`2. **飞书 Oncall机器人**（李文静 →江锐）：定位到 `lark.oapi.card`转换层报 `transformerUser user info not exist, larkID:22025220`；目录 facade返回了错误映射 `22025220 →22025220`3. **Base 自动化 RD（卞晓栋）最终定性**（8/19）： - Base 自动化发送前会把 `<at id>` 的值尝试转成 open_id - **0 开头的工号**：转换失败 → 自动化忽略错误、原样传工号 → 卡片层用 employee_id 解析成功 → @ 正常 - **22025220（2 开头）**：被“成功”转换成了一个**错误的 open_id**（`ou_ea6e9e9ebae5f0b152dc6fedcd74cc9a`）→ 卡片层查不到该用户 → @渲染为空所以根因是：**工号恰好被自动化误转换成无效 open_id**，不是群成员、权限或通讯录问题（这些都已排除）。## 当前状态与方案-工单状态：**[RD待处理]**，已转回 Base/自动化线（郑洁）- **用户侧绕过方案**（8/21卞晓栋最新回复）：消息体里别写工号，把 at 的 id换成 **lark_id**（该用户 user_id = `7096308547608133660`；获取方式：打开 debug模式右键复制），或改成引用人员字段- **产品侧待跟进**：自动化对 employee_id输入的转换逻辑应跳过/校验（卞晓栋已 @胡明煜讨论，因为之前有 id 类型导致卡片更新失败的先例，需要谨慎改）需要我帮你把这个结论整理成一段话发到群里，或者跟进后续 RD侧的修复进展吗？"
 
     static let checklist = "这条看起来是待排查的工单，我先给出最常见的排查清单——飞书群里 @不到人，基本就这几种原因：**1. 用的是“文本模拟@”而非真实@**- 直接拼字符串 `@张三` 只是纯文本，不会产生真实提醒。-必须用富文本/Post消息的 `at` 元素，或文本消息里的 `<at user_id=\"ou_xxx\"></at>` 占位，交互卡片则要在卡片中用 at组件。**2. user_id 类型不匹配（最常见）**- `open_id` / `user_id` / `union_id` 三种不能混用。消息 at 元素里的 `user_id` 字段要和请求参数 `key_type`（或元素内指定）一致。-建议统一用 `open_id`。**3.被人是“外部用户”或跨租户**- 对方如果是外部联系人/别的租户的人，机器人可能拿不到其 open_id，@不会生效。**4. 成员不在群里 / 已离职停用**- @ 的前提是在群内；账号停用后 at 元素会静默降级为文本。**5.机器人权限**-缺少获取群成员信息、或发送消息相关 scope 时，部分场景 at会被吞掉。---要继续往下定位，需要你补充几个信息："
@@ -141,6 +146,79 @@ struct ProseCheck {
         }
         expect(layoutBuilds == 1, "completed measured layout is reused across view lifetimes")
         expect(measured == measuredAgain && measured.height == 42, "measured height cache preserves its original result")
+
+        let markdownCache = ProseRenderCache(maxEntries: 4, maxEstimatedBytes: 4_096)
+        let markdownKey = ProseRenderKey(text: "# Cached\n\n**Markdown**", width: 0, typography: typography, variant: 10)
+        var markdownBuilds = 0
+        let markdown = markdownCache.cachedObject(
+            for: markdownKey,
+            variant: "markdown-content",
+            completed: true,
+            estimatedBytes: 512
+        ) {
+            markdownBuilds += 1
+            return MarkdownArtifactFixture(source: markdownKey.contentText, renderedPlainText: "Cached Markdown")
+        }
+        let markdownAgain = markdownCache.cachedObject(
+            for: markdownKey,
+            variant: "markdown-content",
+            completed: true,
+            estimatedBytes: 512
+        ) {
+            markdownBuilds += 1
+            return MarkdownArtifactFixture(source: "wrong", renderedPlainText: "wrong")
+        }
+        expect(markdownBuilds == 1, "completed MarkdownUI artifacts are reused across view lifetimes")
+        expect(markdown == markdownAgain && markdown.renderedPlainText == "Cached Markdown", "cached Markdown artifact preserves output parity")
+
+        let markdownEviction = ProseRenderCache(maxEntries: 2, maxEstimatedBytes: 1_024)
+        let markdownA = ProseRenderKey(text: "A", width: 0, typography: .contentOnly(layoutVersion: 2), variant: 10)
+        let markdownB = ProseRenderKey(text: "B", width: 0, typography: .contentOnly(layoutVersion: 2), variant: 10)
+        let markdownC = ProseRenderKey(text: "C", width: 0, typography: .contentOnly(layoutVersion: 2), variant: 10)
+        for key in [markdownA, markdownB, markdownC] {
+            _ = markdownEviction.cachedObject(
+                for: key,
+                variant: "markdown-content",
+                completed: true,
+                estimatedBytes: 500
+            ) {
+                MarkdownArtifactFixture(source: key.contentText, renderedPlainText: key.contentText)
+            }
+        }
+        expect(markdownEviction.entryCount <= 2, "MarkdownUI artifact cache stays within its count bound")
+        expect(markdownEviction.estimatedBytes <= 1_024, "MarkdownUI artifact cache stays within its byte bound")
+        var markdownARebuilt = false
+        _ = markdownEviction.cachedObject(
+            for: markdownA,
+            variant: "markdown-content",
+            completed: true,
+            estimatedBytes: 500
+        ) {
+            markdownARebuilt = true
+            return MarkdownArtifactFixture(source: "A-rebuilt", renderedPlainText: "A-rebuilt")
+        }
+        expect(markdownARebuilt, "least-recently-used MarkdownUI artifact is evicted first")
+
+        var streamingMarkdownBuilds = 0
+        _ = markdownCache.cachedObject(
+            for: markdownKey,
+            variant: "markdown-content",
+            completed: false,
+            estimatedBytes: 512
+        ) {
+            streamingMarkdownBuilds += 1
+            return MarkdownArtifactFixture(source: "live", renderedPlainText: "live")
+        }
+        _ = markdownCache.cachedObject(
+            for: markdownKey,
+            variant: "markdown-content",
+            completed: false,
+            estimatedBytes: 512
+        ) {
+            streamingMarkdownBuilds += 1
+            return MarkdownArtifactFixture(source: "live-2", renderedPlainText: "live-2")
+        }
+        expect(streamingMarkdownBuilds == 2, "streaming MarkdownUI content bypasses the completed artifact cache")
     }
 
     static func testNativeTextLayoutRouting() {
