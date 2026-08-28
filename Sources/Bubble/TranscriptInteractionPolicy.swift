@@ -122,6 +122,13 @@ enum TranscriptScrollAnimationPolicy {
 enum TranscriptWheelScrollPolicy {
     private static let discreteStep: CGFloat = 12
 
+    static func resolvedDelta(
+        scrollingDeltaY: CGFloat,
+        hasPreciseDeltas: Bool
+    ) -> CGFloat {
+        hasPreciseDeltas ? scrollingDeltaY : scrollingDeltaY * discreteStep
+    }
+
     static func nextOrigin(
         current: CGFloat,
         scrollingDeltaY: CGFloat,
@@ -129,9 +136,46 @@ enum TranscriptWheelScrollPolicy {
         minimum: CGFloat,
         maximum: CGFloat
     ) -> CGFloat {
-        let delta = hasPreciseDeltas ? scrollingDeltaY : scrollingDeltaY * discreteStep
+        let delta = resolvedDelta(
+            scrollingDeltaY: scrollingDeltaY,
+            hasPreciseDeltas: hasPreciseDeltas
+        )
         return min(maximum, max(minimum, current - delta))
     }
+}
+
+struct TranscriptWheelFrameStep: Equatable {
+    let applied: CGFloat
+    let remaining: CGFloat
+}
+
+enum TranscriptWheelFramePolicy {
+    /// Keep one LazyVStack realization slice below a 60 fps frame budget on
+    /// ProMotion displays while still allowing several thousand points/second.
+    static let maximumStep: CGFloat = 32
+    static let maximumPendingDelta = maximumStep * 3
+
+    static func queuedDelta(pending: CGFloat, incoming: CGFloat) -> CGFloat {
+        let combined: CGFloat
+        if pending == 0 || incoming == 0 || (pending > 0) == (incoming > 0) {
+            combined = pending + incoming
+        } else {
+            combined = incoming
+        }
+        return min(maximumPendingDelta, max(-maximumPendingDelta, combined))
+    }
+
+    static func nextFrame(pending: CGFloat, maximumStep: CGFloat) -> TranscriptWheelFrameStep {
+        let applied = min(maximumStep, max(-maximumStep, pending))
+        return TranscriptWheelFrameStep(applied: applied, remaining: pending - applied)
+    }
+}
+
+enum TranscriptViewportReportPolicy {
+    /// End-state and visible-row bookkeeping does not need ProMotion cadence.
+    /// Keeping it to the product's 60 fps contract leaves the intervening
+    /// refreshes available for AppKit and SwiftUI layout.
+    static let minimumInterval: TimeInterval = 1.0 / 60.0
 }
 
 struct TranscriptFollowState: Equatable {

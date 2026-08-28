@@ -176,6 +176,38 @@ private enum TranscriptInteractionCheck {
             ) == 88,
             "one discrete mouse-wheel notch remains large enough to feel immediate"
         )
+        expect(
+            TranscriptWheelFramePolicy.queuedDelta(pending: 200, incoming: 400)
+                == TranscriptWheelFramePolicy.maximumPendingDelta,
+            "same-direction trackpad packets coalesce without creating a long post-input tail"
+        )
+        expect(
+            TranscriptWheelFramePolicy.queuedDelta(pending: 200, incoming: -40) == -40,
+            "a direction reversal discards stale queued motion immediately"
+        )
+        expect(
+            TranscriptWheelFramePolicy.nextFrame(
+                pending: 600,
+                maximumStep: TranscriptWheelFramePolicy.maximumStep
+            ) == TranscriptWheelFrameStep(applied: 32, remaining: 568),
+            "one display refresh cannot realize an unbounded LazyVStack jump"
+        )
+        expect(
+            TranscriptWheelFramePolicy.nextFrame(
+                pending: -600,
+                maximumStep: TranscriptWheelFramePolicy.maximumStep
+            ) == TranscriptWheelFrameStep(applied: -32, remaining: -568),
+            "the per-frame movement bound is symmetric in both directions"
+        )
+        expect(
+            TranscriptWheelFramePolicy.nextFrame(pending: 40, maximumStep: 96)
+                == TranscriptWheelFrameStep(applied: 40, remaining: 0),
+            "a small direct gesture is fully visible on the first refresh"
+        )
+        expect(
+            TranscriptViewportReportPolicy.minimumInterval >= 1.0 / 60.0,
+            "viewport bookkeeping cannot run more often than the 60 fps UI contract"
+        )
         var follow = TranscriptFollowState()
         expect(follow.followsLatest, "a transcript starts pinned to the live edge")
         expect(!follow.showsScrollToEnd, "the jump chip stays hidden while already at the end")
