@@ -11,13 +11,15 @@ private func row(
     _ id: String,
     version: UInt64 = 1,
     height: CGFloat = 32,
-    text: String? = nil
+    text: String? = nil,
+    completed: Bool = true
 ) -> TranscriptRowSnapshot {
     TranscriptRowSnapshot(
         id: id,
         contentVersion: version,
         contentHash: id + "-" + String(version),
         estimatedHeight: height,
+        isCompleted: completed,
         kind: .assistant,
         text: text
     )
@@ -64,7 +66,13 @@ private enum AppKitTranscriptSurfaceCheck {
         assertNear(index.offset(of: 2), 21, "prepend preserves new prefix offsets")
 
         let session = TranscriptSessionHandle(sessionID: "appkit-check", generation: 1, revision: 0)
-        let rows = (0..<4_000).map { row("row-" + String($0), height: 30 + CGFloat($0 % 3)) }
+        let rows = (0..<4_000).map { index in
+            row(
+                "row-" + String(index),
+                height: 30 + CGFloat(index % 3),
+                completed: index == 3_999 ? false : true
+            )
+        }
         let initial = TranscriptSurfaceSnapshot(session: session, rows: rows, followsLatest: false)
         let adapter = AppKitTranscriptSurfaceAdapter(
             snapshot: initial,
@@ -100,15 +108,21 @@ private enum AppKitTranscriptSurfaceCheck {
         // transcript revision.
         var sawUserScroll = false
         var userScrollCallbacks = 0
+        var userScrollSequenceStarts = 0
         adapter.onViewportChanged = { _, userDriven in
             if userDriven {
                 sawUserScroll = true
                 userScrollCallbacks += 1
             }
         }
+        adapter.onUserScrollSequenceStarted = {
+            userScrollSequenceStarts += 1
+        }
+        adapter.userDidScroll()
         adapter.userDidScroll()
         expect(sawUserScroll, "user-scroll callback fires synchronously")
         expect(!adapter.snapshot.followsLatest, "user scroll detaches follow-latest")
+        expect(userScrollSequenceStarts == 1, "closely spaced wheel packets share one scroll sequence")
         let userScrollCountBeforeResize = userScrollCallbacks
         adapter.setViewportSize(NSSize(width: 480, height: 120))
         expect(userScrollCallbacks == userScrollCountBeforeResize, "resize does not masquerade as user scroll")
@@ -138,6 +152,40 @@ private enum AppKitTranscriptSurfaceCheck {
             1,
             "stable visible row host is reused",
             tolerance: 0
+        )
+
+        // A streamed tail update keeps the row sequence stable and updates
+        // one Fenwick point instead of rebuilding all 4,000 prefixes.
+        let rebuildsBeforeTail = adapter.metrics.heightIndexRebuilds
+        let pointUpdatesBeforeTail = adapter.metrics.heightIndexPointUpdates
+        var tailRows = rows
+        tailRows[tailRows.count - 1] = row("row-3999", version: 2, height: 96)
+        let tailRevision = adapter.currentHandle.nextRevision()
+        let tailEvents = adapter.apply(
+            .replace(
+                snapshot: TranscriptSurfaceSnapshot(
+                    session: tailRevision,
+                    rows: tailRows,
+                    followsLatest: false
+                )
+            )
+        )
+        expect(
+            tailEvents.contains {
+                if case let .snapshotApplied(_, _, invalidated, _) = $0 {
+                    return invalidated == ["row-3999"]
+                }
+                return false
+            },
+            "tail replacement invalidates only the streamed row"
+        )
+        expect(
+            adapter.metrics.heightIndexRebuilds == rebuildsBeforeTail,
+            "streaming tail replacement does not rebuild the height index"
+        )
+        expect(
+            adapter.metrics.heightIndexPointUpdates > pointUpdatesBeforeTail,
+            "streaming tail replacement performs a logarithmic point update"
         )
 
         // The post-wheel callback reports the actual end state after a user
@@ -204,6 +252,8 @@ private enum AppKitTranscriptSurfaceCheck {
         expect(adapter.currentHeightIndex.height(at: 0) == measuredHeight, "same width bucket retains measured height")
         adapter.setViewportSize(NSSize(width: 480.8, height: 120))
         expect(adapter.currentHeightIndex.height(at: 0) != measuredHeight, "width bucket change invalidates measured heights")
+        adapter.setViewportSize(NSSize(width: 480.2, height: 120))
+        expect(adapter.currentHeightIndex.height(at: 0) == measuredHeight, "returning to a width bucket restores its cached height")
 
         // A stale revision is ignored before it can affect mounted cells.
         let staleHost = adapter.hostObjectID(rowID: stableID)

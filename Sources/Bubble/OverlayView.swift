@@ -74,6 +74,19 @@ struct OverlayView: View {
     @State private var followQueued = false
     @State private var transcriptSurfaceCommand: AppKitTranscriptSurfaceOperation?
     @State private var transcriptSurfaceCommandToken: UInt64 = 0
+    @State private var transcriptSurfaceGeneration: UInt64 = 0
+    @State private var transcriptProjectionCache = TranscriptProjectionCache<
+        OverlayTranscriptProjectionKey,
+        [MainTranscriptRenderRow]
+    >()
+    @State private var transcriptEntriesCache = TranscriptProjectionCache<
+        OverlayTranscriptEntriesKey,
+        [OverlayTranscriptSurfaceEntry]
+    >()
+    @State private var historyTicksCache = TranscriptProjectionCache<
+        OverlayHistoryTicksKey,
+        [HistoryTick]
+    >()
     private var inputShape: RoundedRectangle {
         RoundedRectangle(cornerRadius: OverlayMetrics.cornerRadius, style: .continuous)
     }
@@ -146,6 +159,17 @@ struct OverlayView: View {
             sideStageWidth: previewWidth,
             visibleWidth: store.visibleScreenWidth
         )
+    }
+
+    /// `runtimeID` identifies the tab process, not the Pi conversation.  A
+    /// `/resume` replace keeps the same runtime while switching the underlying
+    /// session, so the transcript surface must use the current Pi id as its
+    /// identity and fall back only while the client is connecting.
+    private var transcriptSessionIdentity: String {
+        if let sessionID = store.currentSessionID, !sessionID.isEmpty {
+            return sessionID
+        }
+        return "runtime-\(store.runtimeID.uuidString)"
     }
 
     private var layout: OverlayLayout {
@@ -243,7 +267,6 @@ struct OverlayView: View {
                     .allowsHitTesting(store.sideStageChromeVisible)
             }
         }
-        .animation(OverlayMotion.composer, value: composerHeight)
         .padding(OverlayMetrics.shadowInset)
         .overlay {
             QuoteChipLayer(store: store)
@@ -277,6 +300,10 @@ struct OverlayView: View {
         followQueued = false
         transcriptSurfaceCommand = nil
         transcriptSurfaceCommandToken &+= 1
+        transcriptSurfaceGeneration &+= 1
+        transcriptProjectionCache.reset()
+        transcriptEntriesCache.reset()
+        historyTicksCache.reset()
         QuoteSelectionMonitor.shared.dismiss()
     }
 
@@ -610,6 +637,17 @@ struct OverlayView: View {
     }
 
     private var historyTicks: [HistoryTick] {
+        let tree = store.conversationTree
+        let key = OverlayHistoryTicksKey(
+            projection: transcriptProjectionKey,
+            treeLeafID: tree?.leafID,
+            treeEntryCount: tree?.entries.count ?? 0,
+            treeLastEntryID: tree?.entries.last?.id
+        )
+        return historyTicksCache.value(for: key) { buildHistoryTicks() }
+    }
+
+    private func buildHistoryTicks() -> [HistoryTick] {
         let entryIDByItemID = Dictionary(uniqueKeysWithValues: store.items.compactMap { item in
             item.sourceEntryId.map { (item.id, $0) }
         })
@@ -624,6 +662,10 @@ struct OverlayView: View {
     }
 
     private var mainTranscriptRows: [MainTranscriptRenderRow] {
+        transcriptProjectionCache.value(for: transcriptProjectionKey) { buildMainTranscriptRows() }
+    }
+
+    private func buildMainTranscriptRows() -> [MainTranscriptRenderRow] {
         let baseRows = displayRows
         let seeds = baseRows.map { row -> TranscriptRenderSeed in
             let kind: TranscriptRenderSeed.Kind
@@ -672,124 +714,35 @@ struct OverlayView: View {
         }
     }
 
+    private var transcriptProjectionKey: OverlayTranscriptProjectionKey {
+        OverlayTranscriptProjectionKey(
+            transcriptRevision: store.transcriptRevision,
+            visibleWindowFirstID: store.items.first?.id.uuidString,
+            visibleWindowCount: store.items.count,
+            historyCapacity: store.transcriptHistoryTurnCapacity,
+            isBusy: store.isBusy,
+            streamingAssistantID: store.streamingAssistantId?.uuidString,
+            streamingThoughtID: store.streamingThoughtId?.uuidString,
+            childBusy: store.childBusy,
+            childStreamingAssistantID: store.workspacePaneStreamingAssistantId?.uuidString,
+            childStreamingThoughtID: store.workspacePaneStreamingThoughtId?.uuidString,
+            branchSourceID: store.branchDraft?.sourceItemID.uuidString,
+            branchSwitching: store.isSwitchingBranch,
+            selectedWorkspaceCardID: store.workspaceStage?.cardId.uuidString,
+            interactionDisabled: store.isBusy || store.childBusy || store.isSwitchingBranch,
+            lastTurnDurationBucket: Int(max(0, store.lastTurnDuration).rounded()),
+            resumeSessionID: store.resumeDestination.prompt?.sessionID,
+            queuedCount: store.queuedMessages.count,
+            queuedLastID: store.queuedMessages.last?.id.uuidString,
+            queuedLastText: store.queuedMessages.last?.text
+        )
+    }
+
     @ViewBuilder
     private var transcriptList: some View {
         let rows = mainTranscriptRows
         let ticks = historyTicks
         transcriptAppKitScroll(rows: rows, ticks: ticks)
-    }
-
-    private func transcriptScroll<Content: View>(
-        rows: [MainTranscriptRenderRow],
-        ticks: [HistoryTick],
-        @ViewBuilder content: @escaping (ScrollViewProxy) -> Content
-    ) -> some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                content(proxy)
-            }
-            .scrollIndicators(.never)
-            .scrollBounceBehavior(.basedOnSize)
-            .contentMargins(.bottom, 0, for: .scrollContent)
-            .transaction { transaction in
-                if store.isBusy, followState.followingTurnTargetID == nil {
-                    transaction.disablesAnimations = true
-                }
-            }
-            .overlay {
-                if store.isStartingSession {
-                    ProgressView()
-                        .controlSize(.small)
-                        .accessibilityLabel("Starting Bubble")
-                }
-            }
-            .overlay(alignment: .leading) {
-                if !ticks.isEmpty {
-                    HistoryTickRail(
-                        ticks: ticks,
-                        viewportHeight: transcriptHeight
-                    ) { id in
-                        navigateToHistory(id: id.uuidString, proxy: proxy)
-                    }
-                }
-            }
-            .overlay(alignment: .bottom) {
-                if followState.showsScrollToEnd {
-                    ScrollToEndChip {
-                        scrollToTranscriptEnd(proxy)
-                        restoreFocus()
-                    }
-                    .padding(.bottom, 10)
-                }
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .transcriptHistoryNavigationSettled)) { note in
-                guard let targetID = note.userInfo?[TranscriptViewportUserInfoKey.targetID] as? String,
-                      let atEnd = note.userInfo?[TranscriptViewportUserInfoKey.atEnd] as? Bool else { return }
-                var next = followState
-                if next.finishHistoryNavigation(targetID: targetID, atEnd: atEnd) {
-                    followState = next
-                }
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .transcriptUserScrollStarted)) { _ in
-                followQueued = false
-                followState.userNavigated(atEnd: false)
-            }
-            .onAppear {
-                requestFollowLatest(proxy)
-                if let targetID = ProcessInfo.processInfo.environment[
-                    "BUBBLE_HISTORY_NAVIGATION_AUDIT_TARGET"
-                ], !targetID.isEmpty {
-                    OverlayPulse.shared.onNextFrame {
-                        navigateToHistory(id: targetID, proxy: proxy)
-                    }
-                }
-            }
-            .onChange(of: store.items.count) { _, _ in
-                if let item = store.items.last, item.kind == .user {
-                    followState.beginFollowingTurn(targetID: item.id.uuidString)
-                }
-                requestCurrentFollowTarget(proxy)
-            }
-            .onChange(of: store.transcriptRevision) { _, _ in
-                requestCurrentFollowTarget(
-                    proxy,
-                    allowsLatest: followState.shouldFollowRevision(isBusy: store.isBusy)
-                )
-            }
-            .onChange(of: store.resumeDestination.prompt?.sessionID) { _, sessionID in
-                guard sessionID != nil else { return }
-                OverlayPulse.shared.onNextFrame {
-                    withAnimation(OverlayMotion.scroll) {
-                        proxy.scrollTo("resume-destination", anchor: .bottom)
-                    }
-                }
-            }
-            .onChange(of: store.branchDraft?.sourceItemID) { _, sourceID in
-                guard let sourceID else { return }
-                followState.userNavigated(atEnd: false)
-                OverlayPulse.shared.onNextFrame {
-                    withAnimation(OverlayMotion.scroll) {
-                        proxy.scrollTo(sourceID.uuidString, anchor: .center)
-                    }
-                }
-            }
-            .onChange(of: store.isBusy) { wasBusy, isBusy in
-                if wasBusy, !isBusy, TranscriptFollowTriggerPolicy.shouldRequestLatest(
-                    trigger: .turnSettled,
-                    followsLatest: followState.followsLatest,
-                    isBusy: isBusy
-                ) {
-                    requestSettledFollowLatest(proxy)
-                } else {
-                    requestCurrentFollowTarget(proxy)
-                }
-            }
-            .onChange(of: composerHeight) { _, _ in
-                if followState.followsLatest {
-                    requestFollowLatest(proxy)
-                }
-            }
-        }
     }
 
     /// AppKit owns the scroll viewport and the reusable row window.  SwiftUI
@@ -801,11 +754,18 @@ struct OverlayView: View {
         rows: [MainTranscriptRenderRow],
         ticks: [HistoryTick]
     ) -> some View {
-        let entries = appKitTranscriptEntries(rows)
+        let entriesKey = OverlayTranscriptEntriesKey(
+            projection: transcriptProjectionKey,
+            tickCount: ticks.count,
+            tickLastID: ticks.last?.id.uuidString
+        )
+        let entries = transcriptEntriesCache.value(for: entriesKey) {
+            appKitTranscriptEntries(rows)
+        }
         let snapshot = TranscriptSurfaceSnapshot(
             session: TranscriptSessionHandle(
-                sessionID: store.runtimeID.uuidString,
-                generation: 0,
+                sessionID: transcriptSessionIdentity,
+                generation: transcriptSurfaceGeneration,
                 revision: store.transcriptRevision
             ),
             rows: entries.map(\.snapshot),
@@ -831,26 +791,27 @@ struct OverlayView: View {
                     // post-wheel user callback carries the actual atEnd state
                     // and can restore following when the wheel reaches tail.
                     followQueued = false
-                    if atEnd {
-                        var next = followState
-                        if next.viewportChanged(atEnd: true, userDriven: true) {
-                            followState = next
+                    var next = followState
+                    if next.viewportChanged(atEnd: atEnd, userDriven: true) {
+                        let wasFollowing = followState.followsLatest
+                        followState = next
+                        if atEnd, next.followsLatest, !wasFollowing {
                             transcriptSurfaceCommand = .setFollowLatest(true)
                             transcriptSurfaceCommandToken &+= 1
                         }
-                    } else {
-                        followState.userNavigated(atEnd: false)
                     }
-                    NotificationCenter.default.post(
-                        name: .transcriptUserScrollStarted,
-                        object: nil
-                    )
                 } else if followState.historyNavigationTargetID == nil {
                     // Bounds changes are intentionally passive.  They keep the
                     // end chip's state observable without interpreting window
                     // resize or measurement clamps as user intent.
                     _ = atEnd
                 }
+            },
+            onUserScrollSequenceStarted: {
+                NotificationCenter.default.post(
+                    name: .transcriptUserScrollStarted,
+                    object: nil
+                )
             },
             onCommandCompleted: { operation, atEnd in
                 switch operation {
@@ -899,7 +860,7 @@ struct OverlayView: View {
                 }
             }
         )
-        .id("transcript-surface-\(store.runtimeID.uuidString)")
+        .id("transcript-surface-\(transcriptSessionIdentity)-g\(transcriptSurfaceGeneration)")
         .overlay {
             if store.isStartingSession {
                 ProgressView()
@@ -943,6 +904,13 @@ struct OverlayView: View {
         .onChange(of: store.runtimeID) { _, _ in
             transcriptSurfaceCommand = nil
             transcriptSurfaceCommandToken &+= 1
+        }
+        .onChange(of: store.currentSessionID) { oldID, newID in
+            guard oldID != newID else { return }
+            // Session switches (including /resume replace-current) invalidate
+            // all pooled rich rows, anchors, disclosure state, and pending
+            // viewport commands before the new snapshot is mounted.
+            resetSessionPresentationState()
         }
         .onChange(of: store.transcriptRevision) { _, _ in
             // The snapshot's revision drives row application.  Keep a
@@ -1156,6 +1124,28 @@ struct OverlayView: View {
         isCompleted: Bool = true
     ) -> TranscriptRowSnapshot {
         let hash = TranscriptRowSnapshot.stableHash(fingerprint)
+        let typography: TranscriptTypographyKey = {
+            switch kind {
+            case .tool:
+                return TranscriptTypographyKey(
+                    fontFamily: ".AppleSystemUIFont",
+                    pointSize: 13,
+                    weight: 400,
+                    lineHeight: 1.5,
+                    styleID: "bubble-transcript-tool-v1"
+                )
+            case .system:
+                return TranscriptTypographyKey(
+                    fontFamily: ".AppleSystemUIFont",
+                    pointSize: 13,
+                    weight: 400,
+                    lineHeight: 1.5,
+                    styleID: "bubble-transcript-system-v1"
+                )
+            default:
+                return TranscriptTypographyKey.default
+            }
+        }()
         return TranscriptRowSnapshot(
             id: id,
             contentVersion: UInt64(hash, radix: 16) ?? 0,
@@ -1163,7 +1153,9 @@ struct OverlayView: View {
             estimatedHeight: estimatedHeight,
             isCompleted: isCompleted,
             kind: kind,
-            text: text
+            text: text,
+            typography: typography,
+            layoutVersion: TranscriptTypographyKey.defaultLayoutVersion
         )
     }
 
@@ -1206,87 +1198,6 @@ struct OverlayView: View {
         let lineCount = max(1, text.split(whereSeparator: \.isNewline).count)
         let roughLines = min(18, max(lineCount, Int(ceil(Double(text.count) / 92.0))))
         return max(42, min(420, CGFloat(roughLines) * 19 + 26))
-    }
-
-    private func transcriptStackStyle<Content: View>(
-        _ content: Content,
-        hasHistoryTicks: Bool,
-        proxy: ScrollViewProxy
-    ) -> some View {
-        TranscriptSelectionScope {
-            content
-        }
-            .padding(
-                .leading,
-                hasHistoryTicks ? HistoryLimits.gutter + 16 : OverlayMetrics.transcriptInset
-            )
-            .padding(.trailing, OverlayMetrics.transcriptInset)
-            .padding(.top, OverlayMetrics.transcriptInset)
-            .padding(.bottom, 0)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .foregroundStyle(OverlaySurface.conversationInk)
-            .background {
-                TranscriptScrollObserver(
-                    maintainsVisibleContent: followState.maintainsVisibleContent,
-                    onContentHeightChange: {
-                        if TranscriptFollowTriggerPolicy.shouldRequestLatest(
-                            trigger: .contentHeightChanged,
-                            followsLatest: followState.followsLatest,
-                            isBusy: store.isBusy
-                        ) {
-                            requestFollowLatest(proxy)
-                        }
-                    }
-                ) { atEnd, userDriven in
-                    var next = followState
-                    if next.viewportChanged(atEnd: atEnd, userDriven: userDriven) {
-                        followState = next
-                    }
-                }
-            }
-    }
-
-    @ViewBuilder
-    private func transcriptStackContent(_ rows: [MainTranscriptRenderRow]) -> some View {
-        if store.hasEarlierTranscriptItems {
-            loadEarlierTranscriptButton
-        }
-        if store.lastTurnDuration >= 1, !store.isBusy {
-            workedHeader(store.lastTurnDuration)
-        }
-        ForEach(rows) { row in
-            if row.startsAfterBranchPoint {
-                branchCutoverDivider
-            }
-            EquatableSection(value: mainRowRenderKey(row)) {
-                mainTranscriptRow(row)
-            }
-            .equatable()
-            .id(row.id)
-            .background {
-                TranscriptRowAnchor(id: row.id, historyTickID: row.historyTickID)
-            }
-            .padding(.top, row.isContinuation ? -10 : 0)
-            .opacity(row.isAfterBranchPoint ? 0.34 : 1)
-        }
-        if let prompt = store.resumeDestination.prompt {
-            ResumeDestinationCard(
-                prompt: prompt,
-                choose: store.resolveResumeDestination
-            )
-            .id("resume-destination")
-        }
-        if store.isBusy {
-            WorkingRow(startedAt: store.turnStartedAt ?? Date())
-                .id("working")
-        }
-        ForEach(store.queuedMessages) { message in
-            queuedUserBubble(message)
-                .id("waiting-\(message.id.uuidString)")
-        }
-        Color.clear
-            .frame(height: OverlayMetrics.transcriptCornerRadius)
-            .id("transcript-end")
     }
 
     private var loadEarlierTranscriptButton: some View {
@@ -2023,7 +1934,8 @@ struct OverlayView: View {
                     || store.streamingThoughtId == item.id
                     || store.workspacePaneStreamingAssistantId == item.id
                     || store.workspacePaneStreamingThoughtId == item.id,
-                selected: store.workspaceStage?.cardId == item.id
+                selected: store.workspaceStage?.cardId == item.id,
+                interactionDisabled: store.isBusy || store.childBusy || store.isSwitchingBranch
             )
         case .collapsedTools(let id, let items):
             return RowRenderKey(
@@ -2039,7 +1951,8 @@ struct OverlayView: View {
                 workspaceStatus: nil,
                 workspaceSummary: nil,
                 live: false,
-                selected: false
+                selected: false,
+                interactionDisabled: store.isBusy || store.childBusy || store.isSwitchingBranch
             )
         case .fileChanges(let summary):
             return RowRenderKey(
@@ -2055,7 +1968,8 @@ struct OverlayView: View {
                 workspaceStatus: nil,
                 workspaceSummary: nil,
                 live: false,
-                selected: false
+                selected: false,
+                interactionDisabled: store.isBusy || store.childBusy || store.isSwitchingBranch
             )
         }
     }
@@ -2135,117 +2049,6 @@ struct OverlayView: View {
         if let root = window.contentView,
            let textView = ComposerEditorLocator.restoreComposerFocus(in: window, root: root) {
             textView.insertionPointColor = .textColor
-        }
-    }
-
-    private func requestFollowLatest(_ proxy: ScrollViewProxy) {
-        guard followState.followsLatest, !followQueued else { return }
-        followQueued = true
-        OverlayPulse.shared.onNextFrame {
-            followQueued = false
-            guard followState.followsLatest else { return }
-            var transaction = Transaction()
-            transaction.disablesAnimations = true
-            withTransaction(transaction) {
-                proxy.scrollTo("transcript-end", anchor: .bottom)
-            }
-        }
-    }
-
-    private func requestFollowTurn(_ proxy: ScrollViewProxy) {
-        guard let targetID = followState.followingTurnTargetID, !followQueued else { return }
-        followQueued = true
-        NotificationCenter.default.post(name: .transcriptProgrammaticScrollStarted, object: nil)
-        OverlayPulse.shared.onNextFrame {
-            followQueued = false
-            guard followState.followingTurnTargetID == targetID else { return }
-            performTranscriptScroll(.navigateToTurn) {
-                proxy.scrollTo(
-                    targetID,
-                    anchor: UnitPoint(x: 0.5, y: TranscriptTurnAlignmentPolicy.viewportAnchorY)
-                )
-            }
-            var next = followState
-            if next.finishFollowingTurn(targetID: targetID) {
-                followState = next
-                requestFollowLatest(proxy)
-            }
-        }
-    }
-
-    private func requestSettledFollowLatest(_ proxy: ScrollViewProxy) {
-        requestFollowLatest(proxy)
-        DispatchQueue.main.asyncAfter(deadline: .now() + TranscriptFollowPolicy.layoutSettleDelay) {
-            requestFollowLatest(proxy)
-        }
-    }
-
-    private func requestCurrentFollowTarget(
-        _ proxy: ScrollViewProxy,
-        allowsLatest: Bool = true
-    ) {
-        if followState.followingTurnTargetID != nil {
-            requestFollowTurn(proxy)
-        } else if allowsLatest {
-            requestFollowLatest(proxy)
-        }
-    }
-
-    private func scrollToTranscriptEnd(_ proxy: ScrollViewProxy) {
-        followState.beginScrollToEnd()
-        NotificationCenter.default.post(name: .transcriptProgrammaticScrollStarted, object: nil)
-        OverlayPulse.shared.onNextFrame {
-            performTranscriptScroll(.returnToEnd) {
-                proxy.scrollTo("transcript-end", anchor: .bottom)
-            }
-        }
-    }
-
-    private func performTranscriptScroll(
-        _ request: TranscriptScrollRequest,
-        action: () -> Void
-    ) {
-        if TranscriptScrollAnimationPolicy.shouldAnimate(request) {
-            withAnimation(OverlayMotion.scroll, action)
-        } else {
-            var transaction = Transaction()
-            transaction.disablesAnimations = true
-            withTransaction(transaction, action)
-        }
-    }
-
-    private func navigateToHistory(id targetID: String, proxy: ScrollViewProxy) {
-        followState.beginHistoryNavigation(targetID: targetID)
-        NotificationCenter.default.post(
-            name: .transcriptHistoryNavigationRequested,
-            object: nil,
-            userInfo: [TranscriptViewportUserInfoKey.targetID: targetID]
-        )
-        realizeHistoryTarget(targetID, proxy: proxy, attempt: 0)
-    }
-
-    private func realizeHistoryTarget(
-        _ targetID: String,
-        proxy: ScrollViewProxy,
-        attempt: Int
-    ) {
-        guard followState.historyNavigationTargetID == targetID else { return }
-        guard attempt < 240 else {
-            var next = followState
-            if next.finishHistoryNavigation(targetID: targetID, atEnd: false) {
-                followState = next
-            }
-            OverlayLog.write("history navigation target did not mount: \(targetID)")
-            return
-        }
-        OverlayPulse.shared.onNextFrame {
-            guard followState.historyNavigationTargetID == targetID else { return }
-            var transaction = Transaction()
-            transaction.disablesAnimations = true
-            withTransaction(transaction) {
-                proxy.scrollTo(targetID, anchor: .top)
-            }
-            realizeHistoryTarget(targetID, proxy: proxy, attempt: attempt + 1)
         }
     }
 
@@ -3081,7 +2884,6 @@ private struct CollapsedToolsHost: View {
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
                         .font(.system(size: 9, weight: .bold))
                         .frame(width: 8)
                     Image(systemName: "chevron.left.forwardslash.chevron.right")
@@ -3712,6 +3514,7 @@ private struct RowRenderKey: Equatable {
     var workspaceSummary: String?
     var live: Bool
     var selected: Bool
+    var interactionDisabled: Bool
 }
 
 private struct MainTranscriptRenderKey: Equatable {
@@ -3950,6 +3753,41 @@ private struct MainTranscriptRenderRow: Identifiable {
     }
 }
 
+private struct OverlayTranscriptProjectionKey: Equatable {
+    let transcriptRevision: UInt64
+    let visibleWindowFirstID: String?
+    let visibleWindowCount: Int
+    let historyCapacity: Int
+    let isBusy: Bool
+    let streamingAssistantID: String?
+    let streamingThoughtID: String?
+    let childBusy: Bool
+    let childStreamingAssistantID: String?
+    let childStreamingThoughtID: String?
+    let branchSourceID: String?
+    let branchSwitching: Bool
+    let selectedWorkspaceCardID: String?
+    let interactionDisabled: Bool
+    let lastTurnDurationBucket: Int
+    let resumeSessionID: String?
+    let queuedCount: Int
+    let queuedLastID: String?
+    let queuedLastText: String?
+}
+
+private struct OverlayTranscriptEntriesKey: Equatable {
+    let projection: OverlayTranscriptProjectionKey
+    let tickCount: Int
+    let tickLastID: String?
+}
+
+private struct OverlayHistoryTicksKey: Equatable {
+    let projection: OverlayTranscriptProjectionKey
+    let treeLeafID: String?
+    let treeEntryCount: Int
+    let treeLastEntryID: String?
+}
+
 private struct OverlayTranscriptSurfaceEntry {
     let snapshot: TranscriptRowSnapshot
     let render: () -> AnyView
@@ -3957,11 +3795,14 @@ private struct OverlayTranscriptSurfaceEntry {
 
 private final class OverlayTranscriptRenderBox {
     private var renderers: [String: () -> AnyView] = [:]
+    private var lastEntriesSignal: UInt64?
     var decorator: ((_ rowID: String, _ content: AnyView) -> AnyView)?
     var onMeasuredHeight: ((_ rowID: String, _ height: CGFloat) -> Void)?
 
-    func update(entries: [OverlayTranscriptSurfaceEntry]) {
+    func update(entries: [OverlayTranscriptSurfaceEntry], signal: UInt64) {
+        guard lastEntriesSignal != signal else { return }
         renderers = Dictionary(uniqueKeysWithValues: entries.map { ($0.snapshot.id, $0.render) })
+        lastEntriesSignal = signal
     }
 
     func render(rowID: String) -> AnyView {
@@ -4047,6 +3888,7 @@ private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
     let commandToken: UInt64
     let onOpenFilePreview: (String) -> Void
     let onViewportChanged: (_ atEnd: Bool, _ userDriven: Bool) -> Void
+    let onUserScrollSequenceStarted: () -> Void
     let onCommandCompleted: (_ operation: AppKitTranscriptSurfaceOperation, _ atEnd: Bool) -> Void
 
     final class Coordinator {
@@ -4054,6 +3896,7 @@ private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
         let adapter: AppKitTranscriptSurfaceAdapter
         private var diagnosticsProbe: TranscriptScrollProbe?
         private var viewportHandler: ((_ atEnd: Bool, _ userDriven: Bool) -> Void)?
+        private var userScrollSequenceHandler: (() -> Void)?
         var lastCommandToken: UInt64 = 0
         var lastSurfaceSignal: UInt64?
 
@@ -4102,6 +3945,7 @@ private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
         func configureCallbacks(
             onOpenFilePreview: @escaping (String) -> Void,
             onViewportChanged: @escaping (_ atEnd: Bool, _ userDriven: Bool) -> Void,
+            onUserScrollSequenceStarted: @escaping () -> Void,
             onCommandCompleted: @escaping (_ operation: AppKitTranscriptSurfaceOperation, _ atEnd: Bool) -> Void
         ) {
             // The rich row closures already carry the current store's
@@ -4123,8 +3967,12 @@ private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
                     }
                 }
             }
+            userScrollSequenceHandler = onUserScrollSequenceStarted
             adapter.onViewportChanged = { [weak self] atEnd, userDriven in
                 self?.viewportHandler?(atEnd, userDriven)
+            }
+            adapter.onUserScrollSequenceStarted = { [weak self] in
+                self?.userScrollSequenceHandler?()
             }
             renderBox.onMeasuredHeight = { [weak self] rowID, height in
                 guard let self, self.adapter.updateMeasuredHeight(rowID: rowID, height: height) else {
@@ -4153,9 +4001,10 @@ private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
             commandToken: UInt64,
             onOpenFilePreview: @escaping (String) -> Void,
             onViewportChanged: @escaping (_ atEnd: Bool, _ userDriven: Bool) -> Void,
+            onUserScrollSequenceStarted: @escaping () -> Void,
             onCommandCompleted: @escaping (_ operation: AppKitTranscriptSurfaceOperation, _ atEnd: Bool) -> Void
         ) {
-            renderBox.update(entries: entries)
+            renderBox.update(entries: entries, signal: surfaceSignal)
             renderBox.decorator = { rowID, content in
                 guard rowID != "transcript-top-spacer", rowID != "transcript-end" else {
                     return content
@@ -4172,6 +4021,7 @@ private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
             configureCallbacks(
                 onOpenFilePreview: onOpenFilePreview,
                 onViewportChanged: onViewportChanged,
+                onUserScrollSequenceStarted: onUserScrollSequenceStarted,
                 onCommandCompleted: onCommandCompleted
             )
             adapter.setViewportSize(viewportSize)
@@ -4239,6 +4089,7 @@ private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
             commandToken: commandToken,
             onOpenFilePreview: onOpenFilePreview,
             onViewportChanged: onViewportChanged,
+            onUserScrollSequenceStarted: onUserScrollSequenceStarted,
             onCommandCompleted: onCommandCompleted
         )
         return context.coordinator.adapter.scrollView
@@ -4256,6 +4107,7 @@ private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
             commandToken: commandToken,
             onOpenFilePreview: onOpenFilePreview,
             onViewportChanged: onViewportChanged,
+            onUserScrollSequenceStarted: onUserScrollSequenceStarted,
             onCommandCompleted: onCommandCompleted
         )
     }

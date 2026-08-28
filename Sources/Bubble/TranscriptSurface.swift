@@ -88,6 +88,13 @@ struct TranscriptRowSnapshot: Identifiable, Equatable, Hashable, Sendable {
     let isCompleted: Bool
     let kind: TranscriptRowKind
     let text: String?
+    /// Layout inputs travel with the immutable row projection.  They are
+    /// deliberately separate from `contentIdentity`: changing width,
+    /// typography, scale, or local disclosure geometry must invalidate a
+    /// measured height without rebuilding an otherwise stable rich host.
+    let typography: TranscriptTypographyKey
+    let geometry: TranscriptLocalGeometryState
+    let layoutVersion: UInt64
 
     init(
         id: String,
@@ -96,7 +103,10 @@ struct TranscriptRowSnapshot: Identifiable, Equatable, Hashable, Sendable {
         estimatedHeight: CGFloat,
         isCompleted: Bool = true,
         kind: TranscriptRowKind = .other,
-        text: String? = nil
+        text: String? = nil,
+        typography: TranscriptTypographyKey = TranscriptTypographyKey.default,
+        geometry: TranscriptLocalGeometryState = TranscriptLocalGeometryState(),
+        layoutVersion: UInt64 = TranscriptTypographyKey.defaultLayoutVersion
     ) {
         self.id = id
         self.contentVersion = contentVersion
@@ -105,6 +115,9 @@ struct TranscriptRowSnapshot: Identifiable, Equatable, Hashable, Sendable {
         self.isCompleted = isCompleted
         self.kind = kind
         self.text = text
+        self.typography = typography
+        self.geometry = geometry
+        self.layoutVersion = layoutVersion
     }
 
     init(
@@ -114,7 +127,10 @@ struct TranscriptRowSnapshot: Identifiable, Equatable, Hashable, Sendable {
         estimatedHeight: CGFloat,
         isCompleted: Bool = true,
         kind: TranscriptRowKind = .other,
-        text: String? = nil
+        text: String? = nil,
+        typography: TranscriptTypographyKey = TranscriptTypographyKey.default,
+        geometry: TranscriptLocalGeometryState = TranscriptLocalGeometryState(),
+        layoutVersion: UInt64 = TranscriptTypographyKey.defaultLayoutVersion
     ) {
         self.init(
             id: id,
@@ -123,7 +139,10 @@ struct TranscriptRowSnapshot: Identifiable, Equatable, Hashable, Sendable {
             estimatedHeight: estimatedHeight,
             isCompleted: isCompleted,
             kind: kind,
-            text: text
+            text: text,
+            typography: typography,
+            geometry: geometry,
+            layoutVersion: layoutVersion
         )
     }
 
@@ -133,7 +152,10 @@ struct TranscriptRowSnapshot: Identifiable, Equatable, Hashable, Sendable {
         text: String,
         estimatedHeight: CGFloat,
         isCompleted: Bool = true,
-        kind: TranscriptRowKind = .other
+        kind: TranscriptRowKind = .other,
+        typography: TranscriptTypographyKey = TranscriptTypographyKey.default,
+        geometry: TranscriptLocalGeometryState = TranscriptLocalGeometryState(),
+        layoutVersion: UInt64 = TranscriptTypographyKey.defaultLayoutVersion
     ) {
         self.init(
             id: id,
@@ -142,7 +164,10 @@ struct TranscriptRowSnapshot: Identifiable, Equatable, Hashable, Sendable {
             estimatedHeight: estimatedHeight,
             isCompleted: isCompleted,
             kind: kind,
-            text: text
+            text: text,
+            typography: typography,
+            geometry: geometry,
+            layoutVersion: layoutVersion
         )
     }
 
@@ -241,6 +266,15 @@ final class TranscriptInteractionStore {
 /// Font.  That keeps cache keys usable by the model/rendering boundary and in
 /// command-line deterministic checks.
 struct TranscriptTypographyKey: Equatable, Hashable, Sendable {
+    static let defaultLayoutVersion: UInt64 = 1
+    static let `default` = TranscriptTypographyKey(
+        fontFamily: ".AppleSystemUIFont",
+        pointSize: 14,
+        weight: 400,
+        lineHeight: 1.625,
+        styleID: "bubble-transcript-body"
+    )
+
     let fontFamily: String
     let pointSize: Int
     let weight: Int
@@ -309,6 +343,7 @@ struct TranscriptLayoutCacheKey: Equatable, Hashable, Sendable {
     let typography: TranscriptTypographyKey
     let quantizedScale: Int
     let geometry: TranscriptLocalGeometryState
+    let layoutVersion: UInt64
 
     init(
         rowID: String,
@@ -317,15 +352,17 @@ struct TranscriptLayoutCacheKey: Equatable, Hashable, Sendable {
         width: CGFloat,
         typography: TranscriptTypographyKey,
         scale: CGFloat = 1,
-        geometry: TranscriptLocalGeometryState = TranscriptLocalGeometryState()
+        geometry: TranscriptLocalGeometryState = TranscriptLocalGeometryState(),
+        layoutVersion: UInt64 = TranscriptTypographyKey.defaultLayoutVersion
     ) {
         self.rowID = rowID
         self.contentVersion = contentVersion
         self.contentHash = contentHash
-        self.quantizedWidth = Self.quantize(width)
+        self.quantizedWidth = Self.quantizeWidth(width)
         self.typography = typography
         self.quantizedScale = Self.quantize(scale)
         self.geometry = geometry
+        self.layoutVersion = layoutVersion
     }
 
     init(
@@ -335,7 +372,8 @@ struct TranscriptLayoutCacheKey: Equatable, Hashable, Sendable {
         font: String,
         style: String,
         scale: CGFloat = 1,
-        isExpanded: Bool = false
+        isExpanded: Bool = false,
+        layoutVersion: UInt64 = TranscriptTypographyKey.defaultLayoutVersion
     ) {
         self.init(
             rowID: rowID,
@@ -343,15 +381,23 @@ struct TranscriptLayoutCacheKey: Equatable, Hashable, Sendable {
             width: width,
             typography: TranscriptTypographyKey(font: font, style: style),
             scale: scale,
-            geometry: TranscriptLocalGeometryState(isExpanded: isExpanded)
+            geometry: TranscriptLocalGeometryState(isExpanded: isExpanded),
+            layoutVersion: layoutVersion
         )
     }
 
-    var width: CGFloat { CGFloat(quantizedWidth) / 64 }
+    /// Widths are bucketed to half-point precision.  This suppresses AppKit
+    /// sub-pixel geometry churn while allowing a 0.5pt wrap boundary to use a
+    /// separate cached measurement.
+    var width: CGFloat { CGFloat(quantizedWidth) / 2 }
     var scale: CGFloat { CGFloat(quantizedScale) / 64 }
 
     private static func quantize(_ value: CGFloat) -> Int {
         Int((value.isFinite ? value : 0).rounded(.toNearestOrAwayFromZero) * 64)
+    }
+
+    private static func quantizeWidth(_ value: CGFloat) -> Int {
+        Int((value.isFinite ? value : 0).rounded(.toNearestOrAwayFromZero) * 2)
     }
 }
 
@@ -398,6 +444,35 @@ final class TranscriptHeightCache {
     private func touch(_ key: TranscriptLayoutCacheKey) {
         recency.removeAll { $0 == key }
         recency.append(key)
+    }
+}
+
+/// A tiny identity cache for expensive transcript projections.  SwiftUI may
+/// evaluate an ancestor body for unrelated composer state; callers can keep
+/// the immutable projection alive and only rebuild it when the explicit key
+/// changes.  The counter is intentionally observable in focused checks so a
+/// regression cannot silently reintroduce an O(N) projection on every keystroke.
+final class TranscriptProjectionCache<Key: Equatable, Value> {
+    private var cachedKey: Key?
+    private var cachedValue: Value?
+    private(set) var buildCount = 0
+
+    init() {}
+
+    func value(for key: Key, make: () -> Value) -> Value {
+        if let cachedKey, cachedKey == key, let cachedValue {
+            return cachedValue
+        }
+        let next = make()
+        cachedKey = key
+        cachedValue = next
+        buildCount += 1
+        return next
+    }
+
+    func reset() {
+        cachedKey = nil
+        cachedValue = nil
     }
 }
 
@@ -467,7 +542,13 @@ struct TranscriptSurfaceCommand: Equatable, Sendable {
         TranscriptSurfaceCommand(
             session: snapshot.session,
             kind: .replace(rows: snapshot.rows, followsLatest: snapshot.followsLatest),
-            anchorPolicy: anchor.map(TranscriptSurfaceAnchorPolicy.preserve) ?? .keepViewport
+            // A producer snapshot may carry the anchor captured immediately
+            // before a history prepend/replace.  Respect it by default;
+            // callers can still override with an explicit `preserving:`
+            // anchor when they have a fresher viewport observation.
+            anchorPolicy: anchor.map(TranscriptSurfaceAnchorPolicy.preserve)
+                ?? snapshot.anchor.map(TranscriptSurfaceAnchorPolicy.preserve)
+                ?? .keepViewport
         )
     }
 
@@ -612,15 +693,14 @@ protocol TranscriptSurfaceAdapter: AnyObject {
     func perform(_ command: TranscriptSurfaceCommand) -> [TranscriptSurfaceEvent]
 }
 
-/// A Foundation-only adapter used by the UI boundary and deterministic checks.
-/// A production adapter can consume the same commands and emit the same events
-/// without taking a dependency on SwiftUI view identity.
-final class RecordingTranscriptSurfaceAdapter: TranscriptSurfaceAdapter {
+/// The non-recording state reducer used by the production AppKit surface.
+/// Keeping it free of command/event history is important: a streamed turn can
+/// produce thousands of replacements and must not retain O(revisions × rows)
+/// memory merely because it is rendered in the UI.
+final class TranscriptSurfaceState: TranscriptSurfaceAdapter {
     private(set) var snapshot: TranscriptSurfaceSnapshot
     let interactionStore: TranscriptInteractionStore
     let heightCache: TranscriptHeightCache
-    private(set) var recordedCommands: [TranscriptSurfaceCommand] = []
-    private(set) var recordedEvents: [TranscriptSurfaceEvent] = []
 
     init(
         snapshot: TranscriptSurfaceSnapshot? = nil,
@@ -641,10 +721,7 @@ final class RecordingTranscriptSurfaceAdapter: TranscriptSurfaceAdapter {
 
     @discardableResult
     func apply(_ command: TranscriptSurfaceCommand) -> [TranscriptSurfaceEvent] {
-        let events = applyCommand(command)
-        recordedCommands.append(command)
-        recordedEvents.append(contentsOf: events)
-        return events
+        applyCommand(command)
     }
 
     @discardableResult
@@ -1028,5 +1105,45 @@ final class RecordingTranscriptSurfaceAdapter: TranscriptSurfaceAdapter {
     private func isReplace(_ kind: TranscriptSurfaceCommand.Kind) -> Bool {
         if case .replace = kind { return true }
         return false
+    }
+}
+
+/// Recording remains available for deterministic Foundation-only checks, but
+/// production adapters should use `TranscriptSurfaceState` directly.  The
+/// wrapper owns only the bounded test history and forwards state operations.
+final class RecordingTranscriptSurfaceAdapter: TranscriptSurfaceAdapter {
+    private let state: TranscriptSurfaceState
+    private(set) var recordedCommands: [TranscriptSurfaceCommand] = []
+    private(set) var recordedEvents: [TranscriptSurfaceEvent] = []
+
+    init(
+        snapshot: TranscriptSurfaceSnapshot? = nil,
+        interactionStore: TranscriptInteractionStore = TranscriptInteractionStore(),
+        heightCache: TranscriptHeightCache = TranscriptHeightCache()
+    ) {
+        state = TranscriptSurfaceState(
+            snapshot: snapshot,
+            interactionStore: interactionStore,
+            heightCache: heightCache
+        )
+    }
+
+    var snapshot: TranscriptSurfaceSnapshot { state.snapshot }
+    var interactionStore: TranscriptInteractionStore { state.interactionStore }
+    var heightCache: TranscriptHeightCache { state.heightCache }
+    var currentHandle: TranscriptSessionHandle { state.currentHandle }
+    func nextCommandHandle() -> TranscriptSessionHandle { currentHandle.nextRevision() }
+
+    @discardableResult
+    func apply(_ command: TranscriptSurfaceCommand) -> [TranscriptSurfaceEvent] {
+        let events = state.apply(command)
+        recordedCommands.append(command)
+        recordedEvents.append(contentsOf: events)
+        return events
+    }
+
+    @discardableResult
+    func perform(_ command: TranscriptSurfaceCommand) -> [TranscriptSurfaceEvent] {
+        apply(command)
     }
 }

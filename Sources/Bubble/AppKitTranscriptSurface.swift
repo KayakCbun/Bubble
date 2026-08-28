@@ -228,6 +228,8 @@ struct AppKitTranscriptSurfaceMetrics {
     private(set) var totalMounts = 0
     private(set) var totalUnmounts = 0
     private(set) var pooledReuses = 0
+    private(set) var heightIndexRebuilds = 0
+    private(set) var heightIndexPointUpdates = 0
 
     mutating func recordLayout(duration: TimeInterval) {
         layoutCount += 1
@@ -245,6 +247,14 @@ struct AppKitTranscriptSurfaceMetrics {
     mutating func recordUnmount(count: Int) {
         totalUnmounts += count
     }
+
+    mutating func recordHeightIndexRebuild() {
+        heightIndexRebuilds += 1
+    }
+
+    mutating func recordHeightIndexPointUpdate() {
+        heightIndexPointUpdates += 1
+    }
 }
 
 /// The clip view used by the production surface.  AppKit's bounds-change
@@ -254,11 +264,11 @@ struct AppKitTranscriptSurfaceMetrics {
 /// Keep this hook at the physical input boundary and let the adapter decide
 /// whether the event is user-driven or programmatic.
 final class AppKitTranscriptScrollView: NSScrollView {
-    var onUserScroll: (() -> Void)?
+    var onUserScroll: ((NSEvent) -> Void)?
     var onUserScrollDidApply: (() -> Void)?
 
     override func scrollWheel(with event: NSEvent) {
-        onUserScroll?()
+        onUserScroll?(event)
         super.scrollWheel(with: event)
         onUserScrollDidApply?()
     }
@@ -291,7 +301,10 @@ private final class AppKitTranscriptMountedCell {
 /// renderer factory instead of embedding Bubble's current private SwiftUI
 /// rows; the latter can be wired in as a later, isolated extraction.
 final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
-    private let state: RecordingTranscriptSurfaceAdapter
+    /// Production rendering uses the non-recording reducer.  The recording
+    /// wrapper is intentionally confined to Foundation focused checks so a
+    /// streamed session cannot retain one command/event array per revision.
+    private let state: TranscriptSurfaceState
     private let rowFactory: AppKitTranscriptRowHostFactory
     private let overscan: CGFloat
     private let maximumMountedRows: Int
@@ -300,7 +313,6 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
     private var clipBoundsObserver: NSObjectProtocol?
     private var mounted: [String: AppKitTranscriptMountedCell] = [:]
     private var reusableHosts: [AppKitTranscriptRowHost] = []
-    private var measuredHeights: [String: (identity: TranscriptRowIdentity, height: CGFloat)] = [:]
     private var rowIndexByID: [String: Int] = [:]
     private var heightIndex: TranscriptHeightIndex
     private var layingOut = false
@@ -309,12 +321,17 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
     private var widthBucket: Int = 0
     private var lastVisibleRowIDs: Set<String> = []
     private var viewportReportQueued = false
+    private var lastUserScrollUptime: TimeInterval = -.greatestFiniteMagnitude
     private(set) var metrics = AppKitTranscriptSurfaceMetrics()
 
     let scrollView: AppKitTranscriptScrollView
     /// Called after a viewport change.  The boolean identifies a physical
     /// user wheel event; programmatic reveal/follow operations report false.
     var onViewportChanged: ((_ atEnd: Bool, _ userDriven: Bool) -> Void)?
+    /// Fires once at the start of a physical wheel sequence.  The viewport
+    /// callback still reports every pre/post packet, but selection/hover
+    /// teardown must not mutate every mounted row on every packet.
+    var onUserScrollSequenceStarted: (() -> Void)?
 
     init(
         snapshot: TranscriptSurfaceSnapshot? = nil,
@@ -325,7 +342,7 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
             AppKitTranscriptRowHost(row: row, key: key)
         }
     ) {
-        self.state = RecordingTranscriptSurfaceAdapter(snapshot: snapshot)
+        self.state = TranscriptSurfaceState(snapshot: snapshot)
         self.rowFactory = renderer
         self.overscan = max(0, overscan)
         self.maximumMountedRows = max(1, maximumMountedRows)
@@ -348,8 +365,8 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
         scrollView.scrollerStyle = .overlay
         scrollView.verticalScrollElasticity = .allowed
         scrollView.contentView.postsBoundsChangedNotifications = true
-        scrollView.onUserScroll = { [weak self] in
-            self?.userDidScroll()
+        scrollView.onUserScroll = { [weak self] event in
+            self?.userDidScroll(event: event)
         }
         scrollView.onUserScrollDidApply = { [weak self] in
             self?.userScrollDidApply()
@@ -416,14 +433,23 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
     /// NSViewRepresentable bridge.  It never waits for row measurement.
     func setViewportSize(_ size: NSSize) {
         let nextBucket = Self.widthBucket(size.width)
+        let anchor = nextBucket != widthBucket ? currentVisibleAnchor() : nil
+        scrollView.setFrameSize(size)
         if nextBucket != widthBucket {
             widthBucket = nextBucket
-            measuredHeights.removeAll(keepingCapacity: true)
-            // Width is part of text layout identity.  Existing measured
-            // heights are invalid even when row content versions are stable.
-            heightIndex.replace(with: snapshot.rows.map(\.estimatedHeight))
+            // Width is part of text layout identity.  Keep prior buckets in
+            // the shared cache and restore whichever measurements exist for
+            // this bucket instead of throwing away all completed-row layout.
+            heightIndex.replace(with: snapshot.rows.map(cachedHeightOrEstimate))
+            metrics.recordHeightIndexRebuild()
+            updateDocumentFrame()
+            relayoutNow()
+            if followsLatest {
+                scrollToEnd()
+            } else if let anchor {
+                restore(anchor)
+            }
         }
-        scrollView.setFrameSize(size)
         relayoutNow()
     }
 
@@ -459,8 +485,11 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
         guard let index = rowIndexByID[rowID], snapshot.rows.indices.contains(index) else { return false }
         let anchor = currentVisibleAnchor()
         let row = snapshot.rows[index]
-        measuredHeights[rowID] = (row.contentIdentity, height)
+        heightCache.insert(height, for: layoutCacheKey(for: row))
         let changed = heightIndex.update(index: index, height: height) != 0
+        if changed {
+            metrics.recordHeightIndexPointUpdate()
+        }
         guard changed else { return false }
         updateDocumentFrame()
         relayoutNow()
@@ -487,6 +516,12 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
         }
         followsLatest = userDetachedFromLatest ? false : state.snapshot.followsLatest
         synchronizeRows(from: oldSnapshot, to: state.snapshot)
+        for event in events {
+            if case let .rowDisclosureChanged(_, _, _, invalidatedRowIDs, _) = event,
+               !invalidatedRowIDs.isEmpty {
+                invalidate(rowIDs: invalidatedRowIDs)
+            }
+        }
         if let event = events.first(where: {
             switch $0 {
             case .followLatestRequested, .followLatestChanged,
@@ -582,6 +617,16 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
     /// command: scrolling is viewport state, and marking the tail detached
     /// must not reject the next producer snapshot.
     func userDidScroll() {
+        userDidScroll(event: nil)
+    }
+
+    private func userDidScroll(event: NSEvent?) {
+        let now = ProcessInfo.processInfo.systemUptime
+        let phaseBegan = event?.phase == .began || event?.momentumPhase == .began
+        if phaseBegan || now - lastUserScrollUptime > 0.35 {
+            onUserScrollSequenceStarted?()
+        }
+        lastUserScrollUptime = now
         userDetachedFromLatest = true
         followsLatest = false
         // The callback is intentionally sent before `super.scrollWheel` so
@@ -596,8 +641,17 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
 
     func invalidate(rowIDs: [String]) {
         guard !rowIDs.isEmpty else { return }
-        let ids = Set(rowIDs)
-        measuredHeights = measuredHeights.filter { !ids.contains($0.key) }
+        for rowID in Set(rowIDs) {
+            guard let index = rowIndexByID[rowID], snapshot.rows.indices.contains(index) else { continue }
+            heightCache.removeValue(for: layoutCacheKey(for: snapshot.rows[index]))
+            // Disclosure and other row-local geometry changes keep the same
+            // immutable content identity.  Reconfigure only the mounted row
+            // so its SwiftUI tree observes the new local state and can report
+            // one fresh measurement; unrelated hosts remain untouched.
+            if let cell = mounted[rowID] {
+                cell.host.configure(row: snapshot.rows[index], key: cell.key)
+            }
+        }
         // Local invalidation is deliberately one layout pass.  It never
         // changes the session snapshot or starts a transcript-wide animation.
         relayoutNow()
@@ -642,9 +696,15 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
     ) {
         let oldRows = Dictionary(uniqueKeysWithValues: oldSnapshot.rows.map { ($0.id, $0) })
         let newRows = Dictionary(uniqueKeysWithValues: newSnapshot.rows.map { ($0.id, $0) })
-        rowIndexByID = Dictionary(
-            uniqueKeysWithValues: newSnapshot.rows.enumerated().map { ($0.element.id, $0.offset) }
-        )
+        let sameRowSequence = oldSnapshot.rows.count == newSnapshot.rows.count
+            && oldSnapshot.rows.indices.allSatisfy { index in
+                oldSnapshot.rows[index].id == newSnapshot.rows[index].id
+            }
+        if !sameRowSequence {
+            rowIndexByID = Dictionary(
+                uniqueKeysWithValues: newSnapshot.rows.enumerated().map { ($0.element.id, $0.offset) }
+            )
+        }
         for id in Array(mounted.keys) {
             guard let cell = mounted[id] else { continue }
             guard let row = newRows[id] else {
@@ -662,15 +722,24 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
             }
         }
 
-        measuredHeights = measuredHeights.filter { id, entry in
-            guard let row = newRows[id] else { return false }
-            return row.contentIdentity == entry.identity
+        if sameRowSequence {
+            // Streaming normally changes only the live tail.  Keep the
+            // Fenwick tree and apply each changed row as a point update
+            // (O(log N)); rebuilding all prefixes on every token is the
+            // long-session frame-time cliff this adapter is meant to avoid.
+            for index in newSnapshot.rows.indices {
+                let old = oldSnapshot.rows[index]
+                let row = newSnapshot.rows[index]
+                guard old.contentIdentity != row.contentIdentity else { continue }
+                let height = cachedHeightOrEstimate(row)
+                if heightIndex.update(index: index, height: height) != 0 {
+                    metrics.recordHeightIndexPointUpdate()
+                }
+            }
+        } else {
+            heightIndex.replace(with: newSnapshot.rows.map(cachedHeightOrEstimate))
+            metrics.recordHeightIndexRebuild()
         }
-        let heights = newSnapshot.rows.map { row in
-            measuredHeights[row.id].flatMap { $0.identity == row.contentIdentity ? $0.height : nil }
-                ?? row.estimatedHeight
-        }
-        heightIndex.replace(with: heights)
         updateDocumentFrame()
         relayoutNow()
     }
@@ -819,8 +888,43 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
         return abs(contentOffsetY - maxY) <= 1
     }
 
+    private func cachedHeightOrEstimate(_ row: TranscriptRowSnapshot) -> CGFloat {
+        heightCache.value(for: layoutCacheKey(for: row)) ?? row.estimatedHeight
+    }
+
+    private func layoutCacheKey(for row: TranscriptRowSnapshot) -> TranscriptLayoutCacheKey {
+        var geometry = row.geometry
+        // Disclosure is interaction-local and therefore does not mutate the
+        // immutable row snapshot.  Include the live disclosure bit in the
+        // cache key so a previously measured collapsed/expanded variant is
+        // never reused for the other geometry.
+        if interactionStore.isExpanded(rowID: row.id) {
+            geometry = TranscriptLocalGeometryState(
+                disclosure: max(1, geometry.disclosure),
+                accessorySignature: geometry.accessorySignature
+            )
+        }
+        return TranscriptLayoutCacheKey(
+            rowID: row.id,
+            contentVersion: row.contentVersion,
+            contentHash: row.contentHash,
+            width: CGFloat(widthBucket) / 2,
+            typography: row.typography,
+            scale: displayScale,
+            geometry: geometry,
+            layoutVersion: row.layoutVersion
+        )
+    }
+
+    private var displayScale: CGFloat {
+        let scale = scrollView.window?.backingScaleFactor
+            ?? NSScreen.main?.backingScaleFactor
+            ?? 1
+        return scale.isFinite && scale > 0 ? scale : 1
+    }
+
     private static func widthBucket(_ width: CGFloat) -> Int {
-        Int((max(0, width) * 2).rounded())
+        Int((max(0, width) * 2).rounded(.toNearestOrAwayFromZero))
     }
 
     private func requestsFollowLatest(_ kind: TranscriptSurfaceCommand.Kind) -> Bool {

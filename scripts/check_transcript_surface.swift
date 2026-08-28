@@ -208,10 +208,21 @@ private enum TranscriptSurfaceCheck {
             scale: 2,
             geometry: TranscriptLocalGeometryState(isExpanded: false)
         )
+        let layoutVersionKey = TranscriptLayoutCacheKey(
+            rowID: "assistant-1",
+            contentVersion: 4,
+            contentHash: "assistant-v4",
+            width: 400,
+            typography: typography,
+            scale: 2,
+            geometry: TranscriptLocalGeometryState(isExpanded: true),
+            layoutVersion: TranscriptTypographyKey.defaultLayoutVersion + 1
+        )
         expect(baseKey == subpixelKey, "cache key quantizes harmless sub-pixel width noise")
         expect(baseKey != widthKey, "cache key changes when available width changes")
         expect(baseKey != fontKey, "cache key changes when font/style changes")
         expect(baseKey != disclosureKey, "cache key changes when local disclosure geometry changes")
+        expect(baseKey != layoutVersionKey, "cache key changes when the layout version changes")
 
         // The LRU is bounded and distinguishes the layout variants above.
         let cache = TranscriptHeightCache(capacity: 2)
@@ -223,6 +234,18 @@ private enum TranscriptSurfaceCheck {
         expect(cache.value(for: widthKey) == nil, "least-recently-used layout height is evicted")
         expect(cache.value(for: baseKey) == 80, "height cache retains the recently-used width variant")
         expect(cache.value(for: fontKey) == 100, "font/style variant has an independent cached height")
+
+        // Projection caches are keyed by the caller's immutable projection
+        // inputs.  An unrelated body evaluation (for example, a composer
+        // draft keystroke) must return the same value without rebuilding the
+        // O(N) row list.
+        let projection = TranscriptProjectionCache<String, [Int]>()
+        _ = projection.value(for: "transcript-v1") { [1, 2, 3] }
+        _ = projection.value(for: "transcript-v1") { [4, 5, 6] }
+        expect(projection.buildCount == 1, "same projection key reuses its immutable value")
+        expect(projection.value(for: "transcript-v1", make: { [1, 2, 3] }) == [1, 2, 3], "projection cache returns the original value")
+        _ = projection.value(for: "transcript-v2") { [7, 8] }
+        expect(projection.buildCount == 2, "a changed projection key performs one new build")
 
         // A newer generation starts from an explicit replacement and does not
         // inherit stale rows or disclosure state.
