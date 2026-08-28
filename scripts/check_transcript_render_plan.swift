@@ -152,6 +152,18 @@ private enum TranscriptRenderPlanCheck {
             + Double(incrementalElapsed.components.attoseconds) / 1_000_000_000_000_000
         expect(incremental.units.last?.text.hasSuffix("A newly streamed tail paragraph.") == true, "streaming updates only replace the live tail unit")
         expect(incrementalMilliseconds < 20, "a streaming tail update must stay near one frame, got \(incrementalMilliseconds)ms")
+        expect(planner.lastWork.mode == .incremental, "streaming tail uses the incremental planner path")
+        expect(planner.lastWork.rebuiltSeedCount == 1, "streaming tail rebuilds one source seed")
+        expect(planner.lastWork.rebuiltUnitCount < planner.lastWork.planUnitCount / 4, "streaming tail rebuilds only a small unit suffix")
+        expect(planner.lastWork.reusedUnitCount > planner.lastWork.rebuiltUnitCount, "streaming tail reuses the immutable unit prefix")
+
+        let unchangedStreaming = planner.plan(
+            seeds: streamingSeeds,
+            branchSourceID: nil,
+            streamingSeedIDs: ["assistant-599"]
+        )
+        expect(unchangedStreaming == incremental, "unchanged stream input returns the cached plan")
+        expect(planner.lastWork.mode == .cached, "unchanged stream input takes the cached path")
 
         let structuredSource = "```swift\n" + Array(repeating: "let stableStructuredRow = true", count: 5_000).joined(separator: "\n")
         let structuredPlanner = TranscriptRenderPlanner()
