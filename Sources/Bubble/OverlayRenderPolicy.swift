@@ -73,23 +73,52 @@ enum OverlayKeyCode {
     static let upArrow: UInt16 = 126
 
     static let deletion: Set<UInt16> = [deleteBackward, deleteForward]
-    static let busyComposerReserved: Set<UInt16> = [
+    static let composerReserved: Set<UInt16> = [
         returnKey, tab, escape, keypadEnter,
         leftArrow, rightArrow, downArrow, upArrow,
     ]
 }
 
-enum ComposerBusyKeyRoutingPolicy {
+enum ComposerKeyRoutingPolicy {
     static func shouldRoute(
-        isBusy: Bool,
         hasText: Bool,
         keyCode: UInt16,
         commandModified: Bool,
         controlModified: Bool
     ) -> Bool {
-        guard isBusy, !commandModified, !controlModified else { return false }
+        guard !commandModified, !controlModified else { return false }
         if OverlayKeyCode.deletion.contains(keyCode) { return true }
-        return hasText && !OverlayKeyCode.busyComposerReserved.contains(keyCode)
+        return hasText && !OverlayKeyCode.composerReserved.contains(keyCode)
+    }
+}
+
+enum ComposerReturnKeyAction: Equatable {
+    case passThrough
+    case insertNewline
+    case toggleMount
+    case submit
+}
+
+enum ComposerReturnKeyPolicy {
+    static func action(
+        keyCode: UInt16,
+        hasMarkedText: Bool,
+        shiftModified: Bool,
+        optionModified: Bool,
+        commandModified: Bool,
+        controlModified: Bool,
+        mountPaletteVisible: Bool
+    ) -> ComposerReturnKeyAction {
+        guard keyCode == OverlayKeyCode.returnKey || keyCode == OverlayKeyCode.keypadEnter else {
+            return .passThrough
+        }
+        guard !hasMarkedText, !commandModified, !controlModified else {
+            return .passThrough
+        }
+        if shiftModified || optionModified {
+            return .insertNewline
+        }
+        return mountPaletteVisible ? .toggleMount : .submit
     }
 }
 

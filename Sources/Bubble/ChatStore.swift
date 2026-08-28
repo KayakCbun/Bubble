@@ -155,6 +155,14 @@ enum SessionRuntimeRole: Equatable {
     }
 }
 
+private final class WeakChatStoreReference: @unchecked Sendable {
+    weak var value: ChatStore?
+
+    init(_ value: ChatStore) {
+        self.value = value
+    }
+}
+
 @Observable
 final class ChatStore {
     var items: [ChatItem] = []
@@ -225,6 +233,7 @@ final class ChatStore {
     var resumeDestination = ResumeDestinationState()
     var onHideOverlay: (() -> Void)?
     var onCreateSideSession: (() -> Void)?
+    var onCloseCurrentSession: (() -> Bool)?
     var onResumeInSideSession: ((String) -> Int?)?
     var onSessionIdentityChanged: (() -> Void)?
     var onActivityChanged: ((Bool) -> Void)?
@@ -255,7 +264,7 @@ final class ChatStore {
     var isSwitchingBranch = false
     private var paletteSuppressed = false
     private var lastPaletteSignature = ""
-    private let control: WorkspaceControlServer
+    private let control: BubbleControlServer
     private var childSessionId: String?
     private var childSessionIds: Set<String> = []
     private var workspaceRunGeneration = 0
@@ -1173,7 +1182,7 @@ final class ChatStore {
         self.runtimeRole = runtimeRole
         let controlFile = runtimeRole.controlFile(runtimeID: runtimeID)
         client = AcpClient(controlFile: controlFile, initialSessionID: initialSessionID)
-        control = WorkspaceControlServer(controlFile: controlFile)
+        control = BubbleControlServer(controlFile: controlFile)
         OverlayPaths.bootstrap()
         items = []
         let restoredSessionID = initialSessionID
@@ -1211,7 +1220,7 @@ final class ChatStore {
             }
         }
         control.handler = { [weak self] method, params in
-            try await self?.handleWorkspaceControl(method, params) ?? [:]
+            try await self?.handleBubbleControl(method, params) ?? BubbleControlResult([:])
         }
         control.start()
         if let restoredSessionID {
@@ -2496,6 +2505,18 @@ final class ChatStore {
         case "side":
             draft = ""
             onCreateSideSession?()
+            return true
+        case "close":
+            draft = ""
+            if runtimeRole == .side {
+                if onCloseCurrentSession?() != true {
+                    items.append(ChatItem(kind: .system, text: "This side session cannot close while Bubble is switching sessions."))
+                    persist(immediate: true)
+                    requestFocus()
+                }
+            } else {
+                onHideOverlay?()
+            }
             return true
         case "copy":
             draft = ""
@@ -4241,12 +4262,15 @@ final class ChatStore {
         requestFocus()
     }
 
-    private func handleWorkspaceControl(_ method: String, _ params: [String: Any]) async throws -> [String: Any] {
+    private func handleBubbleControl(
+        _ method: String,
+        _ params: [String: Any]
+    ) async throws -> BubbleControlResult {
         try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.main.async {
                 Task {
                     do {
-                        let result = try await self.dispatchWorkspaceControl(method, params)
+                        let result = try await self.dispatchBubbleControl(method, params)
                         continuation.resume(returning: result)
                     } catch {
                         continuation.resume(throwing: error)
@@ -4256,14 +4280,17 @@ final class ChatStore {
         }
     }
 
-    private func dispatchWorkspaceControl(_ method: String, _ params: [String: Any]) async throws -> [String: Any] {
+    private func dispatchBubbleControl(
+        _ method: String,
+        _ params: [String: Any]
+    ) async throws -> BubbleControlResult {
         switch method {
         case "workspace_run":
             let mount = params.string("mount") ?? ""
             let prompt = params.string("prompt") ?? ""
-            return try await workspaceRun(mount: mount, prompt: prompt)
+            return BubbleControlResult(try await workspaceRun(mount: mount, prompt: prompt))
         case "workspace_cancel":
-            return try workspaceCancel()
+            return BubbleControlResult(try workspaceCancel())
         case "mount_workspace":
             let path = WorkspaceRegistry.expandPath(params.string("path") ?? "", home: OverlayPaths.home)
             try WorkspaceRegistry.mount(
@@ -4273,16 +4300,38 @@ final class ChatStore {
                 workspace: OverlayPaths.workspace.path
             )
             persistWorkspaceState()
-            return ["status": "mounted", "path": path, "name": WorkspaceRegistry.displayName(path: path)]
+            return BubbleControlResult([
+                "status": "mounted",
+                "path": path,
+                "name": WorkspaceRegistry.displayName(path: path),
+            ])
         case "unmount_workspace":
             let raw = params.string("path") ?? ""
             let mount = WorkspaceRegistry.resolve(raw, in: workspaceState, home: OverlayPaths.home)
             let path = mount?.path ?? WorkspaceRegistry.expandPath(raw, home: OverlayPaths.home)
             try WorkspaceRegistry.unmount(path: path, in: &workspaceState)
             persistWorkspaceState()
-            return ["status": "unmounted", "path": path]
+            return BubbleControlResult(["status": "unmounted", "path": path])
+        case "bubble_action":
+            let action = params.string("action") ?? ""
+            let argument = params.string("argument")
+            guard let command = BubbleNativeAction.slashCommand(
+                action: action,
+                argument: argument
+            ) else {
+                throw RPCError(code: -22, message: "unsupported Bubble action \(action)")
+            }
+            let owner = WeakChatStoreReference(self)
+            return BubbleControlResult(
+                ["status": "accepted", "action": action],
+                afterResponse: BubbleControlPostResponse {
+                    DispatchQueue.main.async {
+                        _ = owner.value?.handleLocalSlash(command)
+                    }
+                }
+            )
         default:
-            throw RPCError(code: -20, message: "unknown workspace method \(method)")
+            throw RPCError(code: -20, message: "unknown Bubble control method \(method)")
         }
     }
 

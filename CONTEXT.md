@@ -13,7 +13,7 @@ Bubble's long-lived ACP session. cwd is always `~/.bubble/workspace`.
 _Avoid_: parent agent, root agent
 
 **Side session**:
-An independent Bubble ACP runtime opened with `/side`. It has its own Pi process, conversation context, transcript, draft, Waiting/Steering queue, and workspace-control endpoint. Up to five main-plus-side sessions may be open and running concurrently.
+An independent Bubble ACP runtime opened with `/side`. It has its own Pi process, conversation context, transcript, draft, Waiting/Steering queue, and Bubble-control endpoint. Up to five main-plus-side sessions may be open and running concurrently.
 _Avoid_: conversation branch, workspace session
 
 **Session tab**:

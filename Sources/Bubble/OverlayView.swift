@@ -685,21 +685,23 @@ struct OverlayView: View {
             rowCount: rows.count,
             sourceItemCount: store.visibleItems.count
         ) {
-            transcriptScroll(rows: rows, ticks: ticks) {
+            transcriptScroll(rows: rows, ticks: ticks) { proxy in
                 transcriptStackStyle(
                     LazyVStack(alignment: .leading, spacing: OverlaySurface.rowSpacing) {
                         transcriptStackContent(rows)
                     },
-                    hasHistoryTicks: !ticks.isEmpty
+                    hasHistoryTicks: !ticks.isEmpty,
+                    proxy: proxy
                 )
             }
         } else {
-            transcriptScroll(rows: rows, ticks: ticks) {
+            transcriptScroll(rows: rows, ticks: ticks) { proxy in
                 transcriptStackStyle(
                     VStack(alignment: .leading, spacing: OverlaySurface.rowSpacing) {
                         transcriptStackContent(rows)
                     },
-                    hasHistoryTicks: !ticks.isEmpty
+                    hasHistoryTicks: !ticks.isEmpty,
+                    proxy: proxy
                 )
             }
         }
@@ -708,11 +710,11 @@ struct OverlayView: View {
     private func transcriptScroll<Content: View>(
         rows: [MainTranscriptRenderRow],
         ticks: [HistoryTick],
-        @ViewBuilder content: @escaping () -> Content
+        @ViewBuilder content: @escaping (ScrollViewProxy) -> Content
     ) -> some View {
         ScrollViewReader { proxy in
             ScrollView {
-                content()
+                content(proxy)
             }
             .scrollIndicators(.never)
             .scrollBounceBehavior(.basedOnSize)
@@ -743,12 +745,11 @@ struct OverlayView: View {
                 if followState.showsScrollToEnd {
                     ScrollToEndChip {
                         scrollToTranscriptEnd(proxy)
+                        restoreFocus()
                     }
                     .padding(.bottom, 10)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             }
-            .animation(OverlayMotion.quick, value: followState.showsScrollToEnd)
             .onReceive(NotificationCenter.default.publisher(for: .transcriptHistoryNavigationSettled)) { note in
                 guard let targetID = note.userInfo?[TranscriptViewportUserInfoKey.targetID] as? String,
                       let atEnd = note.userInfo?[TranscriptViewportUserInfoKey.atEnd] as? Bool else { return }
@@ -796,20 +797,41 @@ struct OverlayView: View {
                     }
                 }
             }
-            .onChange(of: store.isBusy) { _, _ in
-                requestCurrentFollowTarget(proxy)
+            .onChange(of: store.isBusy) { wasBusy, isBusy in
+                if wasBusy, !isBusy, TranscriptFollowTriggerPolicy.shouldRequestLatest(
+                    trigger: .turnSettled,
+                    followsLatest: followState.followsLatest,
+                    isBusy: isBusy
+                ) {
+                    requestSettledFollowLatest(proxy)
+                } else {
+                    requestCurrentFollowTarget(proxy)
+                }
             }
             .onChange(of: composerHeight) { _, _ in
                 if followState.followsLatest {
                     requestFollowLatest(proxy)
                 }
             }
+            .onChange(of: expandedThoughts) { _, _ in
+                requestExpansionFollow(proxy)
+            }
+            .onChange(of: expandedToolGroups) { _, _ in
+                requestExpansionFollow(proxy)
+            }
+            .onChange(of: expandedTools) { _, _ in
+                requestExpansionFollow(proxy)
+            }
+            .onChange(of: expandedFileChanges) { _, _ in
+                requestExpansionFollow(proxy)
+            }
         }
     }
 
     private func transcriptStackStyle<Content: View>(
         _ content: Content,
-        hasHistoryTicks: Bool
+        hasHistoryTicks: Bool,
+        proxy: ScrollViewProxy
     ) -> some View {
         TranscriptSelectionScope {
             content
@@ -825,7 +847,16 @@ struct OverlayView: View {
             .foregroundStyle(OverlaySurface.conversationInk)
             .background {
                 TranscriptScrollObserver(
-                    maintainsVisibleContent: followState.maintainsVisibleContent
+                    maintainsVisibleContent: followState.maintainsVisibleContent,
+                    onContentHeightChange: {
+                        if TranscriptFollowTriggerPolicy.shouldRequestLatest(
+                            trigger: .contentHeightChanged,
+                            followsLatest: followState.followsLatest,
+                            isBusy: store.isBusy
+                        ) {
+                            requestFollowLatest(proxy)
+                        }
+                    }
                 ) { atEnd, userDriven in
                     var next = followState
                     if next.viewportChanged(atEnd: atEnd, userDriven: userDriven) {
@@ -1746,28 +1777,10 @@ struct OverlayView: View {
             textView.insertionPointColor = .textColor
             return
         }
-        if let target = firstEditableText(in: window.contentView) {
-            window.makeFirstResponder(target)
-            if let textView = window.firstResponder as? NSTextView {
-                textView.insertionPointColor = .textColor
-            }
+        if let root = window.contentView,
+           let textView = ComposerEditorLocator.restoreComposerFocus(in: window, root: root) {
+            textView.insertionPointColor = .textColor
         }
-    }
-
-    private func firstEditableText(in view: NSView?) -> NSView? {
-        guard let view else { return nil }
-        if let textView = view as? NSTextView, textView.isEditable {
-            return textView
-        }
-        if let field = view as? NSTextField, field.isEditable {
-            return field
-        }
-        for child in view.subviews {
-            if let found = firstEditableText(in: child) {
-                return found
-            }
-        }
-        return nil
     }
 
     private func requestFollowLatest(_ proxy: ScrollViewProxy) {
@@ -1791,13 +1804,34 @@ struct OverlayView: View {
         OverlayPulse.shared.onNextFrame {
             followQueued = false
             guard followState.followingTurnTargetID == targetID else { return }
-            withAnimation(OverlayMotion.scroll) {
+            performTranscriptScroll(.navigateToTurn) {
                 proxy.scrollTo(
                     targetID,
                     anchor: UnitPoint(x: 0.5, y: TranscriptTurnAlignmentPolicy.viewportAnchorY)
                 )
             }
+            var next = followState
+            if next.finishFollowingTurn(targetID: targetID) {
+                followState = next
+                requestFollowLatest(proxy)
+            }
         }
+    }
+
+    private func requestSettledFollowLatest(_ proxy: ScrollViewProxy) {
+        requestFollowLatest(proxy)
+        DispatchQueue.main.asyncAfter(deadline: .now() + TranscriptFollowPolicy.layoutSettleDelay) {
+            requestFollowLatest(proxy)
+        }
+    }
+
+    private func requestExpansionFollow(_ proxy: ScrollViewProxy) {
+        guard TranscriptFollowTriggerPolicy.shouldRequestLatest(
+            trigger: .expansionSettled,
+            followsLatest: followState.followsLatest,
+            isBusy: store.isBusy
+        ) else { return }
+        requestSettledFollowLatest(proxy)
     }
 
     private func requestCurrentFollowTarget(
@@ -1815,9 +1849,22 @@ struct OverlayView: View {
         followState.beginScrollToEnd()
         NotificationCenter.default.post(name: .transcriptProgrammaticScrollStarted, object: nil)
         OverlayPulse.shared.onNextFrame {
-            withAnimation(OverlayMotion.scroll) {
+            performTranscriptScroll(.returnToEnd) {
                 proxy.scrollTo("transcript-end", anchor: .bottom)
             }
+        }
+    }
+
+    private func performTranscriptScroll(
+        _ request: TranscriptScrollRequest,
+        action: () -> Void
+    ) {
+        if TranscriptScrollAnimationPolicy.shouldAnimate(request) {
+            withAnimation(OverlayMotion.scroll, action)
+        } else {
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction, action)
         }
     }
 
@@ -3972,11 +4019,12 @@ private final class ComposerEditorProbe: NSView {
 
     private func apply() {
         guard let host = superview else { return }
+        if let root = window?.contentView,
+           let field = ComposerEditorLocator.matchingTextField(in: root, alignedWith: self) {
+            ComposerEditorLocator.markComposerField(field)
+        }
         let views = textViews(in: host)
         for textView in views where textView.isEditable {
-            textView.identifier = NSUserInterfaceItemIdentifier(
-                ComposerEditorIdentity.viewIdentifier
-            )
             textView.textContainer?.widthTracksTextView = true
             textView.textContainer?.lineFragmentPadding = 0
             textView.textContainerInset = NSSize(width: 0, height: 1)
@@ -3984,11 +4032,6 @@ private final class ComposerEditorProbe: NSView {
             if let container = textView.textContainer, abs(container.size.width - width) > 0.5 {
                 container.size = NSSize(width: width, height: 10_000)
             }
-        }
-        for textField in textFields(in: host) where textField.isEditable {
-            textField.identifier = NSUserInterfaceItemIdentifier(
-                ComposerEditorIdentity.viewIdentifier
-            )
         }
     }
 
@@ -4003,16 +4046,6 @@ private final class ComposerEditorProbe: NSView {
         return found
     }
 
-    private func textFields(in view: NSView) -> [NSTextField] {
-        var found: [NSTextField] = []
-        if let textField = view as? NSTextField {
-            found.append(textField)
-        }
-        for child in view.subviews {
-            found.append(contentsOf: textFields(in: child))
-        }
-        return found
-    }
 }
 
 struct OverlayLayoutKey: PreferenceKey {

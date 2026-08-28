@@ -49,6 +49,14 @@ swiftc -parse-as-library scripts/check_typography_contract.swift -o /tmp/bubble-
 swiftc -parse-as-library Sources/Bubble/OverlayLayoutPolicy.swift Sources/Bubble/OverlayRenderPolicy.swift scripts/check_overlay_layout.swift -o /tmp/bubble-check-layout
 /tmp/bubble-check-layout
 
+swiftc -parse-as-library -framework AppKit \
+  Sources/Bubble/OverlayLayoutPolicy.swift \
+  Sources/Bubble/OverlayRenderPolicy.swift \
+  Sources/Bubble/ComposerEditorLocator.swift \
+  scripts/check_composer_editor.swift \
+  -o /tmp/bubble-check-composer-editor
+/tmp/bubble-check-composer-editor
+
 swiftc -parse-as-library Sources/Bubble/SideStage.swift Sources/Bubble/WorkspaceTranscriptRenderPlan.swift scripts/check_side_stage.swift -o /tmp/bubble-check-side-stage
 /tmp/bubble-check-side-stage
 
@@ -79,6 +87,9 @@ swiftc -parse-as-library Sources/Bubble/PierreFileIconCatalog.swift scripts/chec
 swiftc -parse-as-library Sources/Bubble/PromptTriggerPolicy.swift scripts/check_prompt_palette.swift -o /tmp/bubble-check-prompt-palette
 /tmp/bubble-check-prompt-palette
 
+swiftc -parse-as-library Sources/Bubble/BubbleNativeAction.swift scripts/check_bubble_native_actions.swift -o /tmp/bubble-check-native-actions
+/tmp/bubble-check-native-actions
+
 swift run DiagramChecks
 
 swift run SessionTabsChecks
@@ -102,6 +113,7 @@ swiftc -parse-as-library Sources/BubbleMounts/WorkspaceMounts.swift scripts/chec
 /tmp/bubble-check-mounts
 
 swiftc -parse-as-library \
+  Sources/Bubble/BubbleNativeAction.swift \
   Sources/Bubble/JSONRPC.swift \
   Sources/Bubble/Paths.swift \
   Sources/Bubble/BubbleConfig.swift \

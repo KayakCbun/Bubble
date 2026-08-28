@@ -134,6 +134,48 @@ private enum TranscriptInteractionCheck {
             ),
             "momentum tail events from the prior gesture stay suppressed"
         )
+        expect(
+            !TranscriptScrollAnimationPolicy.shouldAnimate(.returnToEnd),
+            "returning to the transcript end must not keep an animation alive against the next wheel event"
+        )
+        expect(
+            !TranscriptScrollAnimationPolicy.shouldAnimate(.returnControlVisibility),
+            "showing the return control must not animate the entire scroll container"
+        )
+        expect(
+            TranscriptScrollAnimationPolicy.shouldAnimate(.navigateToTurn),
+            "ordinary turn navigation keeps its spatial transition"
+        )
+        expect(
+            TranscriptWheelScrollPolicy.nextOrigin(
+                current: 100,
+                scrollingDeltaY: 20,
+                hasPreciseDeltas: true,
+                minimum: 0,
+                maximum: 200
+            ) == 80,
+            "a precise upward wheel delta moves the transcript away from the bottom immediately"
+        )
+        expect(
+            TranscriptWheelScrollPolicy.nextOrigin(
+                current: 190,
+                scrollingDeltaY: -20,
+                hasPreciseDeltas: true,
+                minimum: 0,
+                maximum: 200
+            ) == 200,
+            "direct wheel movement stays inside the document bounds"
+        )
+        expect(
+            TranscriptWheelScrollPolicy.nextOrigin(
+                current: 100,
+                scrollingDeltaY: 1,
+                hasPreciseDeltas: false,
+                minimum: 0,
+                maximum: 200
+            ) == 88,
+            "one discrete mouse-wheel notch remains large enough to feel immediate"
+        )
         var follow = TranscriptFollowState()
         expect(follow.followsLatest, "a transcript starts pinned to the live edge")
         expect(!follow.showsScrollToEnd, "the jump chip stays hidden while already at the end")
@@ -196,6 +238,56 @@ private enum TranscriptInteractionCheck {
         expect(follow.followingTurnTargetID == "user-turn", "a sent user turn becomes the viewport anchor")
         expect(!follow.followsLatest, "a sent user turn is aligned near the top instead of following the bottom")
         expect(!follow.viewportChanged(atEnd: false, userDriven: false), "programmatic turn alignment keeps its anchor")
+        expect(
+            !follow.finishFollowingTurn(targetID: "stale-user-turn"),
+            "a stale alignment completion cannot release the current sent-turn anchor"
+        )
+        expect(
+            follow.finishFollowingTurn(targetID: "user-turn"),
+            "the initial sent-turn alignment hands subsequent streaming growth back to live follow"
+        )
+        expect(follow.followsLatest, "long reasoning and final output continue following the live edge")
+        expect(
+            TranscriptFollowTriggerPolicy.shouldRequestLatest(
+                trigger: .contentHeightChanged,
+                followsLatest: follow.followsLatest,
+                isBusy: true
+            ),
+            "streaming thought height changes request another bottom alignment"
+        )
+        expect(
+            TranscriptFollowTriggerPolicy.shouldRequestLatest(
+                trigger: .turnSettled,
+                followsLatest: follow.followsLatest,
+                isBusy: false
+            ),
+            "turn completion performs a settled final bottom alignment"
+        )
+        expect(
+            !TranscriptFollowTriggerPolicy.shouldRequestLatest(
+                trigger: .turnSettled,
+                followsLatest: follow.followsLatest,
+                isBusy: true
+            ),
+            "starting a turn does not masquerade as final layout settlement"
+        )
+        expect(
+            TranscriptFollowTriggerPolicy.shouldRequestLatest(
+                trigger: .expansionSettled,
+                followsLatest: follow.followsLatest,
+                isBusy: false
+            ),
+            "collapsing a thought keeps an end-following transcript pinned to the bottom"
+        )
+        expect(
+            !TranscriptFollowTriggerPolicy.shouldRequestLatest(
+                trigger: .expansionSettled,
+                followsLatest: false,
+                isBusy: false
+            ),
+            "collapsing a thought cannot yank a user who scrolled up back to the bottom"
+        )
+        follow.beginFollowingTurn(targetID: "manual-turn")
         expect(follow.viewportChanged(atEnd: false, userDriven: true), "manual scrolling releases the sent-turn anchor")
         expect(TranscriptTurnAlignmentPolicy.viewportAnchorY == 0.08, "sent messages keep breathing room above them")
         expect(
