@@ -70,9 +70,6 @@ struct OverlayView: View {
     var sessionSwitchLoading = false
 
     @FocusState private var focused: Bool
-    @State private var expandedThoughts: Set<UUID> = []
-    @State private var expandedToolGroups: Set<String> = []
-    @State private var expandedTools: Set<UUID> = []
     @State private var followState = TranscriptFollowState()
     @State private var followQueued = false
     private var inputShape: RoundedRectangle {
@@ -274,9 +271,6 @@ struct OverlayView: View {
     }
 
     private func resetSessionPresentationState() {
-        expandedThoughts.removeAll(keepingCapacity: true)
-        expandedToolGroups.removeAll(keepingCapacity: true)
-        expandedTools.removeAll(keepingCapacity: true)
         followState = TranscriptFollowState()
         followQueued = false
         QuoteSelectionMonitor.shared.dismiss()
@@ -759,9 +753,6 @@ struct OverlayView: View {
                 followQueued = false
                 followState.userNavigated(atEnd: false)
             }
-            .onReceive(NotificationCenter.default.publisher(for: .fileChangeExpansionChanged)) { _ in
-                requestFileChangeExpansionFollow(proxy)
-            }
             .onAppear {
                 requestFollowLatest(proxy)
                 if let targetID = ProcessInfo.processInfo.environment[
@@ -816,15 +807,6 @@ struct OverlayView: View {
                 if followState.followsLatest {
                     requestFollowLatest(proxy)
                 }
-            }
-            .onChange(of: expandedThoughts) { _, _ in
-                requestExpansionFollow(proxy)
-            }
-            .onChange(of: expandedToolGroups) { _, _ in
-                requestExpansionFollow(proxy)
-            }
-            .onChange(of: expandedTools) { _, _ in
-                requestExpansionFollow(proxy)
             }
         }
     }
@@ -1628,29 +1610,6 @@ struct OverlayView: View {
     }
 
     private func rowRenderKey(_ row: TranscriptRow) -> RowRenderKey {
-        let expansionKey: String
-        switch row {
-        case .message(let item):
-            expansionKey = TranscriptExpansionPolicy.renderKey(
-                containerExpanded: item.kind == .thought && expandedThoughts.contains(item.id),
-                expandedChildIDs: []
-            )
-        case .tool(let item):
-            expansionKey = TranscriptExpansionPolicy.renderKey(
-                containerExpanded: expandedTools.contains(item.id),
-                expandedChildIDs: []
-            )
-        case .collapsedTools(let id, let items):
-            expansionKey = TranscriptExpansionPolicy.renderKey(
-                containerExpanded: expandedToolGroups.contains(id),
-                expandedChildIDs: items.filter { expandedTools.contains($0.id) }.map { $0.id.uuidString }
-            )
-        case .fileChanges:
-            expansionKey = TranscriptExpansionPolicy.renderKey(
-                containerExpanded: false,
-                expandedChildIDs: []
-            )
-        }
         switch row {
         case .message(let item), .tool(let item):
             return RowRenderKey(
@@ -1669,8 +1628,7 @@ struct OverlayView: View {
                     || store.streamingThoughtId == item.id
                     || store.workspacePaneStreamingAssistantId == item.id
                     || store.workspacePaneStreamingThoughtId == item.id,
-                selected: store.workspaceStage?.cardId == item.id,
-                expansionKey: expansionKey
+                selected: store.workspaceStage?.cardId == item.id
             )
         case .collapsedTools(let id, let items):
             return RowRenderKey(
@@ -1686,8 +1644,7 @@ struct OverlayView: View {
                 workspaceStatus: nil,
                 workspaceSummary: nil,
                 live: false,
-                selected: false,
-                expansionKey: expansionKey
+                selected: false
             )
         case .fileChanges(let summary):
             return RowRenderKey(
@@ -1703,8 +1660,7 @@ struct OverlayView: View {
                 workspaceStatus: nil,
                 workspaceSummary: nil,
                 live: false,
-                selected: false,
-                expansionKey: expansionKey
+                selected: false
             )
         }
     }
@@ -1827,34 +1783,6 @@ struct OverlayView: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + TranscriptFollowPolicy.layoutSettleDelay) {
             requestFollowLatest(proxy)
         }
-    }
-
-    private func requestExpansionFollow(_ proxy: ScrollViewProxy) {
-        guard TranscriptFollowTriggerPolicy.shouldRequestLatest(
-            trigger: .expansionSettled,
-            followsLatest: followState.followsLatest,
-            isBusy: store.isBusy
-        ) else { return }
-        requestSettledFollowLatest(proxy)
-    }
-
-    private func requestFileChangeExpansionFollow(_ proxy: ScrollViewProxy) {
-        guard TranscriptFollowTriggerPolicy.shouldRequestLatest(
-            trigger: .expansionSettled,
-            followsLatest: followState.followsLatest,
-            isBusy: store.isBusy
-        ) else { return }
-        func follow() {
-            OverlayPulse.shared.onNextFrame {
-                guard followState.followsLatest else { return }
-                var transaction = Transaction()
-                transaction.disablesAnimations = true
-                withTransaction(transaction) {
-                    proxy.scrollTo("transcript-end", anchor: .bottom)
-                }
-            }
-        }
-        follow()
     }
 
     private func requestCurrentFollowTarget(
@@ -2106,38 +2034,7 @@ struct OverlayView: View {
     }
 
     private func transcriptImageThumb(_ name: String) -> some View {
-        let image = BubbleImages.load(name)
-        return Button {
-            if let image {
-                ImageZoomController.shared.show(image)
-            }
-        } label: {
-            Group {
-                if let image {
-                    Image(nsImage: image)
-                        .resizable()
-                        .interpolation(.high)
-                        .aspectRatio(contentMode: .fit)
-                } else {
-                    Image(systemName: "photo")
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 120, height: 80)
-                }
-            }
-            .frame(maxWidth: 260, maxHeight: 180)
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        }
-        .buttonStyle(.plain)
-        .help("View image")
-        .onHover { hovering in
-            if hovering {
-                NSCursor.pointingHand.set()
-            } else {
-                NSCursor.arrow.set()
-            }
-        }
+        TranscriptImageThumb(name: name)
     }
 
     private func assistantBubble(_ item: ChatItem, interactive: Bool = true) -> some View {
@@ -2307,66 +2204,8 @@ struct OverlayView: View {
     private func thoughtBlock(_ item: ChatItem) -> some View {
         let live = (store.isBusy && store.streamingThoughtId == item.id)
             || (store.childBusy && store.workspacePaneStreamingThoughtId == item.id)
-        let open = live || expandedThoughts.contains(item.id)
-        return VStack(alignment: .leading, spacing: 6) {
-            Button {
-                if live { return }
-                withAnimation(OverlayMotion.snappy) {
-                    if open {
-                        expandedThoughts.remove(item.id)
-                    } else {
-                        expandedThoughts.insert(item.id)
-                    }
-                }
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: open ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 9, weight: .bold))
-                        .frame(width: 8)
-                    Image(systemName: "quote.opening")
-                        .font(.system(size: 10, weight: .semibold))
-                    Text(live ? "Thinking" : "Thoughts")
-                    Spacer(minLength: 0)
-                }
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.tertiary)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            if open {
-                HStack(alignment: .top, spacing: 10) {
-                    Capsule()
-                        .fill(Color.primary.opacity(0.16))
-                        .frame(width: 2)
-                    thoughtText(item.text, live: live)
-                }
-                .padding(.leading, 14)
-            }
-        }
-        .padding(.vertical, 2)
-        .opacity(0.92)
-    }
-
-    @ViewBuilder
-    private func thoughtText(_ text: String, live: Bool) -> some View {
-        let displayChunks = ThoughtDisplayPolicy.chunks(text, streaming: live)
-        LazyVStack(alignment: .leading, spacing: 0) {
-            if live, ThoughtDisplayPolicy.isTailTruncated(text) {
-                Text("Earlier reasoning stays virtualized while thinking…")
-                    .font(.system(size: 10.5, weight: .regular))
-                    .foregroundStyle(.tertiary)
-                    .padding(.bottom, 4)
-            }
-            ForEach(Array(displayChunks.enumerated()), id: \.offset) { _, chunk in
-                Text(chunk.isEmpty && live ? "…" : chunk)
-                    .font(.system(size: 12.5, weight: .regular))
-                    .italic()
-                    .lineSpacing(OverlaySurface.proseLineSpacing)
-                    .foregroundStyle(.secondary.opacity(0.88))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .bubbleTextSelection()
-            }
-        }
+        return ThoughtBlockHost(item: item, live: live)
+            .id("thought-\(item.id.uuidString)")
     }
 
     private func workspaceRunCard(_ item: ChatItem) -> some View {
@@ -2463,131 +2302,13 @@ struct OverlayView: View {
     }
 
     private func toolRow(_ item: ChatItem) -> some View {
-        let status = item.toolStatus ?? "pending"
-        let open = expandedTools.contains(item.id)
-        return VStack(alignment: .leading, spacing: 6) {
-            Button {
-                withAnimation(OverlayMotion.snappy) {
-                    if open {
-                        expandedTools.remove(item.id)
-                    } else {
-                        expandedTools.insert(item.id)
-                    }
-                }
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: open ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 9, weight: .bold))
-                        .frame(width: 8)
-                    Image(systemName: "chevron.left.forwardslash.chevron.right")
-                        .font(.system(size: 10, weight: .semibold))
-                    Text("Tool")
-                    Text(item.text)
-                        .lineLimit(1)
-                    Spacer(minLength: 0)
-                    if status == "completed" {
-                        Image(systemName: "checkmark")
-                            .font(.system(size: 10, weight: .semibold))
-                    } else if status == "failed" {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(.red.opacity(0.7))
-                    } else {
-                        ProgressView()
-                            .controlSize(.mini)
-                    }
-                }
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.tertiary)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-
-            if let names = item.imageNames, !names.isEmpty {
-                assistantImageGrid(names)
-                    .padding(.leading, 14)
-            }
-
-            if open {
-                HStack(alignment: .top, spacing: 10) {
-                    Capsule()
-                        .fill(Color.primary.opacity(0.16))
-                        .frame(width: 2)
-                    toolDetails(item)
-                }
-                .padding(.leading, 14)
-            }
-        }
-        .padding(.vertical, 2)
-        .opacity(0.92)
-    }
-
-    @ViewBuilder
-    private func toolDetails(_ item: ChatItem) -> some View {
-        let input = item.toolInput?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let output = item.toolOutput?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        VStack(alignment: .leading, spacing: 8) {
-            if !input.isEmpty {
-                Text("Input")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.tertiary)
-                Text(input)
-                    .font(.system(size: 12, weight: .regular, design: .monospaced))
-                    .bubbleTextSelection()
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            if !output.isEmpty {
-                Text("Output")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.tertiary)
-                Text(output)
-                    .font(.system(size: 12, weight: .regular, design: .monospaced))
-                    .bubbleTextSelection()
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            if input.isEmpty && output.isEmpty && (item.imageNames ?? []).isEmpty {
-                Text("No input/output captured for this tool call.")
-                    .font(.system(size: 12, weight: .regular))
-                    .foregroundStyle(.tertiary)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        ToolRowHost(item: item)
+            .id("tool-\(item.id.uuidString)")
     }
 
     private func collapsedTools(id: String, items: [ChatItem]) -> some View {
-        let open = expandedToolGroups.contains(id)
-        return VStack(alignment: .leading, spacing: 6) {
-            Button {
-                withAnimation(OverlayMotion.snappy) {
-                    if open {
-                        expandedToolGroups.remove(id)
-                    } else {
-                        expandedToolGroups.insert(id)
-                    }
-                }
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: open ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 9, weight: .bold))
-                        .frame(width: 8)
-                    Image(systemName: "chevron.left.forwardslash.chevron.right")
-                        .font(.system(size: 10, weight: .semibold))
-                    Text("+\(items.count) previous tool call\(items.count == 1 ? "" : "s")")
-                    Spacer(minLength: 0)
-                }
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.tertiary)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            if open {
-                ForEach(items) { item in
-                    toolRow(item)
-                }
-            }
-        }
-        .padding(.vertical, 2)
-        .opacity(0.92)
+        CollapsedToolsHost(id: id, items: items)
+            .id(id)
     }
 
     private func fileChangesCard(_ summary: FileChangeSummary) -> some View {
@@ -2725,6 +2446,274 @@ struct OverlayView: View {
             return "\(remain)s"
         }
         return "\(minutes)m \(remain)s"
+    }
+}
+
+private struct TranscriptImageThumb: View {
+    let name: String
+
+    var body: some View {
+        let image = BubbleImages.load(name)
+        return Button {
+            if let image {
+                ImageZoomController.shared.show(image)
+            }
+        } label: {
+            Group {
+                if let image {
+                    Image(nsImage: image)
+                        .resizable()
+                        .interpolation(.high)
+                        .aspectRatio(contentMode: .fit)
+                } else {
+                    Image(systemName: "photo")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 120, height: 80)
+                }
+            }
+            .frame(maxWidth: 260, maxHeight: 180)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .help("View image")
+        .onHover { hovering in
+            if hovering {
+                NSCursor.pointingHand.set()
+            } else {
+                NSCursor.arrow.set()
+            }
+        }
+    }
+}
+
+private struct ThoughtBlockHost: View {
+    let item: ChatItem
+    let live: Bool
+    @State private var expanded = false
+
+    var body: some View {
+        let open = TranscriptRowInteractionPolicy.isOpen(
+            isLive: live,
+            isExpanded: expanded
+        )
+        return VStack(alignment: .leading, spacing: 6) {
+            Button {
+                guard TranscriptRowInteractionPolicy.canToggle(isLive: live) else { return }
+                commitDisclosure {
+                    expanded.toggle()
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: open ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9, weight: .bold))
+                        .frame(width: 8)
+                    Image(systemName: "quote.opening")
+                        .font(.system(size: 10, weight: .semibold))
+                    Text(live ? "Thinking" : "Thoughts")
+                    Spacer(minLength: 0)
+                }
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.tertiary)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            if open {
+                HStack(alignment: .top, spacing: 10) {
+                    Capsule()
+                        .fill(Color.primary.opacity(0.16))
+                        .frame(width: 2)
+                    ThoughtTextView(text: item.text, live: live)
+                }
+                .padding(.leading, 14)
+            }
+        }
+        .padding(.vertical, 2)
+        .opacity(0.92)
+    }
+
+    private func commitDisclosure(_ mutation: () -> Void) {
+        var transaction = Transaction()
+        transaction.disablesAnimations = !TranscriptRowInteractionPolicy.animatesTranscriptLayout
+        withTransaction(transaction, mutation)
+    }
+}
+
+private struct ThoughtTextView: View {
+    let text: String
+    let live: Bool
+
+    var body: some View {
+        let displayChunks = ThoughtDisplayPolicy.chunks(text, streaming: live)
+        return LazyVStack(alignment: .leading, spacing: 0) {
+            if live, ThoughtDisplayPolicy.isTailTruncated(text) {
+                Text("Earlier reasoning stays virtualized while thinking…")
+                    .font(.system(size: 10.5, weight: .regular))
+                    .foregroundStyle(.tertiary)
+                    .padding(.bottom, 4)
+            }
+            ForEach(Array(displayChunks.enumerated()), id: \.offset) { _, chunk in
+                Text(chunk.isEmpty && live ? "…" : chunk)
+                    .font(.system(size: 12.5, weight: .regular))
+                    .italic()
+                    .lineSpacing(OverlaySurface.proseLineSpacing)
+                    .foregroundStyle(.secondary.opacity(0.88))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .bubbleTextSelection()
+            }
+        }
+    }
+}
+
+private struct ToolRowHost: View {
+    let item: ChatItem
+    @State private var expanded = false
+
+    var body: some View {
+        let status = item.toolStatus ?? "pending"
+        return VStack(alignment: .leading, spacing: 6) {
+            Button {
+                commitDisclosure {
+                    expanded.toggle()
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9, weight: .bold))
+                        .frame(width: 8)
+                    Image(systemName: "chevron.left.forwardslash.chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                    Text("Tool")
+                    Text(item.text)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                    if status == "completed" {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 10, weight: .semibold))
+                    } else if status == "failed" {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.red.opacity(0.7))
+                    } else {
+                        ProgressView()
+                            .controlSize(.mini)
+                    }
+                }
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.tertiary)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if let names = item.imageNames, !names.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(names, id: \.self) { name in
+                        TranscriptImageThumb(name: name)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.leading, 14)
+            }
+
+            if expanded {
+                HStack(alignment: .top, spacing: 10) {
+                    Capsule()
+                        .fill(Color.primary.opacity(0.16))
+                        .frame(width: 2)
+                    ToolDetailsView(item: item)
+                }
+                .padding(.leading, 14)
+            }
+        }
+        .padding(.vertical, 2)
+        .opacity(0.92)
+    }
+
+    private func commitDisclosure(_ mutation: () -> Void) {
+        var transaction = Transaction()
+        transaction.disablesAnimations = !TranscriptRowInteractionPolicy.animatesTranscriptLayout
+        withTransaction(transaction, mutation)
+    }
+}
+
+private struct ToolDetailsView: View {
+    let item: ChatItem
+
+    var body: some View {
+        let input = item.toolInput?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let output = item.toolOutput?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return VStack(alignment: .leading, spacing: 8) {
+            if !input.isEmpty {
+                Text("Input")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+                Text(input)
+                    .font(.system(size: 12, weight: .regular, design: .monospaced))
+                    .bubbleTextSelection()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if !output.isEmpty {
+                Text("Output")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+                Text(output)
+                    .font(.system(size: 12, weight: .regular, design: .monospaced))
+                    .bubbleTextSelection()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if input.isEmpty && output.isEmpty && (item.imageNames ?? []).isEmpty {
+                Text("No input/output captured for this tool call.")
+                    .font(.system(size: 12, weight: .regular))
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct CollapsedToolsHost: View {
+    let id: String
+    let items: [ChatItem]
+    @State private var expanded = false
+
+    var body: some View {
+        return VStack(alignment: .leading, spacing: 6) {
+            Button {
+                commitDisclosure {
+                    expanded.toggle()
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9, weight: .bold))
+                        .frame(width: 8)
+                    Image(systemName: "chevron.left.forwardslash.chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                    Text("+\(items.count) previous tool call\(items.count == 1 ? "" : "s")")
+                    Spacer(minLength: 0)
+                }
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.tertiary)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            if expanded {
+                ForEach(items) { item in
+                    ToolRowHost(item: item)
+                        .id("tool-\(item.id.uuidString)")
+                }
+            }
+        }
+        .padding(.vertical, 2)
+        .opacity(0.92)
+    }
+
+    private func commitDisclosure(_ mutation: () -> Void) {
+        var transaction = Transaction()
+        transaction.disablesAnimations = !TranscriptRowInteractionPolicy.animatesTranscriptLayout
+        withTransaction(transaction, mutation)
     }
 }
 
@@ -3328,7 +3317,6 @@ private struct RowRenderKey: Equatable {
     var workspaceSummary: String?
     var live: Bool
     var selected: Bool
-    var expansionKey: String
 }
 
 private struct MainTranscriptRenderKey: Equatable {

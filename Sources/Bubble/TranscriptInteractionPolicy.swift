@@ -47,6 +47,39 @@ enum FileChangeExpansionPolicy {
     static let requestsTranscriptFollow = false
 }
 
+/// Interaction state for disclosure rows belongs to the row that owns the
+/// disclosure, not to the transcript container.  Keeping this contract in a
+/// small policy makes the SwiftUI implementation easy to audit and gives the
+/// interaction check a seam that does not depend on view internals.
+enum TranscriptRowInteractionPolicy {
+    /// A local @State host keyed by the row's stable ID owns disclosure state.
+    static let usesRowLocalState = true
+    /// Disclosure changes commit one final row height.  Animating the height
+    /// would invalidate every row below it on every animation frame.
+    static let animatesTranscriptLayout = false
+    /// A row disclosure must not move the transcript viewport behind the
+    /// user's pointer or trigger a second scroll pass.
+    static let requestsTranscriptFollow = false
+
+    static func isOpen(isLive: Bool, isExpanded: Bool) -> Bool {
+        isLive || isExpanded
+    }
+
+    static func canToggle(isLive: Bool) -> Bool {
+        !isLive
+    }
+
+    /// Return the only row that needs invalidation after a local disclosure
+    /// mutation.  Unknown IDs are ignored so stale callbacks cannot rebuild
+    /// the whole transcript.
+    static func invalidatedRowIDs(
+        changedRowID: String,
+        visibleRowIDs: [String]
+    ) -> Set<String> {
+        visibleRowIDs.contains(changedRowID) ? [changedRowID] : []
+    }
+}
+
 enum TranscriptFollowTrigger {
     case contentHeightChanged
     case turnSettled
@@ -66,7 +99,10 @@ enum TranscriptFollowTriggerPolicy {
         case .turnSettled:
             return !isBusy
         case .expansionSettled:
-            return true
+            // Row-local disclosure updates already commit their final height;
+            // a second transcript-wide scroll pass would re-layout the whole
+            // document and can steal the user's viewport.
+            return false
         }
     }
 }
@@ -311,12 +347,5 @@ enum TranscriptViewportAnchorPolicy {
     ) -> CGFloat {
         let desiredEdge = anchorPosition - anchorOffset
         return documentIsFlipped ? desiredEdge : desiredEdge - visibleHeight
-    }
-}
-
-enum TranscriptExpansionPolicy {
-    static func renderKey(containerExpanded: Bool, expandedChildIDs: [String]) -> String {
-        let children = expandedChildIDs.sorted().joined(separator: ",")
-        return "\(containerExpanded ? 1 : 0):\(children)"
     }
 }

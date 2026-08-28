@@ -332,12 +332,12 @@ private enum TranscriptInteractionCheck {
             "starting a turn does not masquerade as final layout settlement"
         )
         expect(
-            TranscriptFollowTriggerPolicy.shouldRequestLatest(
+            !TranscriptFollowTriggerPolicy.shouldRequestLatest(
                 trigger: .expansionSettled,
                 followsLatest: follow.followsLatest,
                 isBusy: false
             ),
-            "collapsing a thought keeps an end-following transcript pinned to the bottom"
+            "row-local disclosure changes must not request a transcript-wide follow"
         )
         expect(
             !TranscriptFollowTriggerPolicy.shouldRequestLatest(
@@ -368,19 +368,39 @@ private enum TranscriptInteractionCheck {
             ) == 160,
             "non-flipped scroll documents preserve the same anchor offset"
         )
-        let collapsed = TranscriptExpansionPolicy.renderKey(
-            containerExpanded: false,
-            expandedChildIDs: []
-        )
-        let expanded = TranscriptExpansionPolicy.renderKey(
-            containerExpanded: true,
-            expandedChildIDs: []
-        )
-        expect(collapsed != expanded, "expanding a thought or tool must invalidate its equatable row")
         expect(
-            TranscriptExpansionPolicy.renderKey(containerExpanded: true, expandedChildIDs: ["tool-b", "tool-a"])
-                == TranscriptExpansionPolicy.renderKey(containerExpanded: true, expandedChildIDs: ["tool-a", "tool-b"]),
-            "group expansion keys are stable regardless of Set iteration order"
+            TranscriptRowInteractionPolicy.usesRowLocalState,
+            "thought and tool disclosure state is owned by a stable row host"
+        )
+        expect(
+            TranscriptRowInteractionPolicy.isOpen(isLive: true, isExpanded: false),
+            "a live thought remains open while its row streams"
+        )
+        expect(
+            !TranscriptRowInteractionPolicy.canToggle(isLive: true),
+            "a live thought cannot be collapsed mid-stream"
+        )
+        expect(
+            TranscriptRowInteractionPolicy.invalidatedRowIDs(
+                changedRowID: "tool-b",
+                visibleRowIDs: ["thought-a", "tool-b", "group-c"]
+            ) == ["tool-b"],
+            "a disclosure mutation invalidates only its own stable row"
+        )
+        expect(
+            TranscriptRowInteractionPolicy.invalidatedRowIDs(
+                changedRowID: "stale",
+                visibleRowIDs: ["thought-a", "tool-b"]
+            ).isEmpty,
+            "stale disclosure callbacks do not invalidate the transcript"
+        )
+        expect(
+            !TranscriptRowInteractionPolicy.animatesTranscriptLayout,
+            "completed row expansion commits a final height without layout animation"
+        )
+        expect(
+            !TranscriptRowInteractionPolicy.requestsTranscriptFollow,
+            "completed row expansion does not request transcript-wide scrolling"
         )
         if !failures.isEmpty {
             for failure in failures {
