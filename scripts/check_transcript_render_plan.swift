@@ -165,6 +165,22 @@ private enum TranscriptRenderPlanCheck {
         expect(unchangedStreaming == incremental, "unchanged stream input returns the cached plan")
         expect(planner.lastWork.mode == .cached, "unchanged stream input takes the cached path")
 
+        var concurrentlyPatched = streamingSeeds
+        concurrentlyPatched[0].text = "A late completed-prefix correction"
+        let corrected = planner.plan(
+            seeds: concurrentlyPatched,
+            branchSourceID: nil,
+            streamingSeedIDs: ["assistant-599"]
+        )
+        expect(
+            corrected.units.first?.text == "A late completed-prefix correction",
+            "an active stream never hides a simultaneous completed-prefix correction"
+        )
+        expect(
+            planner.lastWork.mode == .rebuilt,
+            "a completed-prefix correction safely leaves the tail-only fast path"
+        )
+
         let structuredSource = "```swift\n" + Array(repeating: "let stableStructuredRow = true", count: 5_000).joined(separator: "\n")
         let structuredPlanner = TranscriptRenderPlanner()
         let structuredSeed = TranscriptRenderSeed(id: "structured", kind: .assistant, text: structuredSource)

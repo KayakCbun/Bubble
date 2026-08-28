@@ -289,6 +289,17 @@ final class TranscriptRenderPlanner {
             return nil
         }
 
+        // Completed history normally shares the same String storage and this
+        // exact check is therefore a cheap identity walk. It is still
+        // required for correctness: a late tool/status patch must never be
+        // hidden merely because an assistant tail is streaming at the same
+        // time. Any non-tail mutation falls back to the rebuild path below;
+        // only Markdown template/unit construction remains tail-local.
+        let candidateIDSet = Set(candidateIDs)
+        for index in seeds.indices where !candidateIDSet.contains(seeds[index].id) {
+            guard seeds[index] == cachedSeeds[index].seed else { return nil }
+        }
+
         var changedIndices: [Int] = []
         changedIndices.reserveCapacity(candidateIndices.count)
         for index in candidateIndices {
