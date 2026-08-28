@@ -99,6 +99,10 @@ final class TranscriptScrollProbe: NSView {
 
     var onContentHeightChange: (() -> Void)?
     var onChange: ((_ atEnd: Bool, _ userDriven: Bool) -> Void)?
+    /// AppKit virtualization owns the authoritative mounted window. Diagnostics
+    /// can read it directly instead of waiting for nested SwiftUI anchor views
+    /// to finish a second asynchronous mount pass after every synthetic jump.
+    var visibleHistoryTickIDsProvider: (() -> Set<String>)?
     var maintainsVisibleContent = false {
         didSet {
             guard maintainsVisibleContent != oldValue else { return }
@@ -578,8 +582,9 @@ final class TranscriptScrollProbe: NSView {
         let userDriven = CACurrentMediaTime() <= userEventDeadline
         onChange?(atEnd, userDriven)
 
-        let visibleRowIDs = liveVisibleHistoryTickIDs(in: visible, document: document)
+        let visibleRowIDs = diagnosticVisibleHistoryTickIDs(in: visible, document: document)
         if diagnosticsMode == "mount-audit",
+           visibleHistoryTickIDsProvider == nil,
            visibleRowIDs != hierarchyVisibleHistoryTickIDs(in: visible, document: document) {
             diagnosticCoverageMismatches += 1
         }
@@ -973,7 +978,7 @@ final class TranscriptScrollProbe: NSView {
             let visible = scrollView.contentView.bounds
             reportPosition()
             rebuildAnchorIndex()
-            if liveVisibleHistoryTickIDs(in: visible, document: document).isEmpty {
+            if diagnosticVisibleHistoryTickIDs(in: visible, document: document).isEmpty {
                 diagnosticBlankSamples += 1
                 diagnosticCurrentBlankStreak += 1
                 diagnosticLongestBlankStreak = max(
@@ -1198,15 +1203,22 @@ final class TranscriptScrollProbe: NSView {
     }
 
     private func mountedAnchorIntersects(_ visible: CGRect, in document: NSView) -> Bool {
-        !liveVisibleHistoryTickIDs(in: visible, document: document).isEmpty
+        !diagnosticVisibleHistoryTickIDs(in: visible, document: document).isEmpty
     }
 
     private func liveVisibleHistoryTickIDs(in visible: CGRect, document: NSView) -> Set<String> {
-        return visibleHistoryTickIDs(
-            anchors: anchorIndex.map { ($0.historyTickID ?? $0.id, $0.frame) },
-            visible: visible,
-            documentMaxY: document.bounds.maxY
-        )
+        _ = document
+        // `anchorIndex` is already frame-sorted. The old diagnostic path
+        // rebuilt and sorted the entire long-session anchor array on every
+        // display-link tick, adding O(N log N) work that production's AppKit
+        // viewport never performs.
+        return Set(visibleAnchorCandidates(in: visible).map {
+            $0.historyTickID ?? $0.id
+        })
+    }
+
+    private func diagnosticVisibleHistoryTickIDs(in visible: CGRect, document: NSView) -> Set<String> {
+        visibleHistoryTickIDsProvider?() ?? liveVisibleHistoryTickIDs(in: visible, document: document)
     }
 
     private func visibleHistoryTickIDs(

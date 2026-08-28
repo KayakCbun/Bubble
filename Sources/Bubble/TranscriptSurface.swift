@@ -88,6 +88,9 @@ struct TranscriptRowSnapshot: Identifiable, Equatable, Hashable, Sendable {
     let isCompleted: Bool
     let kind: TranscriptRowKind
     let text: String?
+    /// Owning user turn for history-rail visibility.  Assistant chunks,
+    /// tools, and continuation rows map back to this stable tick identity.
+    let historyTickID: String?
     /// Layout inputs travel with the immutable row projection.  They are
     /// deliberately separate from `contentIdentity`: changing width,
     /// typography, scale, or local disclosure geometry must invalidate a
@@ -104,6 +107,7 @@ struct TranscriptRowSnapshot: Identifiable, Equatable, Hashable, Sendable {
         isCompleted: Bool = true,
         kind: TranscriptRowKind = .other,
         text: String? = nil,
+        historyTickID: String? = nil,
         typography: TranscriptTypographyKey = TranscriptTypographyKey.default,
         geometry: TranscriptLocalGeometryState = TranscriptLocalGeometryState(),
         layoutVersion: UInt64 = TranscriptTypographyKey.defaultLayoutVersion
@@ -115,6 +119,7 @@ struct TranscriptRowSnapshot: Identifiable, Equatable, Hashable, Sendable {
         self.isCompleted = isCompleted
         self.kind = kind
         self.text = text
+        self.historyTickID = historyTickID
         self.typography = typography
         self.geometry = geometry
         self.layoutVersion = layoutVersion
@@ -128,6 +133,7 @@ struct TranscriptRowSnapshot: Identifiable, Equatable, Hashable, Sendable {
         isCompleted: Bool = true,
         kind: TranscriptRowKind = .other,
         text: String? = nil,
+        historyTickID: String? = nil,
         typography: TranscriptTypographyKey = TranscriptTypographyKey.default,
         geometry: TranscriptLocalGeometryState = TranscriptLocalGeometryState(),
         layoutVersion: UInt64 = TranscriptTypographyKey.defaultLayoutVersion
@@ -140,6 +146,7 @@ struct TranscriptRowSnapshot: Identifiable, Equatable, Hashable, Sendable {
             isCompleted: isCompleted,
             kind: kind,
             text: text,
+            historyTickID: historyTickID,
             typography: typography,
             geometry: geometry,
             layoutVersion: layoutVersion
@@ -153,6 +160,7 @@ struct TranscriptRowSnapshot: Identifiable, Equatable, Hashable, Sendable {
         estimatedHeight: CGFloat,
         isCompleted: Bool = true,
         kind: TranscriptRowKind = .other,
+        historyTickID: String? = nil,
         typography: TranscriptTypographyKey = TranscriptTypographyKey.default,
         geometry: TranscriptLocalGeometryState = TranscriptLocalGeometryState(),
         layoutVersion: UInt64 = TranscriptTypographyKey.defaultLayoutVersion
@@ -165,6 +173,7 @@ struct TranscriptRowSnapshot: Identifiable, Equatable, Hashable, Sendable {
             isCompleted: isCompleted,
             kind: kind,
             text: text,
+            historyTickID: historyTickID,
             typography: typography,
             geometry: geometry,
             layoutVersion: layoutVersion
@@ -184,6 +193,14 @@ struct TranscriptRowSnapshot: Identifiable, Equatable, Hashable, Sendable {
     /// it must not invalidate the immutable row render unit by itself.
     var contentIdentity: TranscriptRowIdentity { identity }
 
+    var layoutIdentity: TranscriptRowLayoutIdentity {
+        TranscriptRowLayoutIdentity(
+            typography: typography,
+            geometry: geometry,
+            layoutVersion: layoutVersion
+        )
+    }
+
     static func stableHash(_ text: String) -> String {
         // FNV-1a is tiny, deterministic, and independent of Swift's process-
         // randomized Hasher seed, which makes persisted identities testable.
@@ -200,6 +217,18 @@ struct TranscriptRowIdentity: Equatable, Hashable, Sendable {
     let id: String
     let contentVersion: UInt64
     let contentHash: String
+}
+
+struct TranscriptRowLayoutIdentity: Equatable, Hashable, Sendable {
+    let typography: TranscriptTypographyKey
+    let geometry: TranscriptLocalGeometryState
+    let layoutVersion: UInt64
+
+    static let `default` = TranscriptRowLayoutIdentity(
+        typography: .default,
+        geometry: TranscriptLocalGeometryState(),
+        layoutVersion: TranscriptTypographyKey.defaultLayoutVersion
+    )
 }
 
 struct TranscriptSurfaceAnchor: Equatable, Hashable, Sendable {
@@ -407,7 +436,10 @@ struct TranscriptLayoutCacheKey: Equatable, Hashable, Sendable {
 final class TranscriptHeightCache {
     let capacity: Int
     private var values: [TranscriptLayoutCacheKey: CGFloat] = [:]
-    private var recency: [TranscriptLayoutCacheKey] = []
+    private var previous: [TranscriptLayoutCacheKey: TranscriptLayoutCacheKey] = [:]
+    private var next: [TranscriptLayoutCacheKey: TranscriptLayoutCacheKey] = [:]
+    private var oldest: TranscriptLayoutCacheKey?
+    private var newest: TranscriptLayoutCacheKey?
 
     init(capacity: Int = 512) {
         self.capacity = max(0, capacity)
@@ -425,25 +457,48 @@ final class TranscriptHeightCache {
         guard capacity > 0, height.isFinite, height >= 0 else { return }
         values[key] = height
         touch(key)
-        while recency.count > capacity {
-            let evicted = recency.removeFirst()
-            values.removeValue(forKey: evicted)
+        while values.count > capacity, let evicted = oldest {
+            removeValue(for: evicted)
         }
     }
 
     func removeValue(for key: TranscriptLayoutCacheKey) {
         values.removeValue(forKey: key)
-        recency.removeAll { $0 == key }
+        detach(key)
     }
 
     func removeAll() {
         values.removeAll(keepingCapacity: true)
-        recency.removeAll(keepingCapacity: true)
+        previous.removeAll(keepingCapacity: true)
+        next.removeAll(keepingCapacity: true)
+        oldest = nil
+        newest = nil
     }
 
     private func touch(_ key: TranscriptLayoutCacheKey) {
-        recency.removeAll { $0 == key }
-        recency.append(key)
+        detach(key)
+        if let newest {
+            next[newest] = key
+            previous[key] = newest
+        } else {
+            oldest = key
+        }
+        newest = key
+    }
+
+    private func detach(_ key: TranscriptLayoutCacheKey) {
+        let older = previous.removeValue(forKey: key)
+        let newer = next.removeValue(forKey: key)
+        if let older {
+            if let newer { next[older] = newer } else { next.removeValue(forKey: older) }
+        } else if oldest == key {
+            oldest = newer
+        }
+        if let newer {
+            if let older { previous[newer] = older } else { previous.removeValue(forKey: newer) }
+        } else if newest == key {
+            newest = older
+        }
     }
 }
 

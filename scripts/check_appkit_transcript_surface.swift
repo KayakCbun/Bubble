@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 
 private var failures: [String] = []
+private var streamingTailP95MS: Double = 0
 
 private func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
     if !condition() { failures.append(message) }
@@ -188,6 +189,36 @@ private enum AppKitTranscriptSurfaceCheck {
             "streaming tail replacement performs a logarithmic point update"
         )
 
+        // Exercise the actual full-snapshot bridge used by SwiftUI while only
+        // the live tail changes. Stable history must stay comfortably inside
+        // one 60 Hz frame even with 4,000 immutable rows present.
+        var streamingDurations: [Double] = []
+        streamingDurations.reserveCapacity(80)
+        for version in 3..<83 {
+            tailRows[tailRows.count - 1] = row(
+                "row-3999",
+                version: UInt64(version),
+                height: 96 + CGFloat(version % 2)
+            )
+            let started = ProcessInfo.processInfo.systemUptime
+            _ = adapter.apply(.replace(snapshot: TranscriptSurfaceSnapshot(
+                session: adapter.currentHandle.nextRevision(),
+                rows: tailRows,
+                followsLatest: false
+            )))
+            streamingDurations.append(
+                (ProcessInfo.processInfo.systemUptime - started) * 1_000
+            )
+        }
+        let sortedStreamingDurations = streamingDurations.sorted()
+        streamingTailP95MS = sortedStreamingDurations[
+            min(sortedStreamingDurations.count - 1, Int(Double(sortedStreamingDurations.count) * 0.95))
+        ]
+        expect(
+            streamingTailP95MS <= 17,
+            "4,000-row streaming tail p95 stays within one 60 Hz frame"
+        )
+
         // The post-wheel callback reports the actual end state after a user
         // delta, allowing the follow policy to resume when the wheel reaches
         // the tail.
@@ -199,6 +230,42 @@ private enum AppKitTranscriptSurfaceCheck {
         adapter.userScrollDidApply()
         expect(lastUserAtEnd, "post-wheel callback reports actual viewport state")
         adapter.setContentOffset(y: 312)
+
+        // Typography/geometry/layout revisions are independent of immutable
+        // prose content.  They must still refresh a mounted host and select a
+        // different height-cache key.
+        let beforeLayoutHost = adapter.hostObjectID(rowID: stableID)
+        let beforeLayoutConfigure = adapter.hostConfigureCount(rowID: stableID) ?? 0
+        let layoutRows = adapter.snapshot.rows.map { existing -> TranscriptRowSnapshot in
+            guard existing.id == stableID else { return existing }
+            return TranscriptRowSnapshot(
+                id: existing.id,
+                contentVersion: existing.contentVersion,
+                contentHash: existing.contentHash,
+                estimatedHeight: existing.estimatedHeight,
+                isCompleted: existing.isCompleted,
+                kind: existing.kind,
+                text: existing.text,
+                typography: TranscriptTypographyKey(
+                    fontFamily: ".AppleSystemUIFont",
+                    pointSize: 15,
+                    weight: 400,
+                    lineHeight: 1.625,
+                    styleID: "appkit-check-layout"
+                ),
+                geometry: existing.geometry,
+                layoutVersion: existing.layoutVersion + 1
+            )
+        }
+        _ = adapter.apply(.replace(snapshot: TranscriptSurfaceSnapshot(
+            session: adapter.currentHandle.nextRevision(),
+            rows: layoutRows
+        )))
+        expect(
+            adapter.hostObjectID(rowID: stableID) != beforeLayoutHost
+                || (adapter.hostConfigureCount(rowID: stableID) ?? 0) > beforeLayoutConfigure,
+            "layout-only row change refreshes the mounted host"
+        )
 
         // Line-based mouse wheels bypass AppKit's delayed smoothing and move
         // the production viewport in the same event. Trackpads still carry
@@ -302,7 +369,10 @@ private enum AppKitTranscriptSurfaceCheck {
 
     private static func finish() {
         if failures.isEmpty {
-            print("PASS: AppKit transcript surface height index, reuse, mount window, anchor, stale, and command invariants")
+            print(String(
+                format: "PASS: AppKit transcript surface height index, reuse, mount window, anchor, stale, commands, and streamingTailP95=%.2fms",
+                streamingTailP95MS
+            ))
         } else {
             for failure in failures {
                 FileHandle.standardError.write(Data(("FAIL: " + failure + "\n").utf8))

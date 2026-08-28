@@ -9,15 +9,27 @@ struct AppKitTranscriptRowReuseKey: Equatable, Hashable {
     let kind: TranscriptRowKind
     let id: String
     let contentVersion: UInt64
+    let layoutIdentity: TranscriptRowLayoutIdentity
 
-    init(kind: TranscriptRowKind, id: String, contentVersion: UInt64) {
+    init(
+        kind: TranscriptRowKind,
+        id: String,
+        contentVersion: UInt64,
+        layoutIdentity: TranscriptRowLayoutIdentity = .default
+    ) {
         self.kind = kind
         self.id = id
         self.contentVersion = contentVersion
+        self.layoutIdentity = layoutIdentity
     }
 
     init(row: TranscriptRowSnapshot) {
-        self.init(kind: row.kind, id: row.id, contentVersion: row.contentVersion)
+        self.init(
+            kind: row.kind,
+            id: row.id,
+            contentVersion: row.contentVersion,
+            layoutIdentity: row.layoutIdentity
+        )
     }
 }
 
@@ -323,9 +335,12 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
     private var userDetachedFromLatest = false
     private var widthBucket: Int = 0
     private var lastVisibleRowIDs: Set<String> = []
+    private var lastNeutralAtEnd: Bool?
     private var viewportReportQueued = false
     private var lastViewportReportUptime: TimeInterval = -.greatestFiniteMagnitude
     private var lastUserScrollUptime: TimeInterval = -.greatestFiniteMagnitude
+    private var settledMeasurementWorkItem: DispatchWorkItem?
+    private var overscanRefillQueued = false
     private(set) var metrics = AppKitTranscriptSurfaceMetrics()
 
     let scrollView: AppKitTranscriptScrollView
@@ -392,17 +407,22 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
             // direct mouse-wheel input therefore mounts rows without waiting
             // for a measurement pass or a display-linked animation.
             guard let self else { return }
-            self.relayoutNow()
+            self.layoutViewportNow()
             // Bounds changes are deliberately neutral.  Window resizing,
             // elastic settling, and measurement clamps all arrive through
             // this path too; only `scrollWheel(with:)` calls userDidScroll()
             // and reports userDriven=true.
-            self.onViewportChanged?(self.isAtEnd, false)
+            let atEnd = self.isAtEnd
+            if self.lastNeutralAtEnd != atEnd {
+                self.lastNeutralAtEnd = atEnd
+                self.onViewportChanged?(atEnd, false)
+            }
         }
         relayoutNow()
     }
 
     deinit {
+        settledMeasurementWorkItem?.cancel()
         if let clipBoundsObserver {
             NotificationCenter.default.removeObserver(clipBoundsObserver)
         }
@@ -424,6 +444,9 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
     var mountedRowIDs: [String] { mounted.keys.sorted() }
     var reusableHostCount: Int { reusableHosts.count }
     var currentHeightIndex: TranscriptHeightIndex { heightIndex }
+    var isUserScrollActive: Bool {
+        ProcessInfo.processInfo.systemUptime - lastUserScrollUptime <= 0.35
+    }
     var visibleRowIDs: [String] {
         let viewport = scrollView.contentView.bounds
         let range = heightIndex.rows(
@@ -436,12 +459,32 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
         }
     }
 
+    var visibleHistoryTickIDs: [String] {
+        let viewport = scrollView.contentView.bounds
+        let range = heightIndex.rows(
+            intersecting: viewport.minY,
+            viewportHeight: viewport.height,
+            overscan: 0
+        )
+        return range.compactMap { index in
+            guard snapshot.rows.indices.contains(index) else { return nil }
+            let row = snapshot.rows[index]
+            return row.historyTickID ?? row.id
+        }
+    }
+
     /// A cheap viewport helper used by deterministic checks and by the future
     /// NSViewRepresentable bridge.  It never waits for row measurement.
     func setViewportSize(_ size: NSSize) {
         let nextBucket = Self.widthBucket(size.width)
+        let currentSize = scrollView.frame.size
+        let sizeChanged = abs(currentSize.width - size.width) > 0.5
+            || abs(currentSize.height - size.height) > 0.5
+        guard sizeChanged || nextBucket != widthBucket else { return }
         let anchor = nextBucket != widthBucket ? currentVisibleAnchor() : nil
-        scrollView.setFrameSize(size)
+        if sizeChanged {
+            scrollView.setFrameSize(size)
+        }
         if nextBucket != widthBucket {
             widthBucket = nextBucket
             // Width is part of text layout identity.  Keep prior buckets in
@@ -464,7 +507,6 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
         let maxY = max(0, heightIndex.totalHeight - scrollView.contentView.bounds.height)
         let clamped = min(max(0, y), maxY)
         scrollView.contentView.setBoundsOrigin(NSPoint(x: 0, y: clamped))
-        relayoutNow()
     }
 
     /// AppKit deliberately smooths line-based mouse-wheel events, which can
@@ -477,7 +519,10 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
             scrollingDeltaY: event.scrollingDeltaY,
             hasPreciseDeltas: false
         )
-        let cap = TranscriptWheelFramePolicy.maximumPendingDelta(hasPreciseDeltas: false)
+        // Keep one accelerated mouse packet within one layout step. A larger
+        // cap feels faster in empty views but can cross a rich-row boundary
+        // and create multiple SwiftUI hosts in the same display frame.
+        let cap = TranscriptWheelFramePolicy.maximumStep(hasPreciseDeltas: false)
         let bounded = min(cap, max(-cap, resolved))
         guard abs(bounded) > 0.01 else { return true }
         setContentOffset(y: contentOffsetY - bounded)
@@ -651,6 +696,8 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
             onUserScrollSequenceStarted?()
         }
         lastUserScrollUptime = now
+        settledMeasurementWorkItem?.cancel()
+        settledMeasurementWorkItem = nil
         userDetachedFromLatest = true
         followsLatest = false
         // The callback is intentionally sent before `super.scrollWheel` so
@@ -661,6 +708,26 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
 
     func userScrollDidApply() {
         onViewportChanged?(isAtEnd, true)
+        scheduleSettledMeasurements()
+    }
+
+    private func scheduleSettledMeasurements() {
+        settledMeasurementWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.settledMeasurementWorkItem = nil
+            guard !self.isUserScrollActive else {
+                self.scheduleSettledMeasurements()
+                return
+            }
+            for cell in self.mounted.values {
+                cell.host.needsLayout = true
+            }
+            self.document.needsLayout = true
+            self.document.layoutSubtreeIfNeeded()
+        }
+        settledMeasurementWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.36, execute: work)
     }
 
     func invalidate(rowIDs: [String]) {
@@ -683,7 +750,7 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
 
     func documentDidLayout() {
         guard !layingOut else { return }
-        updateMountedFrames()
+        updateMountedFrames(repositionExisting: true)
     }
 
     private func accepted(_ events: [TranscriptSurfaceEvent]) -> Bool {
@@ -718,31 +785,44 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
         from oldSnapshot: TranscriptSurfaceSnapshot,
         to newSnapshot: TranscriptSurfaceSnapshot
     ) {
-        let oldRows = Dictionary(uniqueKeysWithValues: oldSnapshot.rows.map { ($0.id, $0) })
-        let newRows = Dictionary(uniqueKeysWithValues: newSnapshot.rows.map { ($0.id, $0) })
         let sameRowSequence = oldSnapshot.rows.count == newSnapshot.rows.count
             && oldSnapshot.rows.indices.allSatisfy { index in
                 oldSnapshot.rows[index].id == newSnapshot.rows[index].id
             }
-        if !sameRowSequence {
+        if sameRowSequence {
+            // A streamed revision normally changes only the live tail. Avoid
+            // allocating two O(N) ID dictionaries for every token; mounted
+            // rows already have an O(1) index in the stable sequence.
+            for id in Array(mounted.keys) {
+                guard let cell = mounted[id],
+                      let index = rowIndexByID[id],
+                      oldSnapshot.rows.indices.contains(index),
+                      newSnapshot.rows.indices.contains(index) else {
+                    if let cell = mounted[id] { unmount(id: id, cell: cell) }
+                    continue
+                }
+                let old = oldSnapshot.rows[index]
+                let row = newSnapshot.rows[index]
+                let nextKey = AppKitTranscriptRowReuseKey(row: row)
+                if cell.key != nextKey
+                    || old.contentIdentity != row.contentIdentity
+                    || old.layoutIdentity != row.layoutIdentity {
+                    unmount(id: id, cell: cell)
+                }
+            }
+        } else {
             rowIndexByID = Dictionary(
                 uniqueKeysWithValues: newSnapshot.rows.enumerated().map { ($0.element.id, $0.offset) }
             )
-        }
-        for id in Array(mounted.keys) {
-            guard let cell = mounted[id] else { continue }
-            guard let row = newRows[id] else {
-                unmount(id: id, cell: cell)
-                continue
-            }
-            let nextKey = AppKitTranscriptRowReuseKey(row: row)
-            if cell.key == nextKey,
-               oldRows[id]?.contentIdentity == row.contentIdentity {
-                // Stable rows are immutable render units.  Keep the host
-                // object and its content untouched; only its frame may move
-                // after a preceding row's height changes.
-            } else {
-                unmount(id: id, cell: cell)
+            let newRows = Dictionary(uniqueKeysWithValues: newSnapshot.rows.map { ($0.id, $0) })
+            for id in Array(mounted.keys) {
+                guard let cell = mounted[id], let row = newRows[id] else {
+                    if let cell = mounted[id] { unmount(id: id, cell: cell) }
+                    continue
+                }
+                if cell.key != AppKitTranscriptRowReuseKey(row: row) {
+                    unmount(id: id, cell: cell)
+                }
             }
         }
 
@@ -754,7 +834,8 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
             for index in newSnapshot.rows.indices {
                 let old = oldSnapshot.rows[index]
                 let row = newSnapshot.rows[index]
-                guard old.contentIdentity != row.contentIdentity else { continue }
+                guard old.contentIdentity != row.contentIdentity
+                        || old.layoutIdentity != row.layoutIdentity else { continue }
                 let height = cachedHeightOrEstimate(row)
                 if heightIndex.update(index: index, height: height) != 0 {
                     metrics.recordHeightIndexPointUpdate()
@@ -784,10 +865,28 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
             metrics.recordLayout(duration: duration)
         }
         updateDocumentFrame()
-        updateMountedFrames()
+        updateMountedFrames(repositionExisting: true)
     }
 
-    private func updateMountedFrames() {
+    /// A clip-origin change does not alter document geometry.  Keep the hot
+    /// wheel path to viewport mount/reposition work and reserve document-frame
+    /// updates for snapshot, measurement, and resize operations.
+    private func layoutViewportNow() {
+        guard !layingOut else { return }
+        layingOut = true
+        let started = ProcessInfo.processInfo.systemUptime
+        defer {
+            layingOut = false
+            metrics.recordLayout(duration: max(0, ProcessInfo.processInfo.systemUptime - started))
+        }
+        updateMountedFrames(repositionExisting: false, mountNewOverscanRows: false)
+        scheduleOverscanRefill()
+    }
+
+    private func updateMountedFrames(
+        repositionExisting: Bool = true,
+        mountNewOverscanRows: Bool = true
+    ) {
         guard document != nil else { return }
         let viewport = scrollView.contentView.bounds
         let overscanRange = heightIndex.rows(
@@ -800,13 +899,13 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
             viewportHeight: viewport.height,
             overscan: 0
         )
+        let visibleIndices = Set(visibleRange)
         var targetIndices = Array(overscanRange)
         if targetIndices.count > maximumMountedRows {
-            let visible = Set(visibleRange)
             let center = viewport.midY
             targetIndices = Array(targetIndices.sorted { lhs, rhs in
-                let leftDistance = visible.contains(lhs) ? -1 : abs(heightIndex.offset(of: lhs) + (heightIndex.height(at: lhs) ?? 0) / 2 - center)
-                let rightDistance = visible.contains(rhs) ? -1 : abs(heightIndex.offset(of: rhs) + (heightIndex.height(at: rhs) ?? 0) / 2 - center)
+                let leftDistance = visibleIndices.contains(lhs) ? -1 : abs(heightIndex.offset(of: lhs) + (heightIndex.height(at: lhs) ?? 0) / 2 - center)
+                let rightDistance = visibleIndices.contains(rhs) ? -1 : abs(heightIndex.offset(of: rhs) + (heightIndex.height(at: rhs) ?? 0) / 2 - center)
                 return leftDistance < rightDistance
             }.prefix(maximumMountedRows)).sorted()
         }
@@ -823,12 +922,19 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
 
         for index in targetIndices where snapshot.rows.indices.contains(index) {
             let row = snapshot.rows[index]
+            if !mountNewOverscanRows,
+               !visibleIndices.contains(index),
+               mounted[row.id] == nil {
+                continue
+            }
             let key = AppKitTranscriptRowReuseKey(row: row)
             if let cell = mounted[row.id] {
                 if cell.key != key {
                     unmount(id: row.id, cell: cell)
                 } else {
-                    position(cell.host, at: index)
+                    if repositionExisting {
+                        position(cell.host, at: index)
+                    }
                     continue
                 }
             }
@@ -836,7 +942,10 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
             let reused: Bool
             if let pooled = reusableHosts.popLast() {
                 host = pooled
-                host.prepareForReuse()
+                // `configure` replaces the old immutable root directly. An
+                // EmptyView transition here adds a second SwiftUI transaction
+                // and was visible as periodic two-frame misses while walking
+                // new rows for the first time.
                 host.configure(row: row, key: key)
                 reused = true
             } else {
@@ -848,8 +957,23 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
             mounted[row.id] = AppKitTranscriptMountedCell(key: key, host: host)
             metrics.recordMount(count: 1, peak: mounted.count, reused: reused)
         }
-        updateMountedFramesWithoutMounting()
+        if repositionExisting {
+            updateMountedFramesWithoutMounting()
+        }
         reportVisibleRows()
+    }
+
+    private func scheduleOverscanRefill() {
+        guard !overscanRefillQueued else { return }
+        overscanRefillQueued = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            guard let self else { return }
+            self.overscanRefillQueued = false
+            self.updateMountedFrames(
+                repositionExisting: false,
+                mountNewOverscanRows: true
+            )
+        }
     }
 
     private func updateMountedFramesWithoutMounting() {
@@ -871,15 +995,20 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
     private func unmount(id: String, cell: AppKitTranscriptMountedCell) {
         mounted.removeValue(forKey: id)
         cell.host.removeFromSuperview()
-        cell.host.prepareForReuse()
         if reusableHosts.count < maximumReusableHosts {
+            // Keep the detached immutable tree until this host is actually
+            // reused. Clearing it here and then clearing it again in the reuse
+            // branch performs two SwiftUI root swaps across adjacent scroll
+            // frames and was the remaining first-traversal hitch.
             reusableHosts.append(cell.host)
+        } else {
+            cell.host.prepareForReuse()
         }
         metrics.recordUnmount(count: 1)
     }
 
     private func reportVisibleRows() {
-        let ids = Set(visibleRowIDs)
+        let ids = Set(visibleHistoryTickIDs)
         guard ids != lastVisibleRowIDs else { return }
         lastVisibleRowIDs = ids
         guard !viewportReportQueued else { return }
@@ -900,7 +1029,7 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
                 name: Notification.Name("BubbleTranscriptViewportChanged"),
                 object: self.scrollView,
                 userInfo: [
-                    "visibleRowIDs": self.visibleRowIDs
+                    "visibleRowIDs": self.visibleHistoryTickIDs
                 ]
             )
         }

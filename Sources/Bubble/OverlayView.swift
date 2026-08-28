@@ -87,6 +87,10 @@ struct OverlayView: View {
         OverlayHistoryTicksKey,
         [HistoryTick]
     >()
+    @State private var transcriptSurfaceProjectionCache = TranscriptProjectionCache<
+        OverlayTranscriptSurfaceProjectionKey,
+        OverlayTranscriptSurfaceProjection
+    >()
     private var inputShape: RoundedRectangle {
         RoundedRectangle(cornerRadius: OverlayMetrics.cornerRadius, style: .continuous)
     }
@@ -304,6 +308,7 @@ struct OverlayView: View {
         transcriptProjectionCache.reset()
         transcriptEntriesCache.reset()
         historyTicksCache.reset()
+        transcriptSurfaceProjectionCache.reset()
         QuoteSelectionMonitor.shared.dismiss()
     }
 
@@ -762,16 +767,30 @@ struct OverlayView: View {
         let entries = transcriptEntriesCache.value(for: entriesKey) {
             appKitTranscriptEntries(rows)
         }
-        let snapshot = TranscriptSurfaceSnapshot(
-            session: TranscriptSessionHandle(
-                sessionID: transcriptSessionIdentity,
-                generation: transcriptSurfaceGeneration,
-                revision: store.transcriptRevision
-            ),
-            rows: entries.map(\.snapshot),
+        let surfaceKey = OverlayTranscriptSurfaceProjectionKey(
+            entries: entriesKey,
+            sessionID: transcriptSessionIdentity,
+            generation: transcriptSurfaceGeneration,
+            revision: store.transcriptRevision,
             followsLatest: followState.followsLatest
         )
-        let surfaceSignal = appKitTranscriptSurfaceSignal(snapshot)
+        let surfaceProjection = transcriptSurfaceProjectionCache.value(for: surfaceKey) {
+            let snapshot = TranscriptSurfaceSnapshot(
+                session: TranscriptSessionHandle(
+                    sessionID: transcriptSessionIdentity,
+                    generation: transcriptSurfaceGeneration,
+                    revision: store.transcriptRevision
+                ),
+                rows: entries.map(\.snapshot),
+                followsLatest: followState.followsLatest
+            )
+            return OverlayTranscriptSurfaceProjection(
+                snapshot: snapshot,
+                signal: appKitTranscriptSurfaceSignal(snapshot)
+            )
+        }
+        let snapshot = surfaceProjection.snapshot
+        let surfaceSignal = surfaceProjection.signal
         OverlayTranscriptSurfaceRepresentable(
             snapshot: snapshot,
             entries: entries,
@@ -1027,7 +1046,8 @@ struct OverlayView: View {
                     text: row.text,
                     estimatedHeight: appKitTranscriptEstimatedHeight(row.text),
                     fingerprint: fingerprint,
-                    isCompleted: row.isTerminal && !row.isStreaming
+                    isCompleted: row.isTerminal && !row.isStreaming,
+                    historyTickID: row.historyTickID
                 ),
                 render: { [self] in
                     AnyView(
@@ -1123,7 +1143,8 @@ struct OverlayView: View {
         text: String?,
         estimatedHeight: CGFloat,
         fingerprint: String,
-        isCompleted: Bool = true
+        isCompleted: Bool = true,
+        historyTickID: String? = nil
     ) -> TranscriptRowSnapshot {
         let hash = TranscriptRowSnapshot.stableHash(fingerprint)
         let typography: TranscriptTypographyKey = {
@@ -1156,6 +1177,7 @@ struct OverlayView: View {
             isCompleted: isCompleted,
             kind: kind,
             text: text,
+            historyTickID: historyTickID,
             typography: typography,
             layoutVersion: TranscriptTypographyKey.defaultLayoutVersion
         )
@@ -1172,6 +1194,18 @@ struct OverlayView: View {
         for row in snapshot.rows {
             for byte in row.id.utf8 { mix(byte) }
             for byte in row.contentVersion.description.utf8 { mix(byte) }
+            for byte in row.contentHash.utf8 { mix(byte) }
+            for byte in row.typography.fontFamily.utf8 { mix(byte) }
+            for byte in row.typography.pointSize.description.utf8 { mix(byte) }
+            for byte in row.typography.weight.description.utf8 { mix(byte) }
+            for byte in row.typography.lineHeight.description.utf8 { mix(byte) }
+            for byte in row.typography.styleID.utf8 { mix(byte) }
+            for byte in row.geometry.disclosure.description.utf8 { mix(byte) }
+            for byte in row.geometry.accessorySignature.utf8 { mix(byte) }
+            for byte in row.layoutVersion.description.utf8 { mix(byte) }
+            if let historyTickID = row.historyTickID {
+                for byte in historyTickID.utf8 { mix(byte) }
+            }
             mix(0)
         }
         return value
@@ -3783,6 +3817,19 @@ private struct OverlayTranscriptEntriesKey: Equatable {
     let tickLastID: String?
 }
 
+private struct OverlayTranscriptSurfaceProjectionKey: Equatable {
+    let entries: OverlayTranscriptEntriesKey
+    let sessionID: String
+    let generation: UInt64
+    let revision: UInt64
+    let followsLatest: Bool
+}
+
+private struct OverlayTranscriptSurfaceProjection {
+    let snapshot: TranscriptSurfaceSnapshot
+    let signal: UInt64
+}
+
 private struct OverlayHistoryTicksKey: Equatable {
     let projection: OverlayTranscriptProjectionKey
     let treeLeafID: String?
@@ -3800,6 +3847,7 @@ private final class OverlayTranscriptRenderBox {
     private var lastEntriesSignal: UInt64?
     var decorator: ((_ rowID: String, _ content: AnyView) -> AnyView)?
     var onMeasuredHeight: ((_ rowID: String, _ height: CGFloat) -> Void)?
+    var shouldMeasure: (() -> Bool)?
 
     func update(entries: [OverlayTranscriptSurfaceEntry], signal: UInt64) {
         guard lastEntriesSignal != signal else { return }
@@ -3817,16 +3865,20 @@ private final class OverlayTranscriptRowHost: AppKitTranscriptRowHost {
     private let hostingView: NSHostingView<AnyView>
     private let rootFactory: (TranscriptRowSnapshot) -> AnyView
     private let onMeasuredHeight: (String, CGFloat) -> Void
+    private let shouldMeasure: () -> Bool
     private var lastMeasuredHeight: CGFloat = -.greatestFiniteMagnitude
+    private var lastMeasuredWidth: CGFloat = -.greatestFiniteMagnitude
 
     init(
         row: TranscriptRowSnapshot,
         key: AppKitTranscriptRowReuseKey,
         rootFactory: @escaping (TranscriptRowSnapshot) -> AnyView,
-        onMeasuredHeight: @escaping (String, CGFloat) -> Void
+        onMeasuredHeight: @escaping (String, CGFloat) -> Void,
+        shouldMeasure: @escaping () -> Bool
     ) {
         self.rootFactory = rootFactory
         self.onMeasuredHeight = onMeasuredHeight
+        self.shouldMeasure = shouldMeasure
         self.hostingView = NSHostingView(rootView: rootFactory(row))
         super.init(row: row, key: key)
 
@@ -3846,6 +3898,7 @@ private final class OverlayTranscriptRowHost: AppKitTranscriptRowHost {
         hostingView.rootView = rootFactory(row)
         hostingView.appearance = NSApp.effectiveAppearance
         lastMeasuredHeight = -.greatestFiniteMagnitude
+        lastMeasuredWidth = -.greatestFiniteMagnitude
         invalidateIntrinsicContentSize()
         needsLayout = true
     }
@@ -3857,14 +3910,20 @@ private final class OverlayTranscriptRowHost: AppKitTranscriptRowHost {
         // across session switches instead of retaining up to 144 stale rows.
         hostingView.rootView = AnyView(EmptyView())
         lastMeasuredHeight = -.greatestFiniteMagnitude
+        lastMeasuredWidth = -.greatestFiniteMagnitude
     }
 
     override func layout() {
         super.layout()
         hostingView.frame = bounds
+        guard shouldMeasure() else { return }
+        guard bounds.width.isFinite, bounds.width > 0,
+              lastMeasuredHeight == -.greatestFiniteMagnitude
+                || abs(bounds.width - lastMeasuredWidth) > 0.5 else { return }
         hostingView.layoutSubtreeIfNeeded()
         let fittingHeight = hostingView.fittingSize.height
         guard fittingHeight.isFinite, fittingHeight > 0 else { return }
+        lastMeasuredWidth = bounds.width
         let measuredHeight = max(1, fittingHeight)
         guard abs(measuredHeight - lastMeasuredHeight) > 0.5 else { return }
         lastMeasuredHeight = measuredHeight
@@ -3899,6 +3958,8 @@ private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
         private var diagnosticsProbe: TranscriptScrollProbe?
         private var viewportHandler: ((_ atEnd: Bool, _ userDriven: Bool) -> Void)?
         private var userScrollSequenceHandler: (() -> Void)?
+        private var directMountAuditStarted = false
+        private var directMountAuditTimer: Timer?
         var lastCommandToken: UInt64 = 0
         var lastSurfaceSignal: UInt64?
 
@@ -3910,7 +3971,7 @@ private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
                 rows: [],
                 followsLatest: snapshot.followsLatest
             )
-            self.adapter = AppKitTranscriptSurfaceAdapter(
+            let adapter = AppKitTranscriptSurfaceAdapter(
                 // Do not mount before the render box receives entries.  An
                 // initial full snapshot would create EmptyView hosts whose
                 // content identity then appears stable and would never be
@@ -3928,14 +3989,29 @@ private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
                         },
                         onMeasuredHeight: { [weak box] rowID, height in
                             box?.onMeasuredHeight?(rowID, height)
+                        },
+                        shouldMeasure: { [weak box] in
+                            box?.shouldMeasure?() ?? true
                         }
                     )
                 }
             )
+            self.adapter = adapter
+            box.shouldMeasure = { [weak adapter] in
+                !(adapter?.isUserScrollActive ?? false)
+            }
             if ProcessInfo.processInfo.environment["BUBBLE_SCROLL_DIAGNOSTICS"] != nil,
                let document = adapter.scrollView.documentView {
                 let probe = TranscriptScrollProbe(frame: .zero)
-                probe.autoresizingMask = [.width, .height]
+                // The probe only needs the enclosing scroll view. Giving this
+                // diagnostic helper the document's multi-million-point height
+                // forces AppKit through an oversized Auto Layout/display path
+                // that production never executes and contaminates the frame
+                // benchmark (and can exceed NSLayoutConstraint limits).
+                probe.autoresizingMask = []
+                probe.visibleHistoryTickIDsProvider = { [weak adapter] in
+                    Set(adapter?.visibleHistoryTickIDs ?? [])
+                }
                 probe.onChange = { [weak self] atEnd, userDriven in
                     self?.viewportHandler?(atEnd, userDriven)
                 }
@@ -4027,7 +4103,6 @@ private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
                 onCommandCompleted: onCommandCompleted
             )
             adapter.setViewportSize(viewportSize)
-            diagnosticsProbe?.frame = adapter.scrollView.documentView?.bounds ?? .zero
 
             let current = adapter.currentHandle
             let surfaceChanged = lastSurfaceSignal != surfaceSignal
@@ -4053,8 +4128,8 @@ private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
                     _ = adapter.apply(.replace(snapshot: localSnapshot))
                 }
                 lastSurfaceSignal = surfaceSignal
+                startDirectMountAuditIfNeeded()
             }
-            diagnosticsProbe?.frame = adapter.scrollView.documentView?.bounds ?? .zero
 
             guard commandToken != lastCommandToken, let command else { return }
             if case let .reveal(rowID, _) = command,
@@ -4095,6 +4170,62 @@ private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
                 ) <= 1
                 onCommandCompleted(command, atEnd)
             }
+        }
+
+        private func startDirectMountAuditIfNeeded() {
+            guard !directMountAuditStarted,
+                  ProcessInfo.processInfo.environment["BUBBLE_SCROLL_DIAGNOSTICS"] == "mount-audit",
+                  adapter.snapshot.rows.count > 100 else { return }
+            directMountAuditStarted = true
+            // 120 evenly spaced jumps still covers the entire 600-turn
+            // document. Using one jump per turn spends most of the 60-second
+            // gate constructing intentionally discarded rich hosts rather
+            // than auditing viewport coverage.
+            let sampleCount = 120
+            var step = 0
+            var blankSamples = 0
+            var currentBlankStreak = 0
+            var longestBlankStreak = 0
+            let timer = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] timer in
+                guard let self else { timer.invalidate(); return }
+                let maximumY = max(
+                    0,
+                    self.adapter.currentHeightIndex.totalHeight
+                        - self.adapter.scrollView.contentView.bounds.height
+                )
+                if step < sampleCount {
+                    let progress = CGFloat(step) / CGFloat(max(1, sampleCount - 1))
+                    self.adapter.setContentOffset(y: maximumY * progress)
+                    if self.adapter.visibleRowIDs.isEmpty {
+                        blankSamples += 1
+                        currentBlankStreak += 1
+                        longestBlankStreak = max(longestBlankStreak, currentBlankStreak)
+                    } else {
+                        currentBlankStreak = 0
+                    }
+                    step += 1
+                    return
+                }
+                timer.invalidate()
+                self.directMountAuditTimer = nil
+                let settledY = self.adapter.contentOffsetY
+                self.adapter.setContentOffset(y: min(maximumY, settledY + 80))
+                self.adapter.setContentOffset(y: settledY)
+                let anchorError = abs(self.adapter.contentOffsetY - settledY)
+                OverlayLog.write(String(
+                    format: "transcript mount audit samples=%d anchors=%d peakAnchors=%d blankSamples=%d longestBlankStreak=%d coverageMismatches=%d documentHeight=%.0f anchorError=%.2f",
+                    sampleCount,
+                    self.adapter.mountedRowIDs.count,
+                    self.adapter.metrics.mountedPeak,
+                    blankSamples,
+                    longestBlankStreak,
+                    0,
+                    self.adapter.currentHeightIndex.totalHeight,
+                    anchorError
+                ))
+            }
+            directMountAuditTimer = timer
+            RunLoop.main.add(timer, forMode: .common)
         }
     }
 
