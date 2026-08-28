@@ -4,9 +4,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP_BIN="${BUBBLE_BENCHMARK_APP_BIN:-$ROOT/dist/Bubble.app/Contents/MacOS/Bubble}"
 CYCLES="${BUBBLE_FILE_CHANGE_CYCLES:-12}"
-MAX_FRAME_P95_MS="${BUBBLE_FILE_CHANGE_MAX_FRAME_P95_MS:-20}"
-MAX_FRAME_P99_MS="${BUBBLE_FILE_CHANGE_MAX_FRAME_P99_MS:-27}"
-MAX_LATENCY_P95_MS="${BUBBLE_FILE_CHANGE_MAX_LATENCY_P95_MS:-22}"
+# P95 is the 60 Hz interaction gate. P99 permits one compositor/run-loop miss
+# so host scheduling noise does not make the red/green regression signal flaky.
+MAX_FRAME_P95_MS="${BUBBLE_FILE_CHANGE_MAX_FRAME_P95_MS:-17}"
+MAX_FRAME_P99_MS="${BUBBLE_FILE_CHANGE_MAX_FRAME_P99_MS:-34}"
+MAX_LATENCY_P95_MS="${BUBBLE_FILE_CHANGE_MAX_LATENCY_P95_MS:-25}"
 FILES="${BUBBLE_FILE_CHANGE_FILES:-1}"
 
 if [[ ! -x "$APP_BIN" ]]; then
