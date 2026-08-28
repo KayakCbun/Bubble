@@ -25,6 +25,8 @@ enum ConversationBranchControlsPolicy {
 }
 
 enum TranscriptFollowPolicy {
+    static let layoutSettleDelay: TimeInterval = 0.24
+
     static func followsContentHeightChange(isBusy: Bool) -> Bool {
         isBusy
     }
@@ -33,6 +35,30 @@ enum TranscriptFollowPolicy {
     /// Those must not yank the main transcript to the bottom.
     static func followsRevisionChange(isBusy: Bool) -> Bool {
         isBusy
+    }
+}
+
+enum TranscriptFollowTrigger {
+    case contentHeightChanged
+    case turnSettled
+    case expansionSettled
+}
+
+enum TranscriptFollowTriggerPolicy {
+    static func shouldRequestLatest(
+        trigger: TranscriptFollowTrigger,
+        followsLatest: Bool,
+        isBusy: Bool
+    ) -> Bool {
+        guard followsLatest else { return false }
+        switch trigger {
+        case .contentHeightChanged:
+            return TranscriptFollowPolicy.followsContentHeightChange(isBusy: isBusy)
+        case .turnSettled:
+            return !isBusy
+        case .expansionSettled:
+            return true
+        }
     }
 }
 
@@ -70,6 +96,41 @@ enum TranscriptScrollSequencePolicy {
         if beginsNewGesture || isDiscreteWheel { return false }
         if isDirectChange, !hasMomentum { return false }
         return true
+    }
+}
+
+enum TranscriptScrollRequest {
+    case returnToEnd
+    case returnControlVisibility
+    case navigateToTurn
+}
+
+enum TranscriptScrollAnimationPolicy {
+    /// A return-to-end animation keeps mutating the clip view after the chip is
+    /// clicked, so the first wheel deltas can be overwritten. Make that jump
+    /// immediate; spatial navigation within history can remain animated.
+    static func shouldAnimate(_ request: TranscriptScrollRequest) -> Bool {
+        switch request {
+        case .returnToEnd, .returnControlVisibility:
+            return false
+        case .navigateToTurn:
+            return true
+        }
+    }
+}
+
+enum TranscriptWheelScrollPolicy {
+    private static let discreteStep: CGFloat = 12
+
+    static func nextOrigin(
+        current: CGFloat,
+        scrollingDeltaY: CGFloat,
+        hasPreciseDeltas: Bool,
+        minimum: CGFloat,
+        maximum: CGFloat
+    ) -> CGFloat {
+        let delta = hasPreciseDeltas ? scrollingDeltaY : scrollingDeltaY * discreteStep
+        return min(maximum, max(minimum, current - delta))
     }
 }
 
@@ -123,6 +184,14 @@ struct TranscriptFollowState: Equatable {
 
     mutating func beginFollowingTurn(targetID: String) {
         mode = .followingTurn(targetID: targetID)
+    }
+
+    @discardableResult
+    mutating func finishFollowingTurn(targetID: String) -> Bool {
+        guard case .followingTurn(let pendingID) = mode,
+              pendingID == targetID else { return false }
+        mode = .followingEnd
+        return true
     }
 
     @discardableResult

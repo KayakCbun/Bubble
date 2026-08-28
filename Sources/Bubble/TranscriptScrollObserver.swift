@@ -73,16 +73,19 @@ private final class WeakTranscriptRowAnchor {
 
 struct TranscriptScrollObserver: NSViewRepresentable {
     var maintainsVisibleContent: Bool
+    var onContentHeightChange: () -> Void
     var onChange: (_ atEnd: Bool, _ userDriven: Bool) -> Void
 
     func makeNSView(context: Context) -> TranscriptScrollProbe {
         let view = TranscriptScrollProbe()
+        view.onContentHeightChange = onContentHeightChange
         view.onChange = onChange
         view.setMaintainsVisibleContent(maintainsVisibleContent)
         return view
     }
 
     func updateNSView(_ view: TranscriptScrollProbe, context: Context) {
+        view.onContentHeightChange = onContentHeightChange
         view.onChange = onChange
         view.setMaintainsVisibleContent(maintainsVisibleContent)
         view.attachWhenReady()
@@ -94,6 +97,7 @@ final class TranscriptScrollProbe: NSView {
     private static let endThreshold: CGFloat = 36
     private static let navigationKeyCodes: Set<UInt16> = [115, 116, 121, 125, 126]
 
+    var onContentHeightChange: (() -> Void)?
     var onChange: ((_ atEnd: Bool, _ userDriven: Bool) -> Void)?
     var maintainsVisibleContent = false {
         didSet {
@@ -142,10 +146,16 @@ final class TranscriptScrollProbe: NSView {
     private var diagnosticWheelBeginsGesture = true
     private var diagnosticLastTick: TimeInterval?
     private var diagnosticFrameIntervals: [TimeInterval] = []
+    private var diagnosticScrollDurations: [TimeInterval] = []
+    private var diagnosticInputSequenceStartedAt: TimeInterval?
+    private var diagnosticInputOriginY: CGFloat?
+    private var diagnosticFirstInputLatency: TimeInterval?
+    private var diagnosticFirstInputMoved = false
     private var diagnosticReadyStartedAt: TimeInterval?
     private var diagnosticReadyLatency: TimeInterval = 0
     private var diagnosticPeakAnchorCount = 0
     private var diagnosticDisplayLink: CADisplayLink?
+    private var diagnosticDriveTimer: Timer?
     private var diagnosticMountTimer: Timer?
     private var diagnosticMountStep = 0
     private var diagnosticMountAwaitingContent = false
@@ -240,6 +250,10 @@ final class TranscriptScrollProbe: NSView {
             self.eventMonitor = NSEvent.addLocalMonitorForEvents(
                 matching: [.scrollWheel, .leftMouseDragged, .keyDown]
             ) { [weak self] event in
+                if event.type == .scrollWheel,
+                   self?.handleScrollWheel(event) == true {
+                    return nil
+                }
                 self?.recordUserEvent(event)
                 return event
             }
@@ -251,7 +265,9 @@ final class TranscriptScrollProbe: NSView {
             if self.diagnosticsEnabled {
                 OverlayLog.write("transcript scroll observer attached")
             }
-            if self.diagnosticsMode == "drive" || self.diagnosticsMode == "wheel" {
+            if self.diagnosticsMode == "drive"
+                || self.diagnosticsMode == "wheel"
+                || self.diagnosticsMode == "wheel-timer" {
                 self.startDiagnosticDrive()
             } else if self.diagnosticsMode == "mount-audit" {
                 self.startMountAudit()
@@ -299,6 +315,8 @@ final class TranscriptScrollProbe: NSView {
         userSettleTimer = nil
         diagnosticDisplayLink?.invalidate()
         diagnosticDisplayLink = nil
+        diagnosticDriveTimer?.invalidate()
+        diagnosticDriveTimer = nil
         diagnosticMountTimer?.invalidate()
         diagnosticMountTimer = nil
     }
@@ -317,6 +335,53 @@ final class TranscriptScrollProbe: NSView {
             let frameInWindow = scrollView.convert(scrollView.bounds, to: nil)
             guard frameInWindow.contains(event.locationInWindow) else { return }
         }
+        recordAcceptedUserEvent()
+        DispatchQueue.main.async { [weak self] in self?.reportPosition() }
+    }
+
+    /// SwiftUI's hosted `NSScrollView` can defer the first effective delta for
+    /// several event cycles while it establishes a gesture. Applying AppKit's
+    /// already-accelerated delta to the clip view makes the first movement
+    /// synchronous while preserving trackpad momentum packets.
+    @discardableResult
+    private func handleScrollWheel(
+        _ event: NSEvent,
+        validatesLocation: Bool = true
+    ) -> Bool {
+        guard let scrollView = observedScrollView else { return false }
+        if validatesLocation {
+            guard event.window === scrollView.window else { return false }
+            let frameInWindow = scrollView.convert(scrollView.bounds, to: nil)
+            guard frameInWindow.contains(event.locationInWindow) else { return false }
+        }
+        if abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY) {
+            return false
+        }
+        if suppressesPriorScrollEvent(event) {
+            return true
+        }
+
+        let visible = scrollView.contentView.bounds
+        guard let document = scrollView.documentView else { return false }
+        let minimumY = document.bounds.minY
+        let maximumY = max(minimumY, document.bounds.maxY - visible.height)
+        let nextY = TranscriptWheelScrollPolicy.nextOrigin(
+            current: visible.minY,
+            scrollingDeltaY: event.scrollingDeltaY,
+            hasPreciseDeltas: event.hasPreciseScrollingDeltas,
+            minimum: minimumY,
+            maximum: maximumY
+        )
+
+        recordAcceptedUserEvent()
+        guard abs(nextY - visible.minY) > 0.01 else { return true }
+        scrollView.contentView.scroll(to: NSPoint(x: visible.minX, y: nextY))
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        reportPosition()
+        return true
+    }
+
+    private func recordAcceptedUserEvent() {
         let startsUserScroll = CACurrentMediaTime() > userEventDeadline
         cancelPendingHistoryAlignment()
         deferAnchorMaintenanceUntilUserSettles()
@@ -327,7 +392,6 @@ final class TranscriptScrollProbe: NSView {
             diagnosedUserScroll = true
             OverlayLog.write("transcript physical scroll observed")
         }
-        DispatchQueue.main.async { [weak self] in self?.reportPosition() }
     }
 
     /// Clicking the chip can happen before a trackpad gesture has emitted its
@@ -397,6 +461,7 @@ final class TranscriptScrollProbe: NSView {
 
     private func documentFrameChanged() {
         scheduleViewportReport()
+        onContentHeightChange?()
         if pendingHistoryTargetID != nil {
             schedulePendingHistoryAlignment()
             return
@@ -717,6 +782,11 @@ final class TranscriptScrollProbe: NSView {
         diagnosticFramesRemaining = 720
         diagnosticWheelBeginsGesture = true
         diagnosticFrameIntervals.removeAll(keepingCapacity: true)
+        diagnosticScrollDurations.removeAll(keepingCapacity: true)
+        diagnosticInputSequenceStartedAt = nil
+        diagnosticInputOriginY = nil
+        diagnosticFirstInputLatency = nil
+        diagnosticFirstInputMoved = false
         diagnosticLastTick = nil
         diagnosticPeakAnchorCount = anchorIndex.count
         diagnosticBlankSamples = 0
@@ -725,10 +795,22 @@ final class TranscriptScrollProbe: NSView {
         diagnosticCoverageMismatches = 0
         visibleAnchor = nil
         userEventDeadline = CACurrentMediaTime() + 120
-        let link = window.displayLink(target: self, selector: #selector(diagnosticTick(_:)))
-        link.preferredFrameRateRange = OverlayMotion.frameRate
-        link.add(to: .main, forMode: .common)
-        diagnosticDisplayLink = link
+        if diagnosticsMode == "wheel-timer" {
+            let timer = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] timer in
+                guard self?.performDiagnosticTick() == true else {
+                    timer.invalidate()
+                    self?.diagnosticDriveTimer = nil
+                    return
+                }
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            diagnosticDriveTimer = timer
+        } else {
+            let link = window.displayLink(target: self, selector: #selector(diagnosticTick(_:)))
+            link.preferredFrameRateRange = OverlayMotion.frameRate
+            link.add(to: .main, forMode: .common)
+            diagnosticDisplayLink = link
+        }
     }
 
     private func startMountAudit() {
@@ -872,14 +954,27 @@ final class TranscriptScrollProbe: NSView {
     }
 
     @objc private func diagnosticTick(_ link: CADisplayLink) {
-        guard diagnosticFramesRemaining > 0,
-              let scrollView = observedScrollView,
-              let document = observedDocument else {
+        guard performDiagnosticTick() else {
             link.invalidate()
             diagnosticDisplayLink = nil
             return
         }
+    }
+
+    private func performDiagnosticTick() -> Bool {
+        guard diagnosticFramesRemaining > 0,
+              let scrollView = observedScrollView,
+              let document = observedDocument else {
+            return false
+        }
         let now = CACurrentMediaTime()
+        if !diagnosticFirstInputMoved,
+           let startedAt = diagnosticInputSequenceStartedAt,
+           let originY = diagnosticInputOriginY,
+           abs(scrollView.contentView.bounds.minY - originY) > 0.5 {
+            diagnosticFirstInputLatency = now - startedAt
+            diagnosticFirstInputMoved = true
+        }
         if let last = diagnosticLastTick {
             diagnosticFrameIntervals.append(now - last)
             let visible = scrollView.contentView.bounds
@@ -908,7 +1003,7 @@ final class TranscriptScrollProbe: NSView {
                 max(minimumY, visible.minY + diagnosticDirection * diagnosticScrollStep)
             )
         }
-        if diagnosticsMode == "wheel",
+        if (diagnosticsMode == "wheel" || diagnosticsMode == "wheel-timer"),
            let cgEvent = CGEvent(
                scrollWheelEvent2Source: nil,
                units: .pixel,
@@ -925,9 +1020,23 @@ final class TranscriptScrollProbe: NSView {
                 )
             )
             diagnosticWheelBeginsGesture = false
-            guard let event = NSEvent(cgEvent: cgEvent) else { return }
-            deferAnchorMaintenanceUntilUserSettles()
-            scrollView.scrollWheel(with: event)
+            guard let event = NSEvent(cgEvent: cgEvent) else { return true }
+            let originBeforeInput = scrollView.contentView.bounds.minY
+            let inputStartedAt = CACurrentMediaTime()
+            if diagnosticInputSequenceStartedAt == nil {
+                diagnosticInputSequenceStartedAt = inputStartedAt
+                diagnosticInputOriginY = originBeforeInput
+            }
+            _ = handleScrollWheel(event, validatesLocation: false)
+            let inputLatency = CACurrentMediaTime() - inputStartedAt
+            diagnosticScrollDurations.append(inputLatency)
+            if !diagnosticFirstInputMoved,
+               let startedAt = diagnosticInputSequenceStartedAt,
+               let originY = diagnosticInputOriginY,
+               abs(scrollView.contentView.bounds.minY - originY) > 0.5 {
+                diagnosticFirstInputLatency = CACurrentMediaTime() - startedAt
+                diagnosticFirstInputMoved = true
+            }
         } else {
             scrollView.contentView.scroll(to: NSPoint(x: visible.minX, y: nextY))
             scrollView.reflectScrolledClipView(scrollView.contentView)
@@ -941,15 +1050,28 @@ final class TranscriptScrollProbe: NSView {
             let p95 = sorted.isEmpty ? 0 : sorted[p95Index] * 1_000
             let p99 = sorted.isEmpty ? 0 : sorted[p99Index] * 1_000
             let maximum = (sorted.last ?? 0) * 1_000
+            let sortedScrollDurations = diagnosticScrollDurations.sorted()
+            let wheelP95Index = min(
+                max(0, Int(Double(sortedScrollDurations.count) * 0.95)),
+                max(0, sortedScrollDurations.count - 1)
+            )
+            let wheelP95 = sortedScrollDurations.isEmpty
+                ? 0
+                : sortedScrollDurations[wheelP95Index] * 1_000
+            let wheelMaximum = (sortedScrollDurations.last ?? 0) * 1_000
             OverlayLog.write(
                 String(
-                    format: "transcript scroll benchmark frames=%d step=%.0f ready=%.2fms p95=%.2fms p99=%.2fms max=%.2fms anchors=%d peakAnchors=%d blankFrames=%d longestBlankStreak=%d",
+                    format: "transcript scroll benchmark frames=%d step=%.0f ready=%.2fms p95=%.2fms p99=%.2fms max=%.2fms firstInput=%.2fms firstMoved=%d wheelP95=%.2fms wheelMax=%.2fms anchors=%d peakAnchors=%d blankFrames=%d longestBlankStreak=%d",
                     diagnosticFrameIntervals.count,
                     diagnosticScrollStep,
                     diagnosticReadyLatency * 1_000,
                     p95,
                     p99,
                     maximum,
+                    (diagnosticFirstInputLatency ?? 0) * 1_000,
+                    diagnosticFirstInputMoved ? 1 : 0,
+                    wheelP95,
+                    wheelMaximum,
                     rowAnchors.count,
                     diagnosticPeakAnchorCount,
                     diagnosticBlankSamples,
@@ -959,10 +1081,9 @@ final class TranscriptScrollProbe: NSView {
             userEventDeadline = 0
             rebuildAnchorIndex()
             captureVisibleAnchor()
-            link.invalidate()
-            diagnosticDisplayLink = nil
-            return
+            return false
         }
+        return true
     }
 
     private func mountedAnchorIntersects(_ visible: CGRect, in document: NSView) -> Bool {

@@ -509,8 +509,7 @@ struct OverlayLayoutCheck {
         expect(ComposerFocusPolicy.submissionRestoreDelay > 0,
                "the stale field editor must detach before composer focus is restored")
         expect(
-            ComposerBusyKeyRoutingPolicy.shouldRoute(
-                isBusy: true,
+            ComposerKeyRoutingPolicy.shouldRoute(
                 hasText: true,
                 keyCode: ordinaryTextKeyCode,
                 commandModified: false,
@@ -519,8 +518,7 @@ struct OverlayLayoutCheck {
             "ordinary typing during a model run is routed through the live field editor"
         )
         expect(
-            ComposerBusyKeyRoutingPolicy.shouldRoute(
-                isBusy: true,
+            ComposerKeyRoutingPolicy.shouldRoute(
                 hasText: false,
                 keyCode: OverlayKeyCode.deleteBackward,
                 commandModified: false,
@@ -529,8 +527,7 @@ struct OverlayLayoutCheck {
             "deletion remains available during a model run"
         )
         expect(
-            !ComposerBusyKeyRoutingPolicy.shouldRoute(
-                isBusy: true,
+            !ComposerKeyRoutingPolicy.shouldRoute(
                 hasText: true,
                 keyCode: ordinaryTextKeyCode,
                 commandModified: true,
@@ -539,14 +536,61 @@ struct OverlayLayoutCheck {
             "command shortcuts remain owned by the standard edit-command path"
         )
         expect(
-            !ComposerBusyKeyRoutingPolicy.shouldRoute(
-                isBusy: false,
+            ComposerKeyRoutingPolicy.shouldRoute(
                 hasText: true,
                 keyCode: ordinaryTextKeyCode,
                 commandModified: false,
                 controlModified: false
             ),
-            "idle typing stays on SwiftUI's ordinary TextField path"
+            "idle and post-abort typing use the same resilient composer editor path"
+        )
+        expect(
+            ComposerReturnKeyPolicy.action(
+                keyCode: OverlayKeyCode.returnKey,
+                hasMarkedText: false,
+                shiftModified: false,
+                optionModified: false,
+                commandModified: false,
+                controlModified: false,
+                mountPaletteVisible: false
+            ) == .submit,
+            "plain Return submits through the overlay even after SwiftUI replaces its field editor"
+        )
+        expect(
+            ComposerReturnKeyPolicy.action(
+                keyCode: OverlayKeyCode.returnKey,
+                hasMarkedText: true,
+                shiftModified: false,
+                optionModified: false,
+                commandModified: false,
+                controlModified: false,
+                mountPaletteVisible: false
+            ) == .passThrough,
+            "Return commits marked IME text before submitting"
+        )
+        expect(
+            ComposerReturnKeyPolicy.action(
+                keyCode: OverlayKeyCode.returnKey,
+                hasMarkedText: false,
+                shiftModified: true,
+                optionModified: false,
+                commandModified: false,
+                controlModified: false,
+                mountPaletteVisible: false
+            ) == .insertNewline,
+            "Shift-Return keeps multiline composer input"
+        )
+        expect(
+            ComposerReturnKeyPolicy.action(
+                keyCode: OverlayKeyCode.returnKey,
+                hasMarkedText: false,
+                shiftModified: false,
+                optionModified: false,
+                commandModified: false,
+                controlModified: false,
+                mountPaletteVisible: true
+            ) == .toggleMount,
+            "Return keeps mount-palette selection behavior"
         )
 
         let busyEscape = OverlayEscapePolicy.action(

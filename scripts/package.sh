@@ -49,6 +49,14 @@ swiftc -parse-as-library scripts/check_typography_contract.swift -o /tmp/bubble-
 swiftc -parse-as-library Sources/Bubble/OverlayLayoutPolicy.swift Sources/Bubble/OverlayRenderPolicy.swift scripts/check_overlay_layout.swift -o /tmp/bubble-check-layout
 /tmp/bubble-check-layout
 
+swiftc -parse-as-library -framework AppKit \
+  Sources/Bubble/OverlayLayoutPolicy.swift \
+  Sources/Bubble/OverlayRenderPolicy.swift \
+  Sources/Bubble/ComposerEditorLocator.swift \
+  scripts/check_composer_editor.swift \
+  -o /tmp/bubble-check-composer-editor
+/tmp/bubble-check-composer-editor
+
 swiftc -parse-as-library Sources/Bubble/SideStage.swift Sources/Bubble/WorkspaceTranscriptRenderPlan.swift scripts/check_side_stage.swift -o /tmp/bubble-check-side-stage
 /tmp/bubble-check-side-stage
 

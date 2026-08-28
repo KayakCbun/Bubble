@@ -88,13 +88,28 @@ final class OverlayController: NSObject, NSWindowDelegate {
                OverlayEditCommands.handleCommandEditKey(event, paste: self?.panel.pasteAction) {
                 return nil
             }
-            if event.keyCode == OverlayKeyCode.returnKey
-                || event.keyCode == OverlayKeyCode.keypadEnter {
-                if let textView = self?.panel.firstResponder as? NSTextView, textView.hasMarkedText() {
-                    return event
-                }
-                if event.modifierFlags.contains(.shift) || event.modifierFlags.contains(.option) {
-                    self?.insertComposerNewline()
+            if let self {
+                let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+                let action = ComposerReturnKeyPolicy.action(
+                    keyCode: event.keyCode,
+                    hasMarkedText: (panel.firstResponder as? NSTextView)?.hasMarkedText() == true,
+                    shiftModified: flags.contains(.shift),
+                    optionModified: flags.contains(.option),
+                    commandModified: flags.contains(.command),
+                    controlModified: flags.contains(.control),
+                    mountPaletteVisible: store.isMountPalette && store.slashMenuVisible
+                )
+                switch action {
+                case .passThrough:
+                    break
+                case .insertNewline:
+                    insertComposerNewline()
+                    return nil
+                case .toggleMount:
+                    store.toggleHighlightedMount()
+                    return nil
+                case .submit:
+                    submitComposerFromKeyboard()
                     return nil
                 }
             }
@@ -116,14 +131,6 @@ final class OverlayController: NSObject, NSWindowDelegate {
                         self?.store.completeHighlightedSlash()
                         return nil
                     }
-                case OverlayKeyCode.returnKey, OverlayKeyCode.keypadEnter:
-                    if self?.store.isMountPalette == true {
-                        if let textView = self?.panel.firstResponder as? NSTextView, textView.hasMarkedText() {
-                            return event
-                        }
-                        self?.store.toggleHighlightedMount()
-                        return nil
-                    }
                 case OverlayKeyCode.tab:
                     self?.store.completeHighlightedSlash()
                     return nil
@@ -131,7 +138,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
                     break
                 }
             }
-            if self?.routeBusyComposerKey(event) == true {
+            if self?.routeComposerKey(event) == true {
                 return nil
             }
             return event
@@ -1049,6 +1056,17 @@ final class OverlayController: NSObject, NSWindowDelegate {
         insertComposerText("\n")
     }
 
+    private func submitComposerFromKeyboard() {
+        store.send()
+        ComposerEditorLocator.releaseFieldEditor(in: panel)
+        DispatchQueue.main.asyncAfter(deadline: .now() + ComposerFocusPolicy.submissionRestoreDelay) {
+            [weak self] in
+            guard let self else { return }
+            self.panel.makeKey()
+            self.store.requestFocus()
+        }
+    }
+
     private func insertComposerText(_ snippet: String) {
         if let textView = panel.firstResponder as? NSTextView, textView.isEditable {
             textView.insertText(snippet, replacementRange: textView.selectedRange())
@@ -1062,66 +1080,29 @@ final class OverlayController: NSObject, NSWindowDelegate {
         }
     }
 
-    private func routeBusyComposerKey(_ event: NSEvent) -> Bool {
+    private func routeComposerKey(_ event: NSEvent) -> Bool {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         let hasText = event.characters?.unicodeScalars.contains { scalar in
             scalar.value >= 0x20
                 && scalar.value != 0x7f
                 && !(0xf700...0xf8ff).contains(scalar.value)
         } == true
-        guard ComposerBusyKeyRoutingPolicy.shouldRoute(
-            isBusy: store.isBusy || store.childBusy,
+        guard ComposerKeyRoutingPolicy.shouldRoute(
             hasText: hasText,
             keyCode: event.keyCode,
             commandModified: flags.contains(.command),
             controlModified: flags.contains(.control)
-        ), let editor = ensureComposerFieldEditor() else {
+        ) else {
             return false
         }
+        let field = ComposerEditorLocator.composerField(in: rootView)
+        let editor = ComposerEditorLocator.ensureFieldEditor(in: panel, composerField: field)
+        guard let editor else { return false }
         editor.interpretKeyEvents([event])
         if !editor.hasMarkedText() {
             store.draft = editor.string
         }
         return true
-    }
-
-    private func ensureComposerFieldEditor() -> NSTextView? {
-        panel.makeKey()
-        if let editor = panel.firstResponder as? NSTextView, editor.isEditable {
-            return isComposerEditor(editor) ? editor : nil
-        }
-        if let field = panel.firstResponder as? NSTextField, field.isEditable,
-           field.identifier?.rawValue != ComposerEditorIdentity.viewIdentifier {
-            return nil
-        }
-        guard let target = composerEditorView(in: rootView) else { return nil }
-        panel.makeFirstResponder(target)
-        guard let editor = panel.firstResponder as? NSTextView,
-              editor.isEditable,
-              isComposerEditor(editor) else {
-            return nil
-        }
-        return editor
-    }
-
-    private func isComposerEditor(_ editor: NSTextView) -> Bool {
-        if editor.isFieldEditor {
-            return (editor.delegate as? NSView)?.identifier?.rawValue
-                == ComposerEditorIdentity.viewIdentifier
-        }
-        return editor.identifier?.rawValue == ComposerEditorIdentity.viewIdentifier
-    }
-
-    private func composerEditorView(in view: NSView) -> NSView? {
-        if view.identifier?.rawValue == ComposerEditorIdentity.viewIdentifier {
-            return view
-        }
-        for child in view.subviews {
-            if let target = composerEditorView(in: child) {
-                return target
-            }
-        }
-        return nil
     }
 
     private func handleEscape() {
@@ -1156,6 +1137,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
             store.showAvatarPicker = false
         case .cancelTurn:
             store.cancel()
+            ComposerEditorLocator.releaseFieldEditor(in: panel)
         case .hideOverlay:
             hide()
         }
@@ -1163,8 +1145,13 @@ final class OverlayController: NSObject, NSWindowDelegate {
             panel.orderFront(nil)
         }
         if OverlayEscapePolicy.requestsComposerFocus(after: action) {
-            panel.makeKey()
-            store.requestFocus()
+            DispatchQueue.main.asyncAfter(
+                deadline: .now() + ComposerFocusPolicy.submissionRestoreDelay
+            ) { [weak self] in
+                guard let self else { return }
+                self.panel.makeKey()
+                self.store.requestFocus()
+            }
         }
     }
 
