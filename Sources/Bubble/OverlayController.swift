@@ -390,22 +390,29 @@ final class OverlayController: NSObject, NSWindowDelegate {
             guard let self else { return }
             diagnostics.start()
             let cycleCount = max(cycles, 1)
-            let warmupDelay = 1.0
-            let cycleInterval = 0.40
-            for index in 0..<cycleCount {
-                DispatchQueue.main.asyncAfter(deadline: .now() + warmupDelay + Double(index) * cycleInterval) {
-                    diagnostics.beginCycle()
-                    NotificationCenter.default.post(
-                        name: .fileChangeDiagnosticToggleRequested,
-                        object: nil
-                    )
+            let observationInterval = 0.30
+            let restInterval = 0.10
+
+            func runCycle(_ remaining: Int) {
+                diagnostics.beginCycle()
+                NotificationCenter.default.post(
+                    name: .fileChangeDiagnosticToggleRequested,
+                    object: nil
+                )
+                DispatchQueue.main.asyncAfter(deadline: .now() + observationInterval) {
+                    if remaining > 1 {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + restInterval) {
+                            runCycle(remaining - 1)
+                        }
+                    } else {
+                        OverlayLog.write(diagnostics.summary(cycles: cycleCount))
+                        self.fileChangeDiagnostics = nil
+                    }
                 }
             }
-            DispatchQueue.main.asyncAfter(
-                deadline: .now() + warmupDelay + Double(cycleCount) * cycleInterval + 0.20
-            ) { [weak self] in
-                OverlayLog.write(diagnostics.summary(cycles: cycleCount))
-                self?.fileChangeDiagnostics = nil
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                runCycle(cycleCount)
             }
         }
     }

@@ -38,6 +38,15 @@ enum TranscriptFollowPolicy {
     }
 }
 
+enum FileChangeExpansionPolicy {
+    /// Height animation invalidates the containing transcript layout on every
+    /// animation frame, so file-tree expansion must be committed atomically.
+    static let animatesTranscriptLayout = false
+    /// A transcript-wide scroll correction creates a second visible hitch.
+    /// Keep the card header anchored and reveal its files beneath it instead.
+    static let requestsTranscriptFollow = false
+}
+
 enum TranscriptFollowTrigger {
     case contentHeightChanged
     case turnSettled

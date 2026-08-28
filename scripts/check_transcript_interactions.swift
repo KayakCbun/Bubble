@@ -115,6 +115,14 @@ private enum TranscriptInteractionCheck {
             "a live main turn still follows revision while streaming"
         )
         expect(
+            !FileChangeExpansionPolicy.animatesTranscriptLayout,
+            "changed-file expansion must not animate the entire transcript layout"
+        )
+        expect(
+            !FileChangeExpansionPolicy.requestsTranscriptFollow,
+            "changed-file expansion should preserve its viewport anchor"
+        )
+        expect(
             !TranscriptScrollSequencePolicy.suppressesEventAfterProgrammaticScroll(
                 isScrollWheel: true,
                 beginsNewGesture: false,

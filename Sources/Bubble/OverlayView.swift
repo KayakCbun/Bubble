@@ -1855,9 +1855,6 @@ struct OverlayView: View {
             }
         }
         follow()
-        DispatchQueue.main.asyncAfter(deadline: .now() + TranscriptFollowPolicy.layoutSettleDelay) {
-            follow()
-        }
     }
 
     private func requestCurrentFollowTarget(
@@ -2594,10 +2591,7 @@ struct OverlayView: View {
     }
 
     private func fileChangesCard(_ summary: FileChangeSummary) -> some View {
-        FileChangeCardExpansionHost(
-            id: summary.id,
-            animatesExpansion: summary.files.count <= 20
-        ) { expanded, toggle in
+        FileChangeCardExpansionHost(id: summary.id) { expanded, toggle in
             fileChangesCardContent(summary, expanded: expanded, toggle: toggle)
         }
     }
@@ -2767,17 +2761,14 @@ private struct QuoteChipLayer: View {
 
 private struct FileChangeCardExpansionHost<Content: View>: View {
     let id: String
-    let animatesExpansion: Bool
     let content: (Bool, FileChangeCardToggleAction) -> Content
     @State private var expanded = false
 
     init(
         id: String,
-        animatesExpansion: Bool,
         @ViewBuilder content: @escaping (Bool, FileChangeCardToggleAction) -> Content
     ) {
         self.id = id
-        self.animatesExpansion = animatesExpansion
         self.content = content
     }
 
@@ -2795,18 +2786,20 @@ private struct FileChangeCardExpansionHost<Content: View>: View {
         let mutation = {
             expanded.toggle()
         }
-        if animatesExpansion {
+        if FileChangeExpansionPolicy.animatesTranscriptLayout {
             withAnimation(OverlayMotion.snappy, mutation)
         } else {
             var transaction = Transaction()
             transaction.disablesAnimations = true
             withTransaction(transaction, mutation)
         }
-        NotificationCenter.default.post(
-            name: .fileChangeExpansionChanged,
-            object: id,
-            userInfo: ["expanded": expanded]
-        )
+        if FileChangeExpansionPolicy.requestsTranscriptFollow {
+            NotificationCenter.default.post(
+                name: .fileChangeExpansionChanged,
+                object: id,
+                userInfo: ["expanded": expanded]
+            )
+        }
         if ProcessInfo.processInfo.environment["BUBBLE_FILE_CHANGE_DIAGNOSTICS"] == "1" {
             let marker = expanded ? CGFloat(1) : CGFloat(0)
             OverlayPulse.shared.onNextFrame {
@@ -2828,9 +2821,18 @@ private struct FileChangeCardToggleAction {
     }
 }
 
+private struct FileChangeTreeHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
 private struct FileChangeTreeReveal<Content: View>: View {
     let expanded: Bool
     let content: Content
+    @State private var naturalHeight: CGFloat = 0
     @State private var presentedHeight: CGFloat = 0
 
     init(expanded: Bool, @ViewBuilder content: () -> Content) {
@@ -2839,11 +2841,20 @@ private struct FileChangeTreeReveal<Content: View>: View {
     }
 
     var body: some View {
-        FileChangeTreeRevealLayout(expanded: expanded) {
+        VStack(alignment: .leading, spacing: 0) {
             content
         }
+        .fixedSize(horizontal: false, vertical: true)
+        .background {
+            GeometryReader { geometry in
+                Color.clear.preference(
+                    key: FileChangeTreeHeightKey.self,
+                    value: geometry.size.height
+                )
+            }
+        }
+        .frame(height: expanded ? naturalHeight : 0, alignment: .top)
         .clipped()
-        .opacity(expanded ? 1 : 0)
         .allowsHitTesting(expanded)
         .accessibilityHidden(!expanded)
         .background {
@@ -2855,6 +2866,14 @@ private struct FileChangeTreeReveal<Content: View>: View {
                             presentedHeight = height
                         }
                 }
+            }
+        }
+        .onPreferenceChange(FileChangeTreeHeightKey.self) { height in
+            guard height > 0, abs(height - naturalHeight) > 0.25 else { return }
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                naturalHeight = height
             }
         }
         .onChange(of: expanded) { _, isExpanded in
@@ -2881,60 +2900,6 @@ private struct FileChangeTreeReveal<Content: View>: View {
     }
 }
 
-private struct FileChangeTreeRevealLayout: Layout {
-    var expanded: Bool
-
-    struct Cache {
-        var sizes: [CGSize] = []
-        var proposedWidth: CGFloat?
-    }
-
-    func makeCache(subviews: Subviews) -> Cache {
-        Cache()
-    }
-
-    func sizeThatFits(
-        proposal: ProposedViewSize,
-        subviews: Subviews,
-        cache: inout Cache
-    ) -> CGSize {
-        if cache.sizes.count != subviews.count
-            || cache.proposedWidth.map({ abs($0 - (proposal.width ?? 0)) > 0.25 }) != false {
-            cache.sizes = subviews.map {
-                $0.sizeThatFits(ProposedViewSize(width: proposal.width, height: nil))
-            }
-            cache.proposedWidth = proposal.width
-        }
-        let width = proposal.width ?? cache.sizes.map(\.width).max() ?? 0
-        let height = cache.sizes.reduce(CGFloat.zero) { $0 + $1.height }
-        return CGSize(
-            width: width,
-            height: expanded ? height : 0
-        )
-    }
-
-    func placeSubviews(
-        in bounds: CGRect,
-        proposal: ProposedViewSize,
-        subviews: Subviews,
-        cache: inout Cache
-    ) {
-        var y = bounds.minY
-        for (index, content) in subviews.enumerated() {
-            let size = cache.sizes.indices.contains(index) ? cache.sizes[index] : .zero
-            content.place(
-                at: CGPoint(x: bounds.minX, y: y),
-                anchor: .topLeading,
-                proposal: ProposedViewSize(
-                    width: bounds.width,
-                    height: size.height
-                )
-            )
-            y += size.height
-        }
-    }
-}
-
 private struct FileChangeFolderBlock: View {
     let group: FileChangeGroup
     let plus: Color
@@ -2947,8 +2912,15 @@ private struct FileChangeFolderBlock: View {
         return VStack(alignment: .leading, spacing: 2) {
             if !group.folder.isEmpty {
                 Button {
-                    withAnimation(OverlayMotion.snappy) {
+                    let mutation = {
                         expanded.toggle()
+                    }
+                    if FileChangeExpansionPolicy.animatesTranscriptLayout {
+                        withAnimation(OverlayMotion.snappy, mutation)
+                    } else {
+                        var transaction = Transaction()
+                        transaction.disablesAnimations = true
+                        withTransaction(transaction, mutation)
                     }
                 } label: {
                     HStack(spacing: 6) {
