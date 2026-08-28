@@ -858,13 +858,24 @@ struct OverlayView: View {
                     followState.resumeAtEnd()
                 case let .reveal(rowID, _):
                     var next = followState
-                    var changed = next.finishHistoryNavigation(targetID: rowID, atEnd: atEnd)
-                    if next.followingTurnTargetID == rowID {
-                        changed = next.finishFollowingTurn(targetID: rowID) || changed
-                        if changed {
-                            transcriptSurfaceCommand = .scrollToEnd(animated: false)
-                            transcriptSurfaceCommandToken &+= 1
-                        }
+                    // A sent user turn uses the reveal operation only to
+                    // align the new row.  It is not a history navigation, so
+                    // settle that mode first; otherwise a matching reveal
+                    // completion can leave the state parked in
+                    // `followingTurn` forever and suppress live tail
+                    // following.  Finishing the turn explicitly restores
+                    // followingEnd and the queued end command makes the
+                    // hand-off deterministic even when the reveal was
+                    // already visible (atEnd == false).
+                    let finishedFollowingTurn = next.finishFollowingTurn(targetID: rowID)
+                    let finishedHistoryNavigation = next.finishHistoryNavigation(
+                        targetID: rowID,
+                        atEnd: atEnd
+                    )
+                    let changed = finishedFollowingTurn || finishedHistoryNavigation
+                    if finishedFollowingTurn {
+                        transcriptSurfaceCommand = .scrollToEnd(animated: false)
+                        transcriptSurfaceCommandToken &+= 1
                     }
                     if changed {
                         followState = next
@@ -1052,13 +1063,19 @@ struct OverlayView: View {
                     AnyView(
                         TranscriptSelectionScope {
                             mainTranscriptRow(row)
+                                // Every mounted rich row participates in the
+                                // scroll/diagnostics anchor index.  Assistant
+                                // prose, tool output, and continuation chunks
+                                // inherit their owning user turn's history
+                                // tick, so limiting anchors to the user row
+                                // makes a virtualized viewport look blank to
+                                // the wheel oracle while those rows are on
+                                // screen.
                                 .background {
-                                    if row.id == row.historyTickID {
-                                        TranscriptRowAnchor(
-                                            id: row.id,
-                                            historyTickID: row.historyTickID
-                                        )
-                                    }
+                                    TranscriptRowAnchor(
+                                        id: row.id,
+                                        historyTickID: row.historyTickID
+                                    )
                                 }
                                 .padding(.top, row.isContinuation ? -10 : 0)
                                 .opacity(row.isAfterBranchPoint ? 0.34 : 1)
@@ -1247,9 +1264,7 @@ struct OverlayView: View {
             .equatable()
             .id(row.id)
             .background {
-                if row.id == row.historyTickID {
-                    TranscriptRowAnchor(id: row.id, historyTickID: row.historyTickID)
-                }
+                TranscriptRowAnchor(id: row.id, historyTickID: row.historyTickID)
             }
             .padding(.top, row.isContinuation ? -10 : 0)
             .opacity(row.isAfterBranchPoint ? 0.34 : 1)
