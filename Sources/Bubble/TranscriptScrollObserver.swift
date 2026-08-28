@@ -845,6 +845,16 @@ final class TranscriptScrollProbe: NSView {
     }
 
     private func beginDiagnosticDrive(in window: NSWindow) {
+        if TranscriptHydrationTiming.diagnosticStartedAt != nil,
+           !TranscriptHydrationTiming.diagnosticHydrationCompleted,
+           let startedAt = diagnosticReadyStartedAt,
+           ProcessInfo.processInfo.systemUptime - startedAt < 15 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self, weak window] in
+                guard let self, let window else { return }
+                self.beginDiagnosticDrive(in: window)
+            }
+            return
+        }
         if let document = observedDocument {
             registerExistingAnchors(in: document)
             rebuildAnchorIndex()
@@ -1118,7 +1128,15 @@ final class TranscriptScrollProbe: NSView {
                 diagnosticInputSequenceStartedAt = inputStartedAt
                 diagnosticInputOriginY = originBeforeInput
             }
-            _ = handleScrollWheel(event, validatesLocation: false)
+            if let appKitSurface = scrollView as? AppKitTranscriptScrollView {
+                // Exercise the production transcript entry point.  The
+                // observer's legacy wheel queue belongs to the retired
+                // SwiftUI scroll surface and would benchmark code that users
+                // no longer hit after the AppKit migration.
+                appKitSurface.scrollWheel(with: event)
+            } else {
+                _ = handleScrollWheel(event, validatesLocation: false)
+            }
             let inputLatency = CACurrentMediaTime() - inputStartedAt
             diagnosticScrollDurations.append(inputLatency)
             if !diagnosticFirstInputMoved,

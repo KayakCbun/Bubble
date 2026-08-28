@@ -266,10 +266,13 @@ struct AppKitTranscriptSurfaceMetrics {
 final class AppKitTranscriptScrollView: NSScrollView {
     var onUserScroll: ((NSEvent) -> Void)?
     var onUserScrollDidApply: (() -> Void)?
+    var onDiscreteWheel: ((NSEvent) -> Bool)?
 
     override func scrollWheel(with event: NSEvent) {
         onUserScroll?(event)
-        super.scrollWheel(with: event)
+        if event.hasPreciseScrollingDeltas || onDiscreteWheel?(event) != true {
+            super.scrollWheel(with: event)
+        }
         onUserScrollDidApply?()
     }
 }
@@ -321,6 +324,7 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
     private var widthBucket: Int = 0
     private var lastVisibleRowIDs: Set<String> = []
     private var viewportReportQueued = false
+    private var lastViewportReportUptime: TimeInterval = -.greatestFiniteMagnitude
     private var lastUserScrollUptime: TimeInterval = -.greatestFiniteMagnitude
     private(set) var metrics = AppKitTranscriptSurfaceMetrics()
 
@@ -370,6 +374,9 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
         }
         scrollView.onUserScrollDidApply = { [weak self] in
             self?.userScrollDidApply()
+        }
+        scrollView.onDiscreteWheel = { [weak self] event in
+            self?.applyDiscreteWheel(event) ?? false
         }
 
         document = AppKitTranscriptDocumentView(frame: .zero)
@@ -458,6 +465,23 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
         let clamped = min(max(0, y), maxY)
         scrollView.contentView.setBoundsOrigin(NSPoint(x: 0, y: clamped))
         relayoutNow()
+    }
+
+    /// AppKit deliberately smooths line-based mouse-wheel events, which can
+    /// defer the first visible movement by several packets.  Apply one
+    /// bounded line step synchronously; precise trackpad deltas retain native
+    /// AppKit momentum through `super.scrollWheel`.
+    private func applyDiscreteWheel(_ event: NSEvent) -> Bool {
+        guard !event.hasPreciseScrollingDeltas else { return false }
+        let resolved = TranscriptWheelScrollPolicy.resolvedDelta(
+            scrollingDeltaY: event.scrollingDeltaY,
+            hasPreciseDeltas: false
+        )
+        let cap = TranscriptWheelFramePolicy.maximumPendingDelta(hasPreciseDeltas: false)
+        let bounded = min(cap, max(-cap, resolved))
+        guard abs(bounded) > 0.01 else { return true }
+        setContentOffset(y: contentOffsetY - bounded)
+        return true
     }
 
     var contentOffsetY: CGFloat { scrollView.contentView.bounds.minY }
@@ -861,12 +885,17 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
         guard !viewportReportQueued else { return }
         viewportReportQueued = true
         // The rail only needs settled visibility and should never mutate
-        // SwiftUI state from inside an AppKit layout/update pass.  Coalescing
-        // to the next main turn also caps notifications at the display's
-        // natural cadence during a wheel burst.
-        DispatchQueue.main.async { [weak self] in
+        // SwiftUI state from inside an AppKit layout/update pass.  Physical
+        // wheel input may arrive at 120 Hz; keep the rich viewport entirely
+        // in AppKit and cap the auxiliary SwiftUI rail at the product's 60 Hz
+        // contract, matching the previous observer path.
+        let now = ProcessInfo.processInfo.systemUptime
+        let elapsed = now - lastViewportReportUptime
+        let delay = max(0, TranscriptViewportReportPolicy.minimumInterval - elapsed)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self else { return }
             self.viewportReportQueued = false
+            self.lastViewportReportUptime = ProcessInfo.processInfo.systemUptime
             NotificationCenter.default.post(
                 name: Notification.Name("BubbleTranscriptViewportChanged"),
                 object: self.scrollView,

@@ -3806,6 +3806,7 @@ final class ChatStore {
             self.mergeRestoredTranscript(restored, removingSetupCards: true)
             self.writeTranscript()
             self.onTranscriptUpdated?()
+            TranscriptHydrationTiming.completeIfDiagnosing()
         }
         transcriptRestoreTask = task
     }

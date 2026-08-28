@@ -70,6 +70,7 @@ swiftc -parse-as-library Sources/Bubble/TranscriptSurface.swift scripts/check_tr
 /tmp/bubble-check-transcript-surface
 
 swiftc -parse-as-library -framework AppKit \
+  Sources/Bubble/TranscriptInteractionPolicy.swift \
   Sources/Bubble/TranscriptSurface.swift \
   Sources/Bubble/AppKitTranscriptSurface.swift \
   scripts/check_appkit_transcript_surface.swift \

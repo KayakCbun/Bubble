@@ -790,7 +790,9 @@ struct OverlayView: View {
                     // bounds callback will not re-enter the policy.  A
                     // post-wheel user callback carries the actual atEnd state
                     // and can restore following when the wheel reaches tail.
-                    followQueued = false
+                    if followQueued {
+                        followQueued = false
+                    }
                     var next = followState
                     if next.viewportChanged(atEnd: atEnd, userDriven: true) {
                         let wasFollowing = followState.followsLatest
@@ -4055,8 +4057,30 @@ private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
             diagnosticsProbe?.frame = adapter.scrollView.documentView?.bounds ?? .zero
 
             guard commandToken != lastCommandToken, let command else { return }
+            if case let .reveal(rowID, _) = command,
+               adapter.snapshot.row(id: rowID) == nil {
+                // Transcript hydration can deliver a reveal before its row is
+                // projected.  Do not consume the token: the next surface
+                // revision retries the same operation once the row exists.
+                return
+            }
             lastCommandToken = commandToken
             _ = adapter.perform(command)
+            if diagnosticsProbe != nil,
+               case let .reveal(rowID, _) = command {
+                // The production AppKit adapter owns the actual reveal.  The
+                // legacy probe is mounted only for benchmark diagnostics and
+                // still needs the target identity so it can verify the final
+                // anchor after the adapter has mounted that row.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                    guard let self, self.diagnosticsProbe != nil else { return }
+                    NotificationCenter.default.post(
+                        name: .transcriptHistoryNavigationRequested,
+                        object: self.adapter.scrollView,
+                        userInfo: [TranscriptViewportUserInfoKey.targetID: rowID]
+                    )
+                }
+            }
             // Never mutate SwiftUI state while NSViewRepresentable is being
             // updated.  A token guard drops a completion from a superseded
             // command (for example a follow request immediately followed by a

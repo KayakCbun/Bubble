@@ -200,6 +200,27 @@ private enum AppKitTranscriptSurfaceCheck {
         expect(lastUserAtEnd, "post-wheel callback reports actual viewport state")
         adapter.setContentOffset(y: 312)
 
+        // Line-based mouse wheels bypass AppKit's delayed smoothing and move
+        // the production viewport in the same event. Trackpads still carry
+        // precise deltas and remain on AppKit's native momentum path.
+        if let cgEvent = CGEvent(
+            scrollWheelEvent2Source: nil,
+            units: .line,
+            wheelCount: 1,
+            wheel1: -1,
+            wheel2: 0,
+            wheel3: 0
+        ), let wheelEvent = NSEvent(cgEvent: cgEvent) {
+            let beforeDiscreteWheel = adapter.contentOffsetY
+            adapter.scrollView.scrollWheel(with: wheelEvent)
+            expect(
+                abs(adapter.contentOffsetY - beforeDiscreteWheel) > 0.5,
+                "discrete mouse wheel moves synchronously"
+            )
+        } else {
+            failures.append("synthetic discrete mouse wheel event is available")
+        }
+
         // Updating one visible row remounts at most that row.  Unrelated
         // visible hosts retain their object identity.
         let otherID = adapter.mountedRowIDs.first { $0 != stableID }
