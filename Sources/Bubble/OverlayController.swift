@@ -42,6 +42,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
     private var showGeneration = 0
     private var pendingShowCompletion: (() -> Void)?
     private var deferredPresentationWorkGeneration = 0
+    private var foregroundPerformanceActivity: NSObjectProtocol?
 
     private let positionCenterXKey = "bubble.position.centerX"
     private let positionBottomYKey = "bubble.position.bottomY"
@@ -220,6 +221,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         store.composerFocusSuspended = true
         store.setStreamUISuspended(true)
         pendingShowCompletion = completion
+        beginForegroundPerformanceActivity()
 
         if panel.isVisible, presentationAnimator.isAnimating {
             isPreparingShow = false
@@ -269,6 +271,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         guard panel.isVisible else {
             panel.orderOut(nil)
             presentationAnimator.resetVisible()
+            endForegroundPerformanceActivity()
             application?.activate(options: [])
             completion?()
             return
@@ -281,6 +284,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
             targetPanelFrame = nil
             isUpdatingFrame = false
             panel.orderOut(nil)
+            endForegroundPerformanceActivity()
             application?.activate(options: [])
             completion?()
             return
@@ -308,9 +312,24 @@ final class OverlayController: NSObject, NSWindowDelegate {
             self.presentationAnimator.resetVisible()
             self.panel.ignoresMouseEvents = false
             self.isHiding = false
+            self.endForegroundPerformanceActivity()
             application?.activate(options: [])
             completion?()
         }
+    }
+
+    private func beginForegroundPerformanceActivity() {
+        guard foregroundPerformanceActivity == nil else { return }
+        foregroundPerformanceActivity = ProcessInfo.processInfo.beginActivity(
+            options: [.userInitiated, .latencyCritical],
+            reason: "Bubble overlay is visible and handling interactive input"
+        )
+    }
+
+    private func endForegroundPerformanceActivity() {
+        guard let activity = foregroundPerformanceActivity else { return }
+        foregroundPerformanceActivity = nil
+        ProcessInfo.processInfo.endActivity(activity)
     }
 
     func runPresentationBenchmark(cycles: Int = 6) {

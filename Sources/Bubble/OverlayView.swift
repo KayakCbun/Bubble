@@ -4510,8 +4510,13 @@ private final class OverlayTranscriptRenderBox {
     }
 }
 
+private final class TranscriptRowHostingView: NSHostingView<AnyView> {
+    override var acceptsFirstResponder: Bool { false }
+    override var canBecomeKeyView: Bool { false }
+}
+
 private final class OverlayTranscriptRowHost: AppKitTranscriptRowHost {
-    private let hostingView: NSHostingView<AnyView>
+    private let hostingView: TranscriptRowHostingView
     private let rootFactory: (TranscriptRowSnapshot) -> AnyView
     private let onMeasuredHeight: (String, CGFloat) -> Void
     private let shouldMeasure: () -> Bool
@@ -4530,7 +4535,7 @@ private final class OverlayTranscriptRowHost: AppKitTranscriptRowHost {
         self.rootFactory = rootFactory
         self.onMeasuredHeight = onMeasuredHeight
         self.shouldMeasure = shouldMeasure
-        self.hostingView = NSHostingView(rootView: rootFactory(row))
+        self.hostingView = TranscriptRowHostingView(rootView: rootFactory(row))
         super.init(row: row, key: key)
 
         // The base host retains a plain-text fallback for deterministic
@@ -4539,6 +4544,10 @@ private final class OverlayTranscriptRowHost: AppKitTranscriptRowHost {
         // subclass independent of the base class's private label.
         subviews.first?.isHidden = true
         hostingView.translatesAutoresizingMaskIntoConstraints = true
+        // The transcript adapter owns every cell frame and height. Prevent
+        // NSHostingView from feeding intrinsic/min/max size changes back into
+        // the panel's AppKit layout cycle after each pooled root swap.
+        hostingView.sizingOptions = []
         hostingView.appearance = NSApp.effectiveAppearance
         addSubview(hostingView)
         measurementObserver = NotificationCenter.default.addObserver(

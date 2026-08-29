@@ -331,10 +331,15 @@ final class AppKitTranscriptScrollView: NSScrollView {
     var onUserScroll: ((NSEvent) -> Void)?
     var onUserScrollDidApply: (() -> Void)?
     var onDiscreteWheel: ((NSEvent) -> Bool)?
+    var onPreciseWheelBegan: ((NSEvent) -> Bool)?
 
     override func scrollWheel(with event: NSEvent) {
         onUserScroll?(event)
-        if event.hasPreciseScrollingDeltas || onDiscreteWheel?(event) != true {
+        let handledPreciseBegin = event.hasPreciseScrollingDeltas
+            && event.phase == .began
+            && onPreciseWheelBegan?(event) == true
+        if !handledPreciseBegin,
+           event.hasPreciseScrollingDeltas || onDiscreteWheel?(event) != true {
             super.scrollWheel(with: event)
         }
         onUserScrollDidApply?()
@@ -459,6 +464,9 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
         }
         scrollView.onDiscreteWheel = { [weak self] event in
             self?.applyDiscreteWheel(event) ?? false
+        }
+        scrollView.onPreciseWheelBegan = { [weak self] event in
+            self?.applyPreciseWheelBegin(event) ?? false
         }
 
         document = AppKitTranscriptDocumentView(frame: .zero)
@@ -595,6 +603,23 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
         return true
     }
 
+    /// Native AppKit momentum owns the rest of a trackpad gesture, but its
+    /// first packet can wait for the scroll-physics transaction. Commit one
+    /// bounded `.began` delta immediately so the user's reversal is visible
+    /// in the same frame, then hand subsequent packets back to AppKit.
+    private func applyPreciseWheelBegin(_ event: NSEvent) -> Bool {
+        guard event.hasPreciseScrollingDeltas, event.phase == .began else { return false }
+        let delta = TranscriptWheelScrollPolicy.resolvedDelta(
+            scrollingDeltaY: event.scrollingDeltaY,
+            hasPreciseDeltas: true
+        )
+        let cap = TranscriptWheelFramePolicy.maximumStep(hasPreciseDeltas: true)
+        let bounded = min(cap, max(-cap, delta))
+        guard abs(bounded) > 0.01 else { return false }
+        setContentOffset(y: contentOffsetY - bounded)
+        return true
+    }
+
     var contentOffsetY: CGFloat { scrollView.contentView.bounds.minY }
 
     func hostObjectID(rowID: String) -> ObjectIdentifier? {
@@ -659,7 +684,10 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
             for (id, cell) in Array(mounted) {
                 unmount(id: id, cell: cell)
             }
-            for host in reusableHostsByKey.values { host.prepareForReuse() }
+            for host in reusableHostsByKey.values {
+                host.removeFromSuperview()
+                host.prepareForReuse()
+            }
             reusableHostsByKey.removeAll(keepingCapacity: true)
             reusableHostLRU.removeAll(keepingCapacity: true)
         }
@@ -1230,7 +1258,14 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
                 reused = false
             }
             host.frame = NSRect(x: 0, y: heightIndex.offset(of: index), width: document.bounds.width, height: heightIndex.height(at: index) ?? 1)
-            document.addSubview(host)
+            // Reusable cells stay attached to the document. Re-adding an
+            // NSHostingView to a window rebuilds SwiftUI's FocusBridge and
+            // the entire key-view loop, which shows up outside the measured
+            // scroll callback as a dropped display frame.
+            if host.superview !== document {
+                document.addSubview(host)
+            }
+            host.isHidden = false
             mounted[row.id] = AppKitTranscriptMountedCell(key: key, host: host)
             metrics.recordMount(count: 1, peak: mounted.count, reused: reused)
             mountedRows += 1
@@ -1248,7 +1283,11 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
         // A live wheel sequence owns the main-thread budget. Defer warm-cache
         // work until the gesture settles instead of competing with visible
         // row mounts on every packet.
-        let delay = max(0.01, requestedDelay ?? (isUserScrollActive ? 0.36 : 0.017))
+        // For display-linked programmatic motion, fill one row in the quiet
+        // part of the current frame. Waiting a full 16.7 ms aligns host
+        // creation with the next VSync and can itself delay that callback.
+        // Physical wheel input still defers all warm-cache work.
+        let delay = max(0.004, requestedDelay ?? (isUserScrollActive ? 0.36 : 0.006))
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self else { return }
             self.overscanRefillQueued = false
@@ -1325,14 +1364,13 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
 
     private func unmount(id: String, cell: AppKitTranscriptMountedCell) {
         mounted.removeValue(forKey: id)
-        cell.host.removeFromSuperview()
         if maximumReusableHosts > 0 {
-            // Keep the detached immutable tree until this host is actually
-            // reused. Clearing it here and then clearing it again in the reuse
-            // branch performs two SwiftUI root swaps across adjacent scroll
-            // frames and was the remaining first-traversal hitch.
+            // Keep the bounded reusable host attached but hidden. This avoids
+            // viewDidMoveToWindow/FocusBridge work when the next row reuses it.
+            cell.host.isHidden = true
             cacheReusableHost(cell.host, for: cell.key)
         } else {
+            cell.host.removeFromSuperview()
             cell.host.prepareForReuse()
         }
         metrics.recordUnmount(count: 1)
@@ -1353,9 +1391,12 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
                 return host
             }
         }
-        // Keep the dictionary and recency list in sync even if a future
-        // caller invalidates a cached key while a refill is queued.
-        reusableHostsByKey.removeAll(keepingCapacity: true)
+        // Recover safely if a future invalidation desynchronizes the LRU.
+        // Attached hidden hosts must never be dropped from bookkeeping.
+        if let (key, host) = reusableHostsByKey.first {
+            reusableHostsByKey.removeValue(forKey: key)
+            return host
+        }
         return nil
     }
 
@@ -1364,6 +1405,7 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
         for key: AppKitTranscriptRowReuseKey
     ) {
         if let previous = reusableHostsByKey.updateValue(host, forKey: key), previous !== host {
+            previous.removeFromSuperview()
             previous.prepareForReuse()
         }
         reusableHostLRU.removeAll { $0 == key }
@@ -1371,6 +1413,7 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
         while reusableHostLRU.count > maximumReusableHosts {
             let evictedKey = reusableHostLRU.removeFirst()
             guard let evicted = reusableHostsByKey.removeValue(forKey: evictedKey) else { continue }
+            evicted.removeFromSuperview()
             evicted.prepareForReuse()
         }
     }

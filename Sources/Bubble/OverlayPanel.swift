@@ -371,6 +371,10 @@ final class OverlayPanel: NSPanel {
         titlebarAppearsTransparent = true
         isMovableByWindowBackground = false
         animationBehavior = .none
+        // Composer focus is routed explicitly. Letting every recycled
+        // NSHostingView invalidate AppKit's automatic key-view loop forces a
+        // recursive walk of the full overlay during transcript scrolling.
+        autorecalculatesKeyViewLoop = false
         hidesOnDeactivate = false
         displaysWhenScreenProfileChanges = true
         isMovable = true
