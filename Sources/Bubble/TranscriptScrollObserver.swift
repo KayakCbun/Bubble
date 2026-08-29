@@ -153,6 +153,21 @@ final class TranscriptScrollProbe: NSView {
     private var diagnosticWheelBeginsGesture = true
     private var diagnosticLastTick: TimeInterval?
     private var diagnosticFrameIntervals: [TimeInterval] = []
+    /// Duration between diagnostic callbacks.  This is intentionally kept
+    /// separate from `diagnosticCadenceIntervals`: callback spacing includes
+    /// main-thread work plus any run-loop/scheduler delay, while a
+    /// CADisplayLink timestamp describes the refresh cadence itself.
+    private var diagnosticTickWorkDurations: [TimeInterval] = []
+    private var diagnosticProductionWorkDurations: [TimeInterval] = []
+    private var diagnosticSchedulerGaps: [TimeInterval] = []
+    private var diagnosticCadenceIntervals: [TimeInterval] = []
+    private var diagnosticLastDisplayTimestamp: TimeInterval?
+    private var diagnosticLastTickWorkDuration: TimeInterval?
+    private var diagnosticDisplayNominalDuration: TimeInterval = 1.0 / 60.0
+    private var diagnosticMissedVSyncs = 0
+    private var diagnosticSchedulerMissedVSyncs = 0
+    private var diagnosticExpectedVSyncs = 0
+    private var diagnosticHitchFrames = 0
     private var diagnosticScrollDurations: [TimeInterval] = []
     private var diagnosticMaximumWheelFlushDuration: TimeInterval = 0
     private var diagnosticMaximumReportDuration: TimeInterval = 0
@@ -882,6 +897,10 @@ final class TranscriptScrollProbe: NSView {
         diagnosticFramesRemaining = 720
         diagnosticWheelBeginsGesture = true
         diagnosticFrameIntervals.removeAll(keepingCapacity: true)
+        diagnosticTickWorkDurations.removeAll(keepingCapacity: true)
+        diagnosticProductionWorkDurations.removeAll(keepingCapacity: true)
+        diagnosticSchedulerGaps.removeAll(keepingCapacity: true)
+        diagnosticCadenceIntervals.removeAll(keepingCapacity: true)
         diagnosticScrollDurations.removeAll(keepingCapacity: true)
         diagnosticMaximumWheelFlushDuration = 0
         diagnosticMaximumReportDuration = 0
@@ -890,6 +909,13 @@ final class TranscriptScrollProbe: NSView {
         diagnosticFirstInputLatency = nil
         diagnosticFirstInputMoved = false
         diagnosticLastTick = nil
+        diagnosticLastDisplayTimestamp = nil
+        diagnosticLastTickWorkDuration = nil
+        diagnosticDisplayNominalDuration = 1.0 / 60.0
+        diagnosticMissedVSyncs = 0
+        diagnosticSchedulerMissedVSyncs = 0
+        diagnosticExpectedVSyncs = 0
+        diagnosticHitchFrames = 0
         diagnosticPeakAnchorCount = anchorIndex.count
         diagnosticBlankSamples = 0
         diagnosticLongestBlankStreak = 0
@@ -1056,17 +1082,66 @@ final class TranscriptScrollProbe: NSView {
     }
 
     @objc private func diagnosticTick(_ link: CADisplayLink) {
-        guard performDiagnosticTick() else {
+        guard performDiagnosticTick(displayLink: link) else {
             link.invalidate()
             diagnosticDisplayLink = nil
             return
         }
     }
 
-    private func performDiagnosticTick() -> Bool {
+    private func performDiagnosticTick(displayLink: CADisplayLink? = nil) -> Bool {
+        let tickStartedAt = CACurrentMediaTime()
+        let callbackInterval = diagnosticLastTick.map { max(0, tickStartedAt - $0) }
+        if let callbackInterval {
+            diagnosticFrameIntervals.append(callbackInterval)
+            if let previousWork = diagnosticLastTickWorkDuration {
+                // The callback interval is previous synchronous work plus the
+                // time the main run loop spent waiting for the next callback.
+                // Keeping the residual exposes OS scheduling/VSync delay
+                // without attributing it to the production handler.
+                diagnosticSchedulerGaps.append(max(0, callbackInterval - previousWork))
+            }
+        }
+        diagnosticLastTick = tickStartedAt
+        if let displayLink {
+            let nominal = displayLink.duration > 0
+                ? displayLink.duration
+                : 1.0 / 60.0
+            diagnosticDisplayNominalDuration = nominal
+            let displayTimestamp = displayLink.timestamp > 0
+                ? displayLink.timestamp
+                : tickStartedAt
+            if let previousTimestamp = diagnosticLastDisplayTimestamp {
+                let cadenceInterval = max(0, displayTimestamp - previousTimestamp)
+                diagnosticCadenceIntervals.append(cadenceInterval)
+                // A cadence interval represents at least one refresh.  Any
+                // additional nominal refreshes are VSyncs the app did not
+                // present.  Rounding avoids classifying sub-millisecond
+                // scheduler noise as a dropped refresh.
+                let expectedFrames = max(
+                    1,
+                    Int((cadenceInterval / nominal).rounded(.toNearestOrAwayFromZero))
+                )
+                diagnosticExpectedVSyncs += expectedFrames
+                diagnosticMissedVSyncs += max(0, expectedFrames - 1)
+                // If the app's preceding synchronous work stayed below one
+                // nominal frame but the display timestamp still jumped over
+                // refreshes, count those misses as scheduler/display-link
+                // delay rather than blaming the renderer.
+                if expectedFrames > 1,
+                   let previousWork = diagnosticLastTickWorkDuration,
+                   previousWork < nominal {
+                    diagnosticSchedulerMissedVSyncs += expectedFrames - 1
+                }
+            }
+            diagnosticLastDisplayTimestamp = displayTimestamp
+        }
         guard diagnosticFramesRemaining > 0,
               let scrollView = observedScrollView,
               let document = observedDocument else {
+            let duration = max(0, CACurrentMediaTime() - tickStartedAt)
+            diagnosticTickWorkDurations.append(duration)
+            diagnosticLastTickWorkDuration = duration
             return false
         }
         let now = CACurrentMediaTime()
@@ -1077,8 +1152,7 @@ final class TranscriptScrollProbe: NSView {
             diagnosticFirstInputLatency = now - startedAt
             diagnosticFirstInputMoved = true
         }
-        if let last = diagnosticLastTick {
-            diagnosticFrameIntervals.append(now - last)
+        if diagnosticLastTickWorkDuration != nil {
             let visible = scrollView.contentView.bounds
             if mountedAnchorIntersects(visible, in: document) {
                 diagnosticCurrentBlankStreak = 0
@@ -1091,7 +1165,6 @@ final class TranscriptScrollProbe: NSView {
                 )
             }
         }
-        diagnosticLastTick = now
 
         let visible = scrollView.contentView.bounds
         let minimumY = document.bounds.minY
@@ -1133,6 +1206,7 @@ final class TranscriptScrollProbe: NSView {
                 diagnosticInputSequenceStartedAt = inputStartedAt
                 diagnosticInputOriginY = originBeforeInput
             }
+            let productionStartedAt = CACurrentMediaTime()
             if let appKitSurface = scrollView as? AppKitTranscriptScrollView {
                 // Exercise the production transcript entry point.  The
                 // observer's legacy wheel queue belongs to the retired
@@ -1142,6 +1216,9 @@ final class TranscriptScrollProbe: NSView {
             } else {
                 _ = handleScrollWheel(event, validatesLocation: false)
             }
+            diagnosticProductionWorkDurations.append(
+                max(0, CACurrentMediaTime() - productionStartedAt)
+            )
             let inputLatency = CACurrentMediaTime() - inputStartedAt
             diagnosticScrollDurations.append(inputLatency)
             if !diagnosticFirstInputMoved,
@@ -1152,36 +1229,100 @@ final class TranscriptScrollProbe: NSView {
                 diagnosticFirstInputMoved = true
             }
         } else {
+            let productionStartedAt = CACurrentMediaTime()
             scrollView.contentView.scroll(to: NSPoint(x: visible.minX, y: nextY))
             scrollView.reflectScrolledClipView(scrollView.contentView)
+            diagnosticProductionWorkDurations.append(
+                max(0, CACurrentMediaTime() - productionStartedAt)
+            )
+        }
+        // Record the entire synchronous callback before computing the final
+        // report.  The report itself is intentionally outside the measured
+        // production/display work so its sorting and string formatting cannot
+        // manufacture a synthetic hitch in the last sample.
+        let tickWorkDuration = max(0, CACurrentMediaTime() - tickStartedAt)
+        diagnosticTickWorkDurations.append(tickWorkDuration)
+        diagnosticLastTickWorkDuration = tickWorkDuration
+        if displayLink != nil,
+           tickWorkDuration >= diagnosticDisplayNominalDuration {
+            // A synchronous callback that consumes at least its nominal
+            // refresh budget can itself cause a hitch. This is intentionally
+            // independent from `missedVSyncs`, which is derived from the
+            // display timestamps and may instead reflect OS scheduling.
+            diagnosticHitchFrames += 1
         }
         diagnosticFramesRemaining -= 1
 
         if diagnosticFramesRemaining == 0 {
-            let sorted = diagnosticFrameIntervals.sorted()
-            let p95Index = min(max(0, Int(Double(sorted.count) * 0.95)), max(0, sorted.count - 1))
-            let p99Index = min(max(0, Int(Double(sorted.count) * 0.99)), max(0, sorted.count - 1))
-            let p95 = sorted.isEmpty ? 0 : sorted[p95Index] * 1_000
-            let p99 = sorted.isEmpty ? 0 : sorted[p99Index] * 1_000
-            let maximum = (sorted.last ?? 0) * 1_000
-            let sortedScrollDurations = diagnosticScrollDurations.sorted()
-            let wheelP95Index = min(
-                max(0, Int(Double(sortedScrollDurations.count) * 0.95)),
-                max(0, sortedScrollDurations.count - 1)
+            func percentileMilliseconds(_ values: [TimeInterval], quantile: Double) -> Double {
+                guard !values.isEmpty else { return 0 }
+                let sorted = values.sorted()
+                let index = min(
+                    max(0, Int(Double(sorted.count) * quantile)),
+                    sorted.count - 1
+                )
+                return sorted[index] * 1_000
+            }
+            func maximumMilliseconds(_ values: [TimeInterval]) -> Double {
+                (values.max() ?? 0) * 1_000
+            }
+
+            let frameP95 = percentileMilliseconds(diagnosticFrameIntervals, quantile: 0.95)
+            let frameP99 = percentileMilliseconds(diagnosticFrameIntervals, quantile: 0.99)
+            let frameMaximum = maximumMilliseconds(diagnosticFrameIntervals)
+            let syncP95 = percentileMilliseconds(diagnosticTickWorkDurations, quantile: 0.95)
+            let syncMaximum = maximumMilliseconds(diagnosticTickWorkDurations)
+            let productionP95 = percentileMilliseconds(
+                diagnosticProductionWorkDurations,
+                quantile: 0.95
             )
-            let wheelP95 = sortedScrollDurations.isEmpty
-                ? 0
-                : sortedScrollDurations[wheelP95Index] * 1_000
-            let wheelMaximum = (sortedScrollDurations.last ?? 0) * 1_000
+            let productionMaximum = maximumMilliseconds(diagnosticProductionWorkDurations)
+            let cadenceP95 = percentileMilliseconds(diagnosticCadenceIntervals, quantile: 0.95)
+            let cadenceP99 = percentileMilliseconds(diagnosticCadenceIntervals, quantile: 0.99)
+            let cadenceMaximum = maximumMilliseconds(diagnosticCadenceIntervals)
+            let schedulerP95 = percentileMilliseconds(diagnosticSchedulerGaps, quantile: 0.95)
+            let schedulerMaximum = maximumMilliseconds(diagnosticSchedulerGaps)
+            let cadenceSampleCount = diagnosticCadenceIntervals.count
+            let missedVSyncRate = diagnosticExpectedVSyncs > 0
+                ? Double(diagnosticMissedVSyncs) / Double(diagnosticExpectedVSyncs)
+                : 0
+            let schedulerMissedVSyncRate = diagnosticExpectedVSyncs > 0
+                ? Double(diagnosticSchedulerMissedVSyncs) / Double(diagnosticExpectedVSyncs)
+                : 0
+            let hitchRate = cadenceSampleCount > 0
+                ? Double(diagnosticHitchFrames) / Double(cadenceSampleCount)
+                : 0
+            let refreshHz = diagnosticDisplayNominalDuration > 0
+                ? 1.0 / diagnosticDisplayNominalDuration
+                : 0
+            let wheelP95 = percentileMilliseconds(diagnosticScrollDurations, quantile: 0.95)
+            let wheelMaximum = maximumMilliseconds(diagnosticScrollDurations)
             OverlayLog.write(
                 String(
-                    format: "transcript scroll benchmark frames=%d step=%.0f ready=%.2fms p95=%.2fms p99=%.2fms max=%.2fms firstInput=%.2fms firstMoved=%d wheelP95=%.2fms wheelMax=%.2fms flushMax=%.2fms reportMax=%.2fms anchors=%d peakAnchors=%d blankFrames=%d longestBlankStreak=%d",
+                    format: "transcript scroll benchmark frames=%d step=%.0f ready=%.2fms p95=%.2fms p99=%.2fms max=%.2fms syncP95=%.2fms syncMax=%.2fms productionP95=%.2fms productionMax=%.2fms refreshHz=%.1f cadenceSamples=%d cadenceP95=%.2fms cadenceP99=%.2fms cadenceMax=%.2fms schedulerP95=%.2fms schedulerMax=%.2fms missedVSyncs=%d missedVSyncRate=%.4f schedulerMissedVSyncs=%d schedulerMissedVSyncRate=%.4f hitchFrames=%d hitchRate=%.4f firstInput=%.2fms firstMoved=%d wheelP95=%.2fms wheelMax=%.2fms flushMax=%.2fms reportMax=%.2fms anchors=%d peakAnchors=%d blankFrames=%d longestBlankStreak=%d",
                     diagnosticFrameIntervals.count,
                     diagnosticScrollStep,
                     diagnosticReadyLatency * 1_000,
-                    p95,
-                    p99,
-                    maximum,
+                    frameP95,
+                    frameP99,
+                    frameMaximum,
+                    syncP95,
+                    syncMaximum,
+                    productionP95,
+                    productionMaximum,
+                    refreshHz,
+                    cadenceSampleCount,
+                    cadenceP95,
+                    cadenceP99,
+                    cadenceMaximum,
+                    schedulerP95,
+                    schedulerMaximum,
+                    diagnosticMissedVSyncs,
+                    missedVSyncRate,
+                    diagnosticSchedulerMissedVSyncs,
+                    schedulerMissedVSyncRate,
+                    diagnosticHitchFrames,
+                    hitchRate,
                     (diagnosticFirstInputLatency ?? 0) * 1_000,
                     diagnosticFirstInputMoved ? 1 : 0,
                     wheelP95,
