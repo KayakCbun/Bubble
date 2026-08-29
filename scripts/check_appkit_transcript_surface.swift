@@ -197,7 +197,7 @@ private enum AppKitTranscriptSurfaceCheck {
         let rebuildsBeforeTail = adapter.metrics.heightIndexRebuilds
         let pointUpdatesBeforeTail = adapter.metrics.heightIndexPointUpdates
         var tailRows = rows
-        tailRows[tailRows.count - 1] = row("row-3999", version: 2, height: 96)
+        tailRows[tailRows.count - 1] = row("row-3999", version: 2, height: 96, completed: false)
         let tailRevision = adapter.currentHandle.nextRevision()
         let tailEvents = adapter.apply(
             .replace(
@@ -232,17 +232,14 @@ private enum AppKitTranscriptSurfaceCheck {
         var streamingDurations: [Double] = []
         streamingDurations.reserveCapacity(80)
         for version in 3..<83 {
-            tailRows[tailRows.count - 1] = row(
+            let streamedTail = row(
                 "row-3999",
                 version: UInt64(version),
-                height: 96 + CGFloat(version % 2)
+                height: 96 + CGFloat(version % 2),
+                completed: false
             )
             let started = ProcessInfo.processInfo.systemUptime
-            _ = adapter.apply(.replace(snapshot: TranscriptSurfaceSnapshot(
-                session: adapter.currentHandle.nextRevision(),
-                rows: tailRows,
-                followsLatest: false
-            )))
+            _ = adapter.apply(.update(row: streamedTail, session: adapter.currentHandle.nextRevision()))
             streamingDurations.append(
                 (ProcessInfo.processInfo.systemUptime - started) * 1_000
             )
@@ -254,6 +251,31 @@ private enum AppKitTranscriptSurfaceCheck {
         expect(
             streamingTailP95MS <= 17,
             "4,000-row streaming tail p95 stays within one 60 Hz frame"
+        )
+
+        // The production Overlay sends an index-addressed update for each
+        // token. Exercise that exact command shape (rather than a full
+        // replace snapshot) and assert the adapter's inspected-row counter.
+        let directUpdatesBefore = adapter.metrics.rowUpdateCount
+        let directInspectedBefore = adapter.metrics.rowUpdateInspectedRows
+        for version in 83..<103 {
+            _ = adapter.apply(.update(
+                row: row(
+                    "row-3999",
+                    version: UInt64(version),
+                    height: 96 + CGFloat(version % 2),
+                    completed: false
+                ),
+                session: adapter.currentHandle.nextRevision()
+            ))
+        }
+        expect(
+            adapter.metrics.rowUpdateCount - directUpdatesBefore == 20,
+            "index-addressed streaming updates are counted"
+        )
+        expect(
+            adapter.metrics.rowUpdateInspectedRows - directInspectedBefore == 20,
+            "index-addressed streaming updates inspect one row each"
         )
 
         // The post-wheel callback reports the actual end state after a user
@@ -335,6 +357,8 @@ private enum AppKitTranscriptSurfaceCheck {
         _ = adapter.apply(.update(row: changed, session: revisionTwo))
         let remounts = adapter.metrics.totalMounts - beforeMounts
         expect(remounts <= 1, "one row update mounts at most one host")
+        expect(adapter.metrics.rowUpdateCount > 0, "streaming row update uses the direct adapter path")
+        expect(adapter.metrics.rowUpdateInspectedRows == adapter.metrics.rowUpdateCount, "streaming row updates inspect exactly one row each")
         if let otherID, let otherHost {
             expect(adapter.hostObjectID(rowID: otherID) == otherHost, "unrelated row host remains mounted")
         }

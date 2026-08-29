@@ -30,6 +30,14 @@ swiftc -O -parse-as-library \
   -o /tmp/bubble-check-transcript-render-plan
 /tmp/bubble-check-transcript-render-plan
 
+swiftc -O -parse-as-library \
+  Sources/Bubble/WorkspaceTranscriptRenderPlan.swift \
+  Sources/Bubble/TranscriptRenderPlan.swift \
+  Sources/Bubble/TranscriptProjectionStore.swift \
+  scripts/check_transcript_projection_store.swift \
+  -o /tmp/bubble-check-transcript-projection-store
+/tmp/bubble-check-transcript-projection-store
+
 swiftc -parse-as-library \
   Sources/Bubble/TranscriptHistoryWindow.swift \
   Sources/Bubble/TranscriptRestoreMerge.swift \

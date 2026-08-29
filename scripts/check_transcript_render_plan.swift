@@ -157,6 +157,32 @@ private enum TranscriptRenderPlanCheck {
         expect(planner.lastWork.rebuiltUnitCount < planner.lastWork.planUnitCount / 4, "streaming tail rebuilds only a small unit suffix")
         expect(planner.lastWork.reusedUnitCount > planner.lastWork.rebuiltUnitCount, "streaming tail reuses the immutable unit prefix")
 
+        let directPlanner = TranscriptRenderPlanner()
+        let retainedDirectPlan = directPlanner.plan(seeds: seeds, branchSourceID: nil, streamingSeedIDs: [])
+        let detachedCopiesBeforeDirect = directPlanner.detachedPlanCopyCount
+        var directSeeds = seeds
+        directSeeds[directSeeds.count - 1].text += "\n\nDirect index-addressed tail."
+        let directStart = ContinuousClock.now
+        let directDelta = directPlanner.applyStreamingUpdate(
+            seedIndex: directSeeds.count - 1,
+            seed: directSeeds[directSeeds.count - 1],
+            streaming: true,
+            branchSourceID: nil
+        )
+        let directElapsed = directStart.duration(to: .now)
+        let directMilliseconds = Double(directElapsed.components.seconds) * 1_000
+            + Double(directElapsed.components.attoseconds) / 1_000_000_000_000_000
+        expect(directDelta != nil, "index-addressed streaming update is accepted for the live tail")
+        expect(directPlanner.lastWork.inspectedSeedCount == 1, "index-addressed streaming update inspects one seed")
+        expect(directPlanner.lastWork.changedSeedIndices == [directSeeds.count - 1], "index-addressed update reports one changed seed")
+        expect(directPlanner.detachedPlanCopyCount == detachedCopiesBeforeDirect, "direct update does not copy a retained public plan")
+        expect(directPlanner.lastWork.detachedUnitCopyCount == 0, "direct update reports zero full-plan copies")
+        expect(retainedDirectPlan.units.last?.text != directSeeds.last?.text, "retained public plan remains immutable after direct update")
+        expect(directMilliseconds < 20, "index-addressed streaming update stays near one frame, got \(directMilliseconds)ms")
+        if let directDelta {
+            expect(directDelta.changedUnits.count < directDelta.fullUnitCount / 4, "index-addressed update materializes only the changed unit suffix")
+        }
+
         let unchangedStreaming = planner.plan(
             seeds: streamingSeeds,
             branchSourceID: nil,

@@ -533,7 +533,11 @@ final class TranscriptProjectionCache<Key: Equatable, Value> {
 
 struct TranscriptSurfaceSnapshot: Equatable, Sendable {
     let session: TranscriptSessionHandle
-    let rows: [TranscriptRowSnapshot]
+    /// Mutable only for the reducer's index-addressed streaming seam. Public
+    /// callers still receive value snapshots; structural commands replace the
+    /// array, while the hot path can update one live row without first making
+    /// a temporary full-array copy.
+    var rows: [TranscriptRowSnapshot]
     let anchor: TranscriptSurfaceAnchor?
     let followsLatest: Bool
 
@@ -756,6 +760,7 @@ final class TranscriptSurfaceState: TranscriptSurfaceAdapter {
     private(set) var snapshot: TranscriptSurfaceSnapshot
     let interactionStore: TranscriptInteractionStore
     let heightCache: TranscriptHeightCache
+    private var rowIndexByID: [String: Int]
 
     init(
         snapshot: TranscriptSurfaceSnapshot? = nil,
@@ -768,9 +773,21 @@ final class TranscriptSurfaceState: TranscriptSurfaceAdapter {
         )
         self.interactionStore = interactionStore
         self.heightCache = heightCache
+        self.rowIndexByID = Dictionary(
+            uniqueKeysWithValues: self.snapshot.rows.enumerated().map { ($0.element.id, $0.offset) }
+        )
     }
 
     var currentHandle: TranscriptSessionHandle { snapshot.session }
+
+    /// Returns one row without exposing the backing array. AppKit's streaming
+    /// adapter uses this seam to capture the previous tail value before an
+    /// index-addressed update, avoiding a snapshot/array copy of the complete
+    /// transcript.
+    func row(at index: Int) -> TranscriptRowSnapshot? {
+        guard snapshot.rows.indices.contains(index) else { return nil }
+        return snapshot.rows[index]
+    }
 
     func nextCommandHandle() -> TranscriptSessionHandle { currentHandle.nextRevision() }
 
@@ -942,6 +959,7 @@ final class TranscriptSurfaceState: TranscriptSurfaceAdapter {
             anchor: anchor,
             followsLatest: followsLatest
         )
+        rebuildRowIndex()
         var events: [TranscriptSurfaceEvent] = [
             .snapshotApplied(
                 session: session,
@@ -992,6 +1010,7 @@ final class TranscriptSurfaceState: TranscriptSurfaceAdapter {
             anchor: anchor,
             followsLatest: snapshot.followsLatest
         )
+        rebuildRowIndex()
         var events: [TranscriptSurfaceEvent] = [
             .snapshotApplied(
                 session: session,
@@ -1012,7 +1031,7 @@ final class TranscriptSurfaceState: TranscriptSurfaceAdapter {
         session: TranscriptSessionHandle,
         anchorPolicy: TranscriptSurfaceAnchorPolicy
     ) -> [TranscriptSurfaceEvent] {
-        guard let index = snapshot.rows.firstIndex(where: { $0.id == row.id }) else {
+        guard let index = rowIndexByID[row.id] else {
             return [.rowNotFound(rowID: row.id)]
         }
         let old = snapshot.rows[index]
@@ -1041,12 +1060,16 @@ final class TranscriptSurfaceState: TranscriptSurfaceAdapter {
                 )
             ]
         }
-        var rows = snapshot.rows
-        rows[index] = row
+        // Mutate the live snapshot buffer at its known index. Keeping the
+        // write here (rather than copying `snapshot.rows` into a temporary)
+        // is what allows AppKit's index-addressed streaming path to avoid an
+        // O(N) Array copy for every token. Structural commands still replace
+        // the whole buffer through their cold paths above.
+        snapshot.rows[index] = row
         let anchor = resolvedAnchor(anchorPolicy)
         snapshot = TranscriptSurfaceSnapshot(
             session: session,
-            rows: rows,
+            rows: snapshot.rows,
             anchor: anchor,
             followsLatest: snapshot.followsLatest
         )
@@ -1074,6 +1097,7 @@ final class TranscriptSurfaceState: TranscriptSurfaceAdapter {
             anchor: anchor,
             followsLatest: snapshot.followsLatest
         )
+        rebuildRowIndex()
         return [
             .snapshotApplied(
                 session: session,
@@ -1136,6 +1160,12 @@ final class TranscriptSurfaceState: TranscriptSurfaceAdapter {
         case .followLatest:
             return nil
         }
+    }
+
+    private func rebuildRowIndex() {
+        rowIndexByID = Dictionary(
+            uniqueKeysWithValues: snapshot.rows.enumerated().map { ($0.element.id, $0.offset) }
+        )
     }
 
     private func normalizeCompletedRows(

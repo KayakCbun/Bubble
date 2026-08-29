@@ -180,6 +180,39 @@ struct TranscriptRenderPlannerWork: Equatable, Sendable {
     var rebuiltUnitCount = 0
     var reusedUnitCount = 0
     var planUnitCount = 0
+    /// Number of full unit values copied for a public cold-path plan
+    /// snapshot. Direct streaming deltas must leave this at zero.
+    var detachedUnitCopyCount = 0
+    /// Seed indexes whose templates/units were rebuilt for this request.  A
+    /// streaming token normally contains exactly one tail index; structural
+    /// rebuilds report the complete set for correctness diagnostics.
+    var changedSeedIndices: [Int] = []
+}
+
+struct TranscriptRenderPlannerUpdate: Sendable {
+    let plan: TranscriptRenderPlan
+    let work: TranscriptRenderPlannerWork
+    /// Flattened unit ranges corresponding to `work.changedSeedIndices`.
+    /// Consumers can patch only these units without scanning the whole plan.
+    let changedUnitRanges: [Range<Int>]
+
+    var isIncremental: Bool { work.mode == .incremental }
+}
+
+/// Result of an index-addressed streaming mutation.  Unlike `planUpdate`,
+/// this API never accepts or returns the full seed/unit arrays.  It is valid
+/// only while the source sequence and branch metadata are unchanged; callers
+/// fall back to `planUpdate` when those preconditions do not hold.
+struct TranscriptRenderPlannerDelta: Sendable {
+    let work: TranscriptRenderPlannerWork
+    let changedSeedIndex: Int
+    let previousUnitRange: Range<Int>
+    let changedUnits: [TranscriptRenderUnit]
+    let fullUnitCount: Int
+
+    var newUnitRange: Range<Int> {
+        previousUnitRange.lowerBound..<(previousUnitRange.lowerBound + changedUnits.count)
+    }
 }
 
 /// Keeps the row and chunk plan stable across unrelated SwiftUI updates. The
@@ -201,6 +234,107 @@ final class TranscriptRenderPlanner {
     private var cachedUnitRanges: [Range<Int>] = []
 
     private(set) var lastWork = TranscriptRenderPlannerWork()
+    /// Diagnostic counter for the cold/public plan boundary. It is kept
+    /// separate from `lastWork` so a retained plan can be compared with a
+    /// subsequent direct update in focused checks.
+    private(set) var detachedPlanCopyCount = 0
+
+    /// Plan a request and expose the exact flattened ranges touched by the
+    /// planner.  The legacy `plan` API remains unchanged for structural
+    /// consumers; Overlay uses this delta form on token updates.
+    func planUpdate(
+        seeds: [TranscriptRenderSeed],
+        branchSourceID: String?,
+        streamingSeedIDs: Set<String>
+    ) -> TranscriptRenderPlannerUpdate {
+        let plan = plan(
+            seeds: seeds,
+            branchSourceID: branchSourceID,
+            streamingSeedIDs: streamingSeedIDs
+        )
+        let ranges: [Range<Int>] = lastWork.changedSeedIndices.compactMap { index in
+            guard cachedUnitRanges.indices.contains(index) else { return nil }
+            return cachedUnitRanges[index]
+        }
+        return TranscriptRenderPlannerUpdate(plan: plan, work: lastWork, changedUnitRanges: ranges)
+    }
+
+    /// Applies a known streaming-tail seed update without walking the prefix
+    /// or creating an Array snapshot.  The caller supplies the existing seed
+    /// index from its source projection, so no id search/structure comparison
+    /// is needed here.  Tail updates are constrained to the final seed: a
+    /// middle-sequence edit can shift every flattened unit and must rebuild.
+    func applyStreamingUpdate(
+        seedIndex: Int,
+        seed: TranscriptRenderSeed,
+        streaming: Bool,
+        branchSourceID: String?
+    ) -> TranscriptRenderPlannerDelta? {
+        guard !cachedSeeds.isEmpty,
+              cachedSeeds.indices.contains(seedIndex),
+              seedIndex == cachedSeeds.count - 1,
+              cachedBranchSourceID == branchSourceID else {
+            return nil
+        }
+        let cached = cachedSeeds[seedIndex]
+        guard cached.seed.id == seed.id,
+              cached.seed.kind == seed.kind,
+              cached.seed.sourceIDs == seed.sourceIDs,
+              cached.seed.hasMedia == seed.hasMedia else {
+            return nil
+        }
+        guard cached.streaming != streaming || cached.seed.text != seed.text else {
+            lastWork = TranscriptRenderPlannerWork(
+                mode: .cached,
+                inspectedSeedCount: 1,
+                reusedUnitCount: cachedPlan.units.count,
+                planUnitCount: cachedPlan.units.count,
+                changedSeedIndices: []
+            )
+            return nil
+        }
+
+        let templates = TranscriptRenderPlan.templates(for: seed, streaming: streaming)
+        let units = TranscriptRenderPlan.units(
+            for: seed,
+            seedIndex: seedIndex,
+            branchSeedIndex: cachedPlan.branchSeedIndex,
+            templates: templates
+        )
+        let oldRange = cachedUnitRanges[seedIndex]
+        // Mutate the planner's sole-owned arrays in place. No previous plan
+        // is handed to this API, so replacing this final range cannot trigger
+        // a full-prefix COW allocation.
+        cachedSeeds[seedIndex] = CachedSeed(
+            seed: seed,
+            streaming: streaming,
+            templates: templates,
+            units: units
+        )
+        seedCache[seed.id] = cachedSeeds[seedIndex]
+        cachedPlan.units.replaceSubrange(oldRange, with: units)
+        cachedStreamingSeedIDs = streaming
+            ? cachedStreamingSeedIDs.union([seed.id])
+            : cachedStreamingSeedIDs.subtracting([seed.id])
+        cachedUnitRanges[seedIndex] = oldRange.lowerBound..<(oldRange.lowerBound + units.count)
+        let work = TranscriptRenderPlannerWork(
+            mode: .incremental,
+            inspectedSeedCount: 1,
+            rebuiltSeedCount: 1,
+            rebuiltUnitCount: units.count,
+            reusedUnitCount: max(0, cachedPlan.units.count - units.count),
+            planUnitCount: cachedPlan.units.count,
+            changedSeedIndices: [seedIndex]
+        )
+        lastWork = work
+        return TranscriptRenderPlannerDelta(
+            work: work,
+            changedSeedIndex: seedIndex,
+            previousUnitRange: oldRange,
+            changedUnits: units,
+            fullUnitCount: cachedPlan.units.count
+        )
+    }
 
     func plan(
         seeds: [TranscriptRenderSeed],
@@ -248,9 +382,10 @@ final class TranscriptRenderPlanner {
                 rebuiltSeedCount: 0,
                 rebuiltUnitCount: 0,
                 reusedUnitCount: cachedPlan.units.count,
-                planUnitCount: cachedPlan.units.count
+                planUnitCount: cachedPlan.units.count,
+                changedSeedIndices: []
             )
-            return cachedPlan
+            return detachedPlan()
         }
 
         return incrementalPlan(
@@ -318,9 +453,10 @@ final class TranscriptRenderPlanner {
                 rebuiltSeedCount: 0,
                 rebuiltUnitCount: 0,
                 reusedUnitCount: cachedPlan.units.count,
-                planUnitCount: cachedPlan.units.count
+                planUnitCount: cachedPlan.units.count,
+                changedSeedIndices: []
             )
-            return cachedPlan
+            return detachedPlan()
         }
 
         let branchSeedIndex = branchSourceID.flatMap { sourceID in
@@ -367,10 +503,11 @@ final class TranscriptRenderPlanner {
             rebuiltSeedCount: changedIndices.count,
             rebuiltUnitCount: rebuiltUnitCount,
             reusedUnitCount: max(0, cachedPlan.units.count - rebuiltUnitCount),
-            planUnitCount: cachedPlan.units.count
+            planUnitCount: cachedPlan.units.count,
+            changedSeedIndices: changedIndices.sorted()
         )
         _ = statusChangedIDs // Kept named for diagnostics/readability above.
-        return cachedPlan
+        return detachedPlan()
     }
 
     private func structureMatches(_ seeds: [TranscriptRenderSeed]) -> Bool {
@@ -469,9 +606,31 @@ final class TranscriptRenderPlanner {
             rebuiltSeedCount: rebuiltSeedCount,
             rebuiltUnitCount: rebuiltUnitCount,
             reusedUnitCount: max(0, next.units.count - rebuiltUnitCount),
-            planUnitCount: next.units.count
+            planUnitCount: next.units.count,
+            changedSeedIndices: seeds.indices.map { $0 }
         )
-        return next
+        // Keep the planner's internal unit buffer uniquely owned. The public
+        // plan is a cold-path value snapshot; callers retaining it must not
+        // force copy-on-write of the live tail on the next direct update.
+        detachedPlanCopyCount += next.units.count
+        lastWork.detachedUnitCopyCount = next.units.count
+        return TranscriptRenderPlan(
+            units: next.units.map { $0 },
+            branchSeedIndex: next.branchSeedIndex
+        )
+    }
+
+    /// Returns a detached value for structural/cached consumers. Keeping the
+    /// internal `cachedPlan.units` array private and uniquely owned is what
+    /// lets `applyStreamingUpdate` replace one tail range without copying a
+    /// caller-retained full plan.
+    private func detachedPlan() -> TranscriptRenderPlan {
+        detachedPlanCopyCount += cachedPlan.units.count
+        lastWork.detachedUnitCopyCount = cachedPlan.units.count
+        return TranscriptRenderPlan(
+            units: cachedPlan.units.map { $0 },
+            branchSeedIndex: cachedPlan.branchSeedIndex
+        )
     }
 
     private func rebuildUnitRanges() {

@@ -263,6 +263,12 @@ struct AppKitTranscriptSurfaceMetrics {
     private(set) var maximumDeferredOverscanRefillDuration: TimeInterval = 0
     private(set) var deferredOverscanRefillMounts = 0
     private(set) var maximumDeferredOverscanRefillMounts = 0
+    /// Index-addressed streaming updates must inspect one producer row and
+    /// never walk the immutable transcript prefix. These counters make that
+    /// contract observable in focused checks and debug telemetry.
+    private(set) var rowUpdateCount = 0
+    private(set) var rowUpdateInspectedRows = 0
+    private(set) var rowUpdateMountedHosts = 0
 
     mutating func recordLayout(duration: TimeInterval) {
         layoutCount += 1
@@ -302,6 +308,12 @@ struct AppKitTranscriptSurfaceMetrics {
         let boundedRows = max(0, mountedRows)
         deferredOverscanRefillMounts += boundedRows
         maximumDeferredOverscanRefillMounts = max(maximumDeferredOverscanRefillMounts, boundedRows)
+    }
+
+    mutating func recordRowUpdate(inspectedRows: Int, mountedHosts: Int) {
+        rowUpdateCount += 1
+        rowUpdateInspectedRows += max(0, inspectedRows)
+        rowUpdateMountedHosts += max(0, mountedHosts)
     }
 }
 
@@ -624,6 +636,13 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
 
     @discardableResult
     func apply(_ command: TranscriptSurfaceCommand) -> [TranscriptSurfaceEvent] {
+        // Streaming token updates carry the affected row identity. Handle
+        // those through the index-addressed path before taking a snapshot;
+        // retaining `state.snapshot` here would alias the full rows Array and
+        // force a copy-on-write allocation when the reducer mutates one item.
+        if case let .update(row) = command.kind {
+            return applyStreamingRowUpdate(row: row, command: command)
+        }
         let oldSnapshot = state.snapshot
         let anchor = anchorBefore(command.anchorPolicy, oldSnapshot: oldSnapshot)
         let events = state.apply(command)
@@ -663,6 +682,68 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
                 break
             }
         } else if followsLatest {
+            scrollToEnd()
+        } else if let anchor, command.anchorPolicy != .followLatest {
+            restore(anchor)
+        }
+        return events
+    }
+
+    /// Applies one known streaming row without rebuilding the transcript
+    /// snapshot, row-index map, or mounted-cell set.  Structural commands keep
+    /// using `synchronizeRows` below, while the normal token path performs one
+    /// Fenwick point update and one optional host configure.
+    private func applyStreamingRowUpdate(
+        row: TranscriptRowSnapshot,
+        command: TranscriptSurfaceCommand
+    ) -> [TranscriptSurfaceEvent] {
+        let index = rowIndexByID[row.id]
+        let oldRow = index.flatMap { state.row(at: $0) }
+        let anchor = anchorBefore(command.anchorPolicy)
+        let events = state.apply(command)
+        guard accepted(events), let index, let oldRow else { return events }
+
+        if requestsFollowLatest(command.kind) {
+            userDetachedFromLatest = false
+        }
+        followsLatest = userDetachedFromLatest ? false : state.snapshot.followsLatest
+
+        let contentChanged = oldRow.contentIdentity != row.contentIdentity
+        let layoutChanged = oldRow.layoutIdentity != row.layoutIdentity
+        let nextKey = AppKitTranscriptRowReuseKey(row: row)
+        var mountedHostCount = 0
+        if let cell = mounted[row.id] {
+            // A live streamed row is safe to reconfigure in place. This keeps
+            // its AppKit/SwiftUI host identity stable even as contentVersion
+            // advances for every token; completed rows still use the cold
+            // structural path and immutable reuse keys.
+            if cell.key != nextKey || contentChanged || layoutChanged {
+                cell.host.configure(row: row, key: nextKey)
+                cell.key = nextKey
+            }
+            mountedHostCount = 1
+        }
+
+        var heightChanged = false
+        if contentChanged || layoutChanged {
+            let height = cachedHeightOrEstimate(row)
+            heightChanged = heightIndex.update(index: index, height: height) != 0
+            if heightChanged {
+                metrics.recordHeightIndexPointUpdate()
+            }
+        }
+        metrics.recordRowUpdate(inspectedRows: 1, mountedHosts: mountedHostCount)
+
+        if heightChanged {
+            updateDocumentFrame()
+        }
+        if heightChanged || mountedHostCount > 0 {
+            // Repositioning is bounded by the mounted viewport window. The
+            // immutable offscreen prefix is never traversed here.
+            relayoutNow()
+        }
+
+        if followsLatest {
             scrollToEnd()
         } else if let anchor, command.anchorPolicy != .followLatest {
             restore(anchor)
@@ -831,6 +912,14 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
         case let .preserve(anchor): return anchor
         case .followLatest: return nil
         case .keepViewport: return oldSnapshot.anchor ?? currentVisibleAnchor()
+        }
+    }
+
+    private func anchorBefore(_ policy: TranscriptSurfaceAnchorPolicy) -> TranscriptSurfaceAnchor? {
+        switch policy {
+        case let .preserve(anchor): return anchor
+        case .followLatest: return nil
+        case .keepViewport: return state.snapshot.anchor ?? currentVisibleAnchor()
         }
     }
 

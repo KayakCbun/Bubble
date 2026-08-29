@@ -75,22 +75,19 @@ struct OverlayView: View {
     @State private var transcriptSurfaceCommand: AppKitTranscriptSurfaceOperation?
     @State private var transcriptSurfaceCommandToken: UInt64 = 0
     @State private var transcriptSurfaceGeneration: UInt64 = 0
-    @State private var transcriptProjectionCache = TranscriptProjectionCache<
-        OverlayTranscriptProjectionKey,
-        [MainTranscriptRenderRow]
-    >()
-    @State private var transcriptEntriesCache = TranscriptProjectionCache<
-        OverlayTranscriptEntriesKey,
-        [OverlayTranscriptSurfaceEntry]
-    >()
     @State private var historyTicksCache = TranscriptProjectionCache<
         OverlayHistoryTicksKey,
         [HistoryTick]
     >()
-    @State private var transcriptSurfaceProjectionCache = TranscriptProjectionCache<
-        OverlayTranscriptSurfaceProjectionKey,
-        OverlayTranscriptSurfaceProjection
-    >()
+    /// Source rows live in a segmented projection store. A streaming token
+    /// updates one record by id; only explicit structural deltas rebuild
+    /// `displayRows` and its grouping.
+    @State private var transcriptProjectionStore = TranscriptProjectionStore<TranscriptRow>()
+    @State private var transcriptRenderRowStore = TranscriptProjectionStore<MainTranscriptRenderRow>()
+    @State private var transcriptSurfaceEntryStore = TranscriptProjectionStore<OverlayTranscriptSurfaceEntry>()
+    @State private var transcriptProjectionSessionID: String?
+    @State private var transcriptProjectionRevision: UInt64 = .max
+    @State private var transcriptProjectionStructureKey: OverlayTranscriptStructureKey?
     private var inputShape: RoundedRectangle {
         RoundedRectangle(cornerRadius: OverlayMetrics.cornerRadius, style: .continuous)
     }
@@ -305,10 +302,13 @@ struct OverlayView: View {
         transcriptSurfaceCommand = nil
         transcriptSurfaceCommandToken &+= 1
         transcriptSurfaceGeneration &+= 1
-        transcriptProjectionCache.reset()
-        transcriptEntriesCache.reset()
         historyTicksCache.reset()
-        transcriptSurfaceProjectionCache.reset()
+        transcriptProjectionStore.reset()
+        transcriptRenderRowStore.reset()
+        transcriptSurfaceEntryStore.reset()
+        transcriptProjectionSessionID = nil
+        transcriptProjectionRevision = .max
+        transcriptProjectionStructureKey = nil
         QuoteSelectionMonitor.shared.dismiss()
     }
 
@@ -644,7 +644,7 @@ struct OverlayView: View {
     private var historyTicks: [HistoryTick] {
         let tree = store.conversationTree
         let key = OverlayHistoryTicksKey(
-            projection: transcriptProjectionKey,
+            projection: transcriptProjectionStructureKeyValue,
             treeLeafID: tree?.leafID,
             treeEntryCount: tree?.entries.count ?? 0,
             treeLastEntryID: tree?.entries.last?.id
@@ -666,62 +666,271 @@ struct OverlayView: View {
         }
     }
 
-    private var mainTranscriptRows: [MainTranscriptRenderRow] {
-        transcriptProjectionCache.value(for: transcriptProjectionKey) { buildMainTranscriptRows() }
+    private struct TranscriptProjectionUpdateResult {
+        let changedRows: [MainTranscriptRenderRow]
+        let requiresSurfaceReplace: Bool
     }
 
-    private func buildMainTranscriptRows() -> [MainTranscriptRenderRow] {
-        let baseRows = displayRows
-        let seeds = baseRows.map { row -> TranscriptRenderSeed in
-            let kind: TranscriptRenderSeed.Kind
-            let text: String
-            switch row {
-            case .message(let item) where item.kind == .assistant:
-                kind = .assistant
-                text = item.text
-            case .message(let item) where item.kind == .user:
-                kind = .user
-                text = item.text
-            default:
-                kind = .other
-                text = ""
-            }
-            return TranscriptRenderSeed(
-                id: row.id,
-                kind: kind,
-                text: text,
-                sourceIDs: row.sourceItemIDs,
-                hasMedia: {
-                    if case .message(let item) = row { return !(item.imageNames ?? []).isEmpty }
-                    return false
-                }()
-            )
+    /// Synchronizes the segmented source projection with ChatStore's explicit
+    /// transcript delta. Token updates never call `visibleItems` or
+    /// `groupedRows`; they replace one record by id and hand the planner a
+    /// shared seed buffer. Restore, branch, history-window and unknown
+    /// mutations intentionally fall back to one authoritative rebuild.
+    private func synchronizeTranscriptProjection() -> TranscriptProjectionUpdateResult {
+        let sessionID = transcriptSessionIdentity
+        let structureKey = transcriptProjectionStructureKeyValue
+        let needsStructureReplace = transcriptProjectionSessionID != sessionID
+            || transcriptProjectionStructureKey != structureKey
+            || transcriptProjectionStore.isEmpty
+        let didStructureReplace = needsStructureReplace
+        if needsStructureReplace {
+            transcriptProjectionStore.reset()
+            transcriptRenderRowStore.reset()
+            transcriptSurfaceEntryStore.reset()
+            transcriptProjectionSessionID = sessionID
+            transcriptProjectionStructureKey = structureKey
+            // The structural rebuild already reflects the current source
+            // revision. Mark it consumed so the subsequent planner call does
+            // not repeat the same full grouping pass with a stale `.rebuild`
+            // delta.
+            transcriptProjectionRevision = store.transcriptRevision
+            rebuildTranscriptProjection()
         }
+
+        let revision = store.transcriptRevision
+        var sourceDeltaApplied = true
+        let delta = store.transcriptDelta
+        if !didStructureReplace && transcriptProjectionRevision != revision {
+            sourceDeltaApplied = applyTranscriptDelta(delta)
+            if !sourceDeltaApplied {
+                rebuildTranscriptProjection()
+            }
+            transcriptProjectionRevision = revision
+        }
+
         var streamingSeedIDs: Set<String> = []
         if store.isBusy, let id = store.streamingAssistantId {
             streamingSeedIDs.insert(id.uuidString)
         }
-        let plan = store.transcriptPlanner.plan(
-            seeds: seeds,
+        if sourceDeltaApplied,
+           case .update(let item) = delta,
+           let seedIndex = transcriptProjectionStore.index(of: item.id.uuidString),
+           let record = transcriptProjectionStore.record(at: seedIndex),
+           let delta = store.transcriptPlanner.applyStreamingUpdate(
+               seedIndex: seedIndex,
+               seed: record.seed,
+               streaming: streamingSeedIDs.contains(record.seed.id),
+               branchSourceID: store.branchDraft?.sourceItemID.uuidString
+           ),
+           let changedRows = applyTranscriptRenderPlanDelta(delta) {
+            return TranscriptProjectionUpdateResult(
+                changedRows: changedRows,
+                requiresSurfaceReplace: false
+            )
+        }
+
+        let planUpdate = store.transcriptPlanner.planUpdate(
+            seeds: transcriptProjectionStore.seeds,
             branchSourceID: store.branchDraft?.sourceItemID.uuidString,
             streamingSeedIDs: streamingSeedIDs
         )
-        var activeHistoryTickID: String?
-        return plan.units.map { unit in
-            if unit.kind == .user {
-                activeHistoryTickID = unit.id
-            }
-            return MainTranscriptRenderRow(
-                unit: unit,
-                source: baseRows[unit.seedIndex],
-                historyTickID: activeHistoryTickID
+        if planUpdate.isIncremental,
+           let changedRows = applyTranscriptRenderPlanUpdate(planUpdate) {
+            return TranscriptProjectionUpdateResult(
+                changedRows: changedRows,
+                requiresSurfaceReplace: false
+            )
+        } else {
+            rebuildTranscriptRenderRows(planUpdate.plan)
+            return TranscriptProjectionUpdateResult(
+                changedRows: [],
+                requiresSurfaceReplace: true
             )
         }
     }
 
-    private var transcriptProjectionKey: OverlayTranscriptProjectionKey {
-        OverlayTranscriptProjectionKey(
-            transcriptRevision: store.transcriptRevision,
+    private func applyTranscriptDelta(_ delta: ChatStoreTranscriptDelta) -> Bool {
+        switch delta {
+        case .update(let item):
+            guard let existing = transcriptProjectionStore.record(id: item.id.uuidString),
+                  let source = updatedTranscriptRow(existing.source, with: item) else {
+                return false
+            }
+            let work = transcriptProjectionStore.apply(.update(record: TranscriptProjectionRecord(
+                id: existing.id,
+                seed: transcriptRenderSeed(for: source),
+                source: source
+            )))
+            return work.mode == .incremental
+        case .append, .remove, .rebuild:
+            // New user/tool rows can change collapsed-tool and file-change
+            // grouping, so append/remove deltas deliberately rebuild.
+            return false
+        }
+    }
+
+    private func rebuildTranscriptProjection() {
+        let baseRows = displayRows
+        let records = baseRows.map { row in
+            TranscriptProjectionRecord(
+                id: row.id,
+                seed: transcriptRenderSeed(for: row),
+                source: row
+            )
+        }
+        _ = transcriptProjectionStore.apply(.replace(records: records))
+    }
+
+    private func rebuildTranscriptRenderRows(_ plan: TranscriptRenderPlan) {
+        let rows = plan.units.compactMap { unit -> MainTranscriptRenderRow? in
+            guard let record = transcriptProjectionStore.record(at: unit.seedIndex) else { return nil }
+            return MainTranscriptRenderRow(
+                unit: unit,
+                source: record.source,
+                historyTickID: transcriptProjectionStore.historyTickID(at: unit.seedIndex)
+            )
+        }
+        let records = rows.map { row in
+            TranscriptProjectionRecord(
+                id: row.id,
+                seed: transcriptRenderSeed(for: row),
+                source: row
+            )
+        }
+        _ = transcriptRenderRowStore.apply(.replace(records: records))
+    }
+
+    private func applyTranscriptRenderPlanUpdate(
+        _ update: TranscriptRenderPlannerUpdate
+    ) -> [MainTranscriptRenderRow]? {
+        guard !update.changedUnitRanges.isEmpty else { return [] }
+        var changedRows: [MainTranscriptRenderRow] = []
+        for range in update.changedUnitRanges {
+            for unitIndex in range {
+                guard update.plan.units.indices.contains(unitIndex) else { return nil }
+                let unit = update.plan.units[unitIndex]
+                guard let sourceRecord = transcriptProjectionStore.record(at: unit.seedIndex) else { return nil }
+                let row = MainTranscriptRenderRow(
+                    unit: unit,
+                    source: sourceRecord.source,
+                    historyTickID: transcriptProjectionStore.historyTickID(at: unit.seedIndex)
+                )
+                let record = TranscriptProjectionRecord(
+                    id: row.id,
+                    seed: transcriptRenderSeed(for: row),
+                    source: row
+                )
+                let work: TranscriptProjectionWork
+                if transcriptRenderRowStore.record(id: row.id) != nil {
+                    work = transcriptRenderRowStore.apply(.update(record: record))
+                } else if unitIndex == transcriptRenderRowStore.count {
+                    work = transcriptRenderRowStore.apply(.append(records: [record]))
+                } else {
+                    return nil
+                }
+                guard work.mode == .incremental else { return nil }
+                changedRows.append(row)
+            }
+        }
+        guard transcriptRenderRowStore.count == update.plan.units.count else { return nil }
+        return changedRows
+    }
+
+    private func applyTranscriptRenderPlanDelta(
+        _ delta: TranscriptRenderPlannerDelta
+    ) -> [MainTranscriptRenderRow]? {
+        let oldRange = delta.previousUnitRange
+        guard oldRange.upperBound == transcriptRenderRowStore.count,
+              delta.changedUnits.count >= oldRange.count else { return nil }
+        var changedRows: [MainTranscriptRenderRow] = []
+        changedRows.reserveCapacity(delta.changedUnits.count)
+        for (offset, unit) in delta.changedUnits.enumerated() {
+            guard let sourceRecord = transcriptProjectionStore.record(at: unit.seedIndex) else { return nil }
+            let row = MainTranscriptRenderRow(
+                unit: unit,
+                source: sourceRecord.source,
+                historyTickID: transcriptProjectionStore.historyTickID(at: unit.seedIndex)
+            )
+            let record = TranscriptProjectionRecord(
+                id: row.id,
+                seed: transcriptRenderSeed(for: row),
+                source: row
+            )
+            let unitIndex = delta.newUnitRange.lowerBound + offset
+            let work: TranscriptProjectionWork
+            if transcriptRenderRowStore.record(id: row.id) != nil {
+                work = transcriptRenderRowStore.apply(.update(record: record))
+            } else if unitIndex == transcriptRenderRowStore.count {
+                work = transcriptRenderRowStore.apply(.append(records: [record]))
+            } else {
+                return nil
+            }
+            guard work.mode == .incremental else { return nil }
+            changedRows.append(row)
+        }
+        guard transcriptRenderRowStore.count == delta.fullUnitCount else { return nil }
+        return changedRows
+    }
+
+    private func transcriptRenderSeed(for row: TranscriptRow) -> TranscriptRenderSeed {
+        let kind: TranscriptRenderSeed.Kind
+        let text: String
+        switch row {
+        case .message(let item) where item.kind == .assistant:
+            kind = .assistant
+            text = item.text
+        case .message(let item) where item.kind == .user:
+            kind = .user
+            text = item.text
+        default:
+            kind = .other
+            text = ""
+        }
+        return TranscriptRenderSeed(
+            id: row.id,
+            kind: kind,
+            text: text,
+            sourceIDs: row.sourceItemIDs,
+            hasMedia: {
+                if case .message(let item) = row { return !(item.imageNames ?? []).isEmpty }
+                return false
+            }()
+        )
+    }
+
+    private func transcriptRenderSeed(for row: MainTranscriptRenderRow) -> TranscriptRenderSeed {
+        TranscriptRenderSeed(
+            id: row.id,
+            kind: row.unit.kind,
+            text: row.text,
+            sourceIDs: [],
+            hasMedia: false
+        )
+    }
+
+    private func updatedTranscriptRow(
+        _ existing: TranscriptRow,
+        with item: ChatItem
+    ) -> TranscriptRow? {
+        switch existing {
+        case .message(let old) where old.id == item.id:
+            return .message(item)
+        case .tool(let old) where old.id == item.id:
+            return .tool(item)
+        default:
+            // Collapsed tools and generated file-change cards contain more
+            // than one source item; a single-item update cannot safely patch
+            // them without re-running grouping, so the caller rebuilds.
+            return nil
+        }
+    }
+
+    /// Structural inputs that affect grouping/auxiliary rows. Token text and
+    /// `transcriptRevision` are intentionally excluded so a live update does
+    /// not invalidate history ticks or force a surface replacement.
+    private var transcriptProjectionStructureKeyValue: OverlayTranscriptStructureKey {
+        OverlayTranscriptStructureKey(
+            sessionID: transcriptSessionIdentity,
             visibleWindowFirstID: store.items.first?.id.uuidString,
             visibleWindowCount: store.items.count,
             historyCapacity: store.transcriptHistoryTurnCapacity,
@@ -743,57 +952,57 @@ struct OverlayView: View {
         )
     }
 
-    @ViewBuilder
     private var transcriptList: some View {
-        let rows = mainTranscriptRows
+        let projection = synchronizeTranscriptProjection()
         let ticks = historyTicks
-        transcriptAppKitScroll(rows: rows, ticks: ticks)
+        return transcriptAppKitScroll(projection: projection, ticks: ticks)
     }
 
     /// AppKit owns the scroll viewport and the reusable row window.  SwiftUI
     /// still owns each mounted row's rich content, so Markdown, media,
     /// branches, tool/file cards, selection, and custom environment actions
     /// remain exactly the same views users saw in the old stack.
-    @ViewBuilder
     private func transcriptAppKitScroll(
-        rows: [MainTranscriptRenderRow],
+        projection: TranscriptProjectionUpdateResult,
         ticks: [HistoryTick]
     ) -> some View {
-        let entriesKey = OverlayTranscriptEntriesKey(
-            projection: transcriptProjectionKey,
-            tickCount: ticks.count,
-            tickLastID: ticks.last?.id.uuidString
-        )
-        let entries = transcriptEntriesCache.value(for: entriesKey) {
-            appKitTranscriptEntries(rows)
-        }
-        let surfaceKey = OverlayTranscriptSurfaceProjectionKey(
-            entries: entriesKey,
+        let session = TranscriptSessionHandle(
             sessionID: transcriptSessionIdentity,
             generation: transcriptSurfaceGeneration,
-            revision: store.transcriptRevision,
-            followsLatest: followState.followsLatest
+            revision: store.transcriptRevision
         )
-        let surfaceProjection = transcriptSurfaceProjectionCache.value(for: surfaceKey) {
-            let snapshot = TranscriptSurfaceSnapshot(
-                session: TranscriptSessionHandle(
-                    sessionID: transcriptSessionIdentity,
-                    generation: transcriptSurfaceGeneration,
-                    revision: store.transcriptRevision
-                ),
-                rows: entries.map(\.snapshot),
+        let surfaceReplace = projection.requiresSurfaceReplace
+        let structuralEntries: [OverlayTranscriptSurfaceEntry]
+        let rowUpdates: [OverlayTranscriptSurfaceEntry]
+        let snapshot: TranscriptSurfaceSnapshot
+        let surfaceSignal: UInt64
+        if surfaceReplace {
+            let rows = transcriptRenderRowStore.materialize(0..<transcriptRenderRowStore.count).records.map(\.source)
+            structuralEntries = appKitTranscriptEntries(rows)
+            rowUpdates = []
+            replaceTranscriptSurfaceEntries(structuralEntries)
+            snapshot = TranscriptSurfaceSnapshot(
+                session: session,
+                rows: structuralEntries.map(\.snapshot),
                 followsLatest: followState.followsLatest
             )
-            return OverlayTranscriptSurfaceProjection(
-                snapshot: snapshot,
-                signal: appKitTranscriptSurfaceSignal(snapshot)
+            surfaceSignal = appKitTranscriptSurfaceSignal(snapshot)
+        } else {
+            structuralEntries = []
+            rowUpdates = projection.changedRows.map(appKitTranscriptEntry)
+            applyTranscriptSurfaceEntryUpdates(rowUpdates)
+            snapshot = TranscriptSurfaceSnapshot(
+                session: session,
+                rows: [],
+                followsLatest: followState.followsLatest
             )
+            surfaceSignal = 0
         }
-        let snapshot = surfaceProjection.snapshot
-        let surfaceSignal = surfaceProjection.signal
-        OverlayTranscriptSurfaceRepresentable(
+        return OverlayTranscriptSurfaceRepresentable(
             snapshot: snapshot,
-            entries: entries,
+            entries: structuralEntries,
+            rowUpdates: rowUpdates,
+            replaceSurface: surfaceReplace,
             viewportSize: NSSize(width: chatWidth, height: transcriptHeight),
             leadingInset: ticks.isEmpty ? OverlayMetrics.transcriptInset : HistoryLimits.gutter + 16,
             surfaceSignal: surfaceSignal,
@@ -977,6 +1186,83 @@ struct OverlayView: View {
         }
     }
 
+    private func replaceTranscriptSurfaceEntries(
+        _ entries: [OverlayTranscriptSurfaceEntry]
+    ) {
+        let records = entries.map { entry in
+            TranscriptProjectionRecord(
+                id: entry.snapshot.id,
+                seed: TranscriptRenderSeed(
+                    id: entry.snapshot.id,
+                    kind: .other,
+                    text: entry.snapshot.text ?? ""
+                ),
+                source: entry
+            )
+        }
+        _ = transcriptSurfaceEntryStore.apply(.replace(records: records))
+    }
+
+    private func applyTranscriptSurfaceEntryUpdates(
+        _ entries: [OverlayTranscriptSurfaceEntry]
+    ) {
+        for entry in entries {
+            let record = TranscriptProjectionRecord(
+                id: entry.snapshot.id,
+                seed: TranscriptRenderSeed(
+                    id: entry.snapshot.id,
+                    kind: .other,
+                    text: entry.snapshot.text ?? ""
+                ),
+                source: entry
+            )
+            guard transcriptSurfaceEntryStore.record(id: entry.snapshot.id) != nil else {
+                // A changed unit that is not in the entry sequence means a
+                // chunk split or auxiliary-row change; the next body pass
+                // will take the structural replacement path.
+                continue
+            }
+            _ = transcriptSurfaceEntryStore.apply(.update(record: record))
+        }
+    }
+
+    private func appKitTranscriptEntry(
+        _ row: MainTranscriptRenderRow
+    ) -> OverlayTranscriptSurfaceEntry {
+        let key = mainRowRenderKey(row)
+        let fingerprint = String(describing: key)
+        return OverlayTranscriptSurfaceEntry(
+            snapshot: appKitTranscriptSnapshot(
+                id: row.id,
+                kind: appKitTranscriptRowKind(row),
+                text: row.text,
+                estimatedHeight: appKitTranscriptEstimatedHeight(row.text),
+                fingerprint: fingerprint,
+                isCompleted: row.isTerminal && !row.isStreaming,
+                historyTickID: row.historyTickID
+            ),
+            render: { [self] in
+                AnyView(
+                    TranscriptSelectionScope {
+                        mainTranscriptRow(row)
+                            .background {
+                                TranscriptRowAnchor(
+                                    id: row.id,
+                                    historyTickID: row.historyTickID
+                                )
+                            }
+                            .padding(.top, row.isContinuation ? -10 : 0)
+                            .opacity(row.isAfterBranchPoint ? 0.34 : 1)
+                    }
+                    .environment(\.openFilePreview) { path in
+                        store.openFilePreview(path)
+                    }
+                    .foregroundStyle(OverlaySurface.conversationInk)
+                )
+            }
+        )
+    }
+
     private func appKitTranscriptEntries(
         _ rows: [MainTranscriptRenderRow]
     ) -> [OverlayTranscriptSurfaceEntry] {
@@ -1037,46 +1323,7 @@ struct OverlayView: View {
                     render: { [self] in AnyView(branchCutoverDivider) }
                 ))
             }
-            let key = mainRowRenderKey(row)
-            let fingerprint = String(describing: key)
-            entries.append(OverlayTranscriptSurfaceEntry(
-                snapshot: appKitTranscriptSnapshot(
-                    id: row.id,
-                    kind: appKitTranscriptRowKind(row),
-                    text: row.text,
-                    estimatedHeight: appKitTranscriptEstimatedHeight(row.text),
-                    fingerprint: fingerprint,
-                    isCompleted: row.isTerminal && !row.isStreaming,
-                    historyTickID: row.historyTickID
-                ),
-                render: { [self] in
-                    AnyView(
-                        TranscriptSelectionScope {
-                            mainTranscriptRow(row)
-                                // Every mounted rich row participates in the
-                                // scroll/diagnostics anchor index.  Assistant
-                                // prose, tool output, and continuation chunks
-                                // inherit their owning user turn's history
-                                // tick, so limiting anchors to the user row
-                                // makes a virtualized viewport look blank to
-                                // the wheel oracle while those rows are on
-                                // screen.
-                                .background {
-                                    TranscriptRowAnchor(
-                                        id: row.id,
-                                        historyTickID: row.historyTickID
-                                    )
-                                }
-                                .padding(.top, row.isContinuation ? -10 : 0)
-                                .opacity(row.isAfterBranchPoint ? 0.34 : 1)
-                        }
-                        .environment(\.openFilePreview) { path in
-                            store.openFilePreview(path)
-                        }
-                        .foregroundStyle(OverlaySurface.conversationInk)
-                    )
-                }
-            ))
+            entries.append(appKitTranscriptEntry(row))
         }
 
         if let prompt = store.resumeDestination.prompt {
@@ -3729,7 +3976,7 @@ private enum WorkspaceTranscriptRow: Identifiable {
     }
 }
 
-private enum TranscriptRow: Identifiable {
+enum TranscriptRow: Identifiable {
     case message(ChatItem)
     case tool(ChatItem)
     case collapsedTools(id: String, items: [ChatItem])
@@ -3789,8 +4036,8 @@ private struct MainTranscriptRenderRow: Identifiable {
     }
 }
 
-private struct OverlayTranscriptProjectionKey: Equatable {
-    let transcriptRevision: UInt64
+private struct OverlayTranscriptStructureKey: Equatable {
+    let sessionID: String
     let visibleWindowFirstID: String?
     let visibleWindowCount: Int
     let historyCapacity: Int
@@ -3811,27 +4058,8 @@ private struct OverlayTranscriptProjectionKey: Equatable {
     let queuedLastText: String?
 }
 
-private struct OverlayTranscriptEntriesKey: Equatable {
-    let projection: OverlayTranscriptProjectionKey
-    let tickCount: Int
-    let tickLastID: String?
-}
-
-private struct OverlayTranscriptSurfaceProjectionKey: Equatable {
-    let entries: OverlayTranscriptEntriesKey
-    let sessionID: String
-    let generation: UInt64
-    let revision: UInt64
-    let followsLatest: Bool
-}
-
-private struct OverlayTranscriptSurfaceProjection {
-    let snapshot: TranscriptSurfaceSnapshot
-    let signal: UInt64
-}
-
 private struct OverlayHistoryTicksKey: Equatable {
-    let projection: OverlayTranscriptProjectionKey
+    let projection: OverlayTranscriptStructureKey
     let treeLeafID: String?
     let treeEntryCount: Int
     let treeLastEntryID: String?
@@ -3853,6 +4081,12 @@ private final class OverlayTranscriptRenderBox {
         guard lastEntriesSignal != signal else { return }
         renderers = Dictionary(uniqueKeysWithValues: entries.map { ($0.snapshot.id, $0.render) })
         lastEntriesSignal = signal
+    }
+
+    func update(entry: OverlayTranscriptSurfaceEntry) {
+        renderers[entry.snapshot.id] = entry.render
+        // Keep the full-surface signal untouched: row updates are applied by
+        // identity and must not trigger a dictionary rebuild for every token.
     }
 
     func render(rowID: String) -> AnyView {
@@ -3942,6 +4176,8 @@ private final class OverlayTranscriptRowHost: AppKitTranscriptRowHost {
 private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
     let snapshot: TranscriptSurfaceSnapshot
     let entries: [OverlayTranscriptSurfaceEntry]
+    let rowUpdates: [OverlayTranscriptSurfaceEntry]
+    let replaceSurface: Bool
     let viewportSize: NSSize
     let leadingInset: CGFloat
     let surfaceSignal: UInt64
@@ -4072,6 +4308,8 @@ private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
         func update(
             snapshot: TranscriptSurfaceSnapshot,
             entries: [OverlayTranscriptSurfaceEntry],
+            rowUpdates: [OverlayTranscriptSurfaceEntry],
+            replaceSurface: Bool,
             viewportSize: NSSize,
             leadingInset: CGFloat,
             surfaceSignal: UInt64,
@@ -4082,7 +4320,13 @@ private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
             onUserScrollSequenceStarted: @escaping () -> Void,
             onCommandCompleted: @escaping (_ operation: AppKitTranscriptSurfaceOperation, _ atEnd: Bool) -> Void
         ) {
-            renderBox.update(entries: entries, signal: surfaceSignal)
+            if replaceSurface {
+                renderBox.update(entries: entries, signal: surfaceSignal)
+            } else {
+                for entry in rowUpdates {
+                    renderBox.update(entry: entry)
+                }
+            }
             renderBox.decorator = { rowID, content in
                 guard rowID != "transcript-top-spacer", rowID != "transcript-end" else {
                     return content
@@ -4105,7 +4349,10 @@ private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
             adapter.setViewportSize(viewportSize)
 
             let current = adapter.currentHandle
-            let surfaceChanged = lastSurfaceSignal != surfaceSignal
+            // `replaceSurface` is an authoritative structural boundary even
+            // when its diagnostic signal happens to hash equal to the prior
+            // projection (for example a branch metadata-only change).
+            let surfaceChanged = replaceSurface
             if surfaceChanged {
                 // Store revisions are a change signal, not the adapter's
                 // ordering authority: auxiliary rows (working/queued/resume)
@@ -4129,6 +4376,24 @@ private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
                 }
                 lastSurfaceSignal = surfaceSignal
                 startDirectMountAuditIfNeeded()
+            } else if !replaceSurface {
+                var nextRevision = current.revision
+                for entry in rowUpdates {
+                    nextRevision = max(
+                        nextRevision == UInt64.max ? nextRevision : nextRevision + 1,
+                        snapshot.session.revision
+                    )
+                    let handle = TranscriptSessionHandle(
+                        sessionID: snapshot.session.sessionID,
+                        generation: snapshot.session.generation,
+                        revision: nextRevision
+                    )
+                    _ = adapter.apply(.update(
+                        row: entry.snapshot,
+                        session: handle,
+                        preserving: adapter.currentVisibleAnchor()
+                    ))
+                }
             }
 
             guard commandToken != lastCommandToken, let command else { return }
@@ -4237,6 +4502,8 @@ private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
         context.coordinator.update(
             snapshot: snapshot,
             entries: entries,
+            rowUpdates: rowUpdates,
+            replaceSurface: replaceSurface,
             viewportSize: viewportSize,
             leadingInset: leadingInset,
             surfaceSignal: surfaceSignal,
@@ -4255,6 +4522,8 @@ private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
         context.coordinator.update(
             snapshot: snapshot,
             entries: entries,
+            rowUpdates: rowUpdates,
+            replaceSurface: replaceSurface,
             viewportSize: viewportSize,
             leadingInset: leadingInset,
             surfaceSignal: surfaceSignal,

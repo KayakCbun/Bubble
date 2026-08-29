@@ -95,6 +95,18 @@ struct ChatItem: Identifiable, Codable, Equatable, @unchecked Sendable {
     }
 }
 
+/// Stable, source-level transcript mutation emitted alongside
+/// `transcriptRevision`.  Overlay can apply a live tail update without
+/// rebuilding `visibleItems`/grouped rows; any path that cannot describe its
+/// structural effect emits `.rebuild` and is handled by an authoritative
+/// replacement.
+enum ChatStoreTranscriptDelta: @unchecked Sendable {
+    case rebuild
+    case append([ChatItem])
+    case update(ChatItem)
+    case remove([UUID])
+}
+
 private struct PendingPrompt {
     var itemId: UUID
     var display: String
@@ -256,7 +268,12 @@ final class ChatStore {
     var streamUISuspended = true
     var composerFocusSuspended = true
     var transcriptRevision: UInt64 = 0
+    /// The mutation associated with the latest `transcriptRevision`.  It is
+    /// intentionally separate from the revision number so a consumer can
+    /// distinguish a one-row streaming update from restore/branch rebuilds.
+    private(set) var transcriptDelta: ChatStoreTranscriptDelta = .rebuild
     var transcriptHistoryTurnCapacity = TranscriptHistoryWindow.configuredInitialCapacity
+    @ObservationIgnored private var pendingTranscriptDelta: ChatStoreTranscriptDelta?
     @ObservationIgnored private var resumeActionGeneration = 0
     var conversationTree: ConversationTreeSnapshot?
     var branchDraft: ConversationBranchDraft? {
@@ -3115,12 +3132,15 @@ final class ChatStore {
             forceNewAssistantRow = false
             streamingAssistantId = item.id
             items.append(item)
+            markTranscriptDelta(.append([item]))
         } else if let id = streamingAssistantId,
            let index = items.firstIndex(where: { $0.id == id }) {
             appendAssistantImageName(name, to: &items[index])
+            markTranscriptDelta(.update(items[index]))
         } else if let index = TranscriptStream.resumeAssistantIndex(kinds: items.map(\.kind.rawValue)) {
             appendAssistantImageName(name, to: &items[index])
             streamingAssistantId = items[index].id
+            markTranscriptDelta(.update(items[index]))
         } else {
             let item = ChatItem(
                 kind: .assistant,
@@ -3130,6 +3150,7 @@ final class ChatStore {
             )
             streamingAssistantId = item.id
             items.append(item)
+            markTranscriptDelta(.append([item]))
         }
         persist()
     }
@@ -3231,6 +3252,7 @@ final class ChatStore {
             forceNewAssistantRow = false
             streamingAssistantId = item.id
             items.append(item)
+            markTranscriptDelta(.append([item]))
             persist()
             return
         }
@@ -3248,6 +3270,7 @@ final class ChatStore {
         let item = ChatItem(kind: .assistant, text: cleaned)
         streamingAssistantId = item.id
         items.append(item)
+        markTranscriptDelta(.append([item]))
         persist()
     }
 
@@ -3256,12 +3279,14 @@ final class ChatStore {
         if cleaned.isEmpty {
             let id = items[index].id
             items.remove(at: index)
+            markTranscriptDelta(.remove([id]))
             if streamingAssistantId == id {
                 streamingAssistantId = nil
             }
         } else {
             items[index].text = cleaned
             streamingAssistantId = items[index].id
+            markTranscriptDelta(.update(items[index]))
         }
         persist()
     }
@@ -3270,12 +3295,14 @@ final class ChatStore {
         if let id = streamingThoughtId,
            let index = items.firstIndex(where: { $0.id == id }) {
             items[index].text = Self.stripDiagnostics(items[index].text + raw)
+            markTranscriptDelta(.update(items[index]))
         } else {
             let cleaned = Self.stripDiagnostics(raw)
             guard !cleaned.isEmpty else { return }
             let item = ChatItem(kind: .thought, text: cleaned)
             streamingThoughtId = item.id
             items.append(item)
+            markTranscriptDelta(.append([item]))
         }
         persist()
     }
@@ -3306,9 +3333,9 @@ final class ChatStore {
                 items[index].toolOutput = output
             }
             mergeImageNames(imageNames, into: &items[index])
+            markTranscriptDelta(.update(items[index]))
         } else if !isUpdate || title != nil {
-            items.append(
-                ChatItem(
+            let item = ChatItem(
                     kind: .tool,
                     text: title ?? kind ?? "tool",
                     toolId: callId,
@@ -3318,7 +3345,8 @@ final class ChatStore {
                     toolOutput: payload.output,
                     imageNames: imageNames
                 )
-            )
+            items.append(item)
+            markTranscriptDelta(.append([item]))
         }
         persist()
         self.status = "tool"
@@ -3700,6 +3728,30 @@ final class ChatStore {
         "\(entryID)|\(kind.rawValue)"
     }
 
+    /// Mark a mutation before calling `persist()`.  Stream handlers use the
+    /// precise append/update/remove forms; all other callers safely fall back
+    /// to a structural rebuild when they do not provide a marker.
+    private func markTranscriptDelta(_ delta: ChatStoreTranscriptDelta) {
+        switch (pendingTranscriptDelta, delta) {
+        case (nil, _):
+            pendingTranscriptDelta = delta
+        case (.some(.rebuild), _):
+            break
+        case (.some(.append(var existing)), .append(let next)):
+            existing.append(contentsOf: next)
+            pendingTranscriptDelta = .append(existing)
+        case (.some(.update), _), (.some(.remove), _), (.some(.append), _):
+            // Multiple mutations in one revision may alter grouping/order;
+            // force the consumer to resynchronize from its authoritative
+            // source rather than attempting to compose an unsafe delta.
+            pendingTranscriptDelta = .rebuild
+        }
+    }
+
+    private func markTranscriptRebuild() {
+        pendingTranscriptDelta = .rebuild
+    }
+
     private static func savedConversationLeaves() -> [String: String] {
         UserDefaults.standard.dictionary(forKey: "bubble.conversation.leaves") as? [String: String] ?? [:]
     }
@@ -3721,12 +3773,18 @@ final class ChatStore {
 
     private func persist(immediate: Bool = false) {
         transcriptRevision &+= 1
+        transcriptDelta = pendingTranscriptDelta ?? .rebuild
+        pendingTranscriptDelta = nil
         if !immediate,
            !OverlayRenderPolicy.shouldPersistStreamChunk(isBusy: isBusy, childBusy: childBusy) {
             return
         }
         if items.count > TranscriptVirtualizationLimits.retainedItems {
             items = Array(items.suffix(TranscriptVirtualizationLimits.retainedItems))
+            // Dropping the retained prefix changes row indexes and grouping;
+            // never expose the preceding append/update marker for this
+            // revision. Consumers must cold-rebuild their projection.
+            transcriptDelta = .rebuild
         }
         persistWork?.cancel()
         let write = DispatchWorkItem { [weak self] in
@@ -3830,12 +3888,21 @@ final class ChatStore {
             !removingSetupCards
                 || !StartupTranscriptPolicy.isSetupCard(item.text, isSystem: item.kind == .system)
         }
-        items = TranscriptRestoreMerge.merge(
+        let mergedItems = TranscriptRestoreMerge.merge(
             restored: restoredItems,
             live: items,
             id: \.id,
             stableKey: Self.richKey
         )
+        if mergedItems != items {
+            items = mergedItems
+            // Restore may complete after Overlay has already rendered a live
+            // setup/session state. Publish an explicit structural revision so
+            // the projection cannot remain on the pre-restore rows.
+            transcriptRevision &+= 1
+            transcriptDelta = .rebuild
+            pendingTranscriptDelta = nil
+        }
         richTranscriptRows = [:]
         for item in restored.richItems + restored.items + items {
             if let key = Self.richKey(item) { richTranscriptRows[key] = item }
