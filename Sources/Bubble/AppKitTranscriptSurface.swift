@@ -799,7 +799,11 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
 
     func documentDidLayout() {
         guard !layingOut else { return }
-        updateMountedFrames(repositionExisting: true)
+        // Document geometry changes are on the visible-correctness path. The
+        // warm overscan window is refilled by its bounded deferred scheduler,
+        // never while AppKit is already inside a document layout callback.
+        updateMountedFrames(repositionExisting: true, mountNewOverscanRows: false)
+        scheduleOverscanRefill()
     }
 
     private func accepted(_ events: [TranscriptSurfaceEvent]) -> Bool {
@@ -914,7 +918,8 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
             metrics.recordLayout(duration: duration)
         }
         updateDocumentFrame()
-        updateMountedFrames(repositionExisting: true)
+        updateMountedFrames(repositionExisting: true, mountNewOverscanRows: false)
+        scheduleOverscanRefill()
     }
 
     /// A clip-origin change does not alter document geometry.  Keep the hot
