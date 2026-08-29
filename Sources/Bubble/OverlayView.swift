@@ -95,10 +95,7 @@ struct OverlayView: View {
     @State private var transcriptRenderRowStore = TranscriptProjectionStore<MainTranscriptRenderRow>()
     @State private var transcriptSurfaceEntryStore = TranscriptProjectionStore<OverlayTranscriptSurfaceEntry>()
     @State private var transcriptProjectionSync = TranscriptProjectionSyncState()
-    @State private var workspaceRowsCache = TranscriptProjectionCache<
-        WorkspaceRowsProjectionKey,
-        [WorkspaceTranscriptRow]
-    >()
+    @State private var workspaceRowsCache = WorkspaceRowsProjectionStore()
     private var inputShape: RoundedRectangle {
         RoundedRectangle(cornerRadius: OverlayMetrics.cornerRadius, style: .continuous)
     }
@@ -426,19 +423,24 @@ struct OverlayView: View {
     }
 
     private var workspaceTranscriptList: some View {
-        let rows = workspaceRowsCache.value(for: WorkspaceRowsProjectionKey(
+        let mutationHistory = store.workspacePaneMutationHistory(after: workspaceRowsCache.revision)
+        let rowBoxes = workspaceRowsCache.value(for: WorkspaceRowsProjectionKey(
             revision: store.workspacePaneRevision,
             workspaceRoot: store.workspaceStage?.path,
             childBusy: store.childBusy,
-            streamingAssistantID: store.workspacePaneStreamingAssistantId
-        )) {
+            streamingAssistantID: store.workspacePaneStreamingAssistantId,
+            streamingThoughtID: store.workspacePaneStreamingThoughtId
+        ), items: store.workspacePaneItems,
+           changedItems: Array(store.workspacePaneChangedItems.values),
+           mutationHistory: mutationHistory) {
             workspaceRows(from: store.visibleWorkspacePaneItems)
         }
         let live = store.childBusy && store.workspaceStage?.path == store.activeWorkspaceBrief?.path
         return ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: OverlaySurface.rowSpacing) {
-                    ForEach(rows) { row in
+                    ForEach(rowBoxes) { box in
+                        let row = box.row
                         Group {
                             switch row {
                             case .transcript(let transcript):
@@ -499,13 +501,10 @@ struct OverlayView: View {
                     scrollWorkspacePane(proxy)
                 }
             }
-            .onChange(of: store.workspacePaneItems.count) { _, _ in
-                followWorkspacePane(proxy)
-            }
-            .onChange(of: store.workspacePaneItems.last?.text) { _, _ in
-                followWorkspacePane(proxy)
-            }
-            .onChange(of: store.workspacePaneItems.last?.toolStatus) { _, _ in
+            // Follow the constant-size mutation revision rather than asking
+            // SwiftUI to retain and compare a growing assistant string on
+            // every streamed token.
+            .onChange(of: store.workspacePaneRevision) { _, _ in
                 followWorkspacePane(proxy)
             }
             .onChange(of: store.childBusy) { _, _ in
@@ -4215,6 +4214,146 @@ private enum WorkspaceTranscriptRow: Identifiable {
         }
         return false
     }
+
+    func contains(_ itemID: UUID) -> Bool {
+        switch self {
+        case .transcript(let row): return row.contains(itemID)
+        case .assistantChunk(let id, _, _, _): return id == itemID
+        }
+    }
+
+    var sourceItemIDs: Set<UUID> {
+        switch self {
+        case .transcript(let row):
+            switch row {
+            case .message(let item), .tool(let item): return [item.id]
+            case .collapsedTools(_, let items): return Set(items.map(\.id))
+            case .fileChanges: return []
+            }
+        case .assistantChunk(let id, _, _, _): return [id]
+        }
+    }
+}
+
+private final class WorkspaceTranscriptRowBox: Identifiable {
+    var row: WorkspaceTranscriptRow
+    var id: String { row.id }
+
+    init(_ row: WorkspaceTranscriptRow) {
+        self.row = row
+    }
+}
+
+/// Keeps side-session streaming row-local. SwiftUI retains the box array and
+/// only the affected box (or collapsed-tool group) mutates for a normal
+/// token; structural changes rebuild from the authoritative grouped rows.
+private final class WorkspaceRowsProjectionStore {
+    private var boxes: [WorkspaceTranscriptRowBox] = []
+    private var boxIndexByItemID: [UUID: Int] = [:]
+    private var lastRevision: UInt64?
+    private var lastItemCount = 0
+    private var lastItemID: UUID?
+    private var lastStructure: WorkspaceRowsProjectionStructure?
+
+    var revision: UInt64? { lastRevision }
+
+    func value(
+        for key: WorkspaceRowsProjectionKey,
+        items: [ChatItem],
+        changedItems: [ChatItem],
+        mutationHistory: [WorkspacePaneRevisionDelta]?,
+        make: () -> [WorkspaceTranscriptRow]
+    ) -> [WorkspaceTranscriptRowBox] {
+        if lastRevision == key.revision { return boxes }
+        let structure = WorkspaceRowsProjectionStructure(key)
+        let revisionIsCovered = mutationHistory != nil
+        if revisionIsCovered,
+           lastStructure == structure,
+           items.count == lastItemCount,
+           items.last?.id == lastItemID,
+           !(mutationHistory?.isEmpty ?? true),
+           apply(
+               mutationHistory ?? [],
+               items: items,
+               changedItems: changedItems,
+               streamingThoughtID: key.streamingThoughtID
+           ) {
+        } else {
+            rebuild(make())
+        }
+        lastRevision = key.revision
+        lastItemCount = items.count
+        lastItemID = items.last?.id
+        lastStructure = structure
+        return boxes
+    }
+
+    private func rebuild(_ rows: [WorkspaceTranscriptRow]) {
+        boxes = rows.map(WorkspaceTranscriptRowBox.init)
+        boxIndexByItemID.removeAll(keepingCapacity: true)
+        for (index, box) in boxes.enumerated() {
+            for id in box.row.sourceItemIDs {
+                boxIndexByItemID[id] = index
+            }
+        }
+    }
+
+    private func apply(
+        _ mutations: [WorkspacePaneRevisionDelta],
+        items: [ChatItem],
+        changedItems: [ChatItem],
+        streamingThoughtID: UUID?
+    ) -> Bool {
+        // `changedItems` is the latest revision's payload. The authoritative
+        // array is used for older coalesced revisions so no growing text is
+        // retained in the mutation log. It is still useful as a cheap sanity
+        // check for the common one-revision path.
+        let latestChangedIDs = Set(changedItems.map(\.id))
+        for delta in mutations {
+            switch delta.mutation {
+            case .rebuild:
+                return false
+            case .update(let itemID, let sourceIndex):
+                guard items.indices.contains(sourceIndex),
+                      items[sourceIndex].id == itemID,
+                      isVisible(items[sourceIndex], streamingThoughtID: streamingThoughtID),
+                      let index = boxIndexByItemID[itemID],
+                      boxes.indices.contains(index) else { return false }
+                let item = items[sourceIndex]
+                if mutations.count == 1, !latestChangedIDs.isEmpty,
+                   !latestChangedIDs.contains(itemID) {
+                    return false
+                }
+                switch boxes[index].row {
+                case .transcript(.message):
+                    boxes[index].row = .transcript(.message(item))
+                case .transcript(.tool):
+                    boxes[index].row = .transcript(.tool(item))
+                case .transcript(.collapsedTools(let groupID, var grouped)):
+                    guard let groupedIndex = grouped.firstIndex(where: { $0.id == itemID }) else {
+                        return false
+                    }
+                    grouped[groupedIndex] = item
+                    boxes[index].row = .transcript(.collapsedTools(id: groupID, items: grouped))
+                case .transcript(.fileChanges), .assistantChunk:
+                    return false
+                }
+            }
+        }
+        return true
+    }
+
+    private func isVisible(_ item: ChatItem, streamingThoughtID: UUID?) -> Bool {
+        switch item.kind {
+        case .assistant:
+            return AssistantMessagePresentation.hasContent(text: item.text, imageNames: item.imageNames)
+        case .thought:
+            return !item.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || item.id == streamingThoughtID
+        default:
+            return true
+        }
+    }
 }
 
 enum TranscriptRow: Identifiable {
@@ -4317,6 +4456,21 @@ private struct WorkspaceRowsProjectionKey: Equatable {
     let workspaceRoot: String?
     let childBusy: Bool
     let streamingAssistantID: UUID?
+    let streamingThoughtID: UUID?
+}
+
+private struct WorkspaceRowsProjectionStructure: Equatable {
+    let workspaceRoot: String?
+    let childBusy: Bool
+    let streamingAssistantID: UUID?
+    let streamingThoughtID: UUID?
+
+    init(_ key: WorkspaceRowsProjectionKey) {
+        workspaceRoot = key.workspaceRoot
+        childBusy = key.childBusy
+        streamingAssistantID = key.streamingAssistantID
+        streamingThoughtID = key.streamingThoughtID
+    }
 }
 
 private struct OverlayHistoryTicksKey: Equatable {
@@ -4499,6 +4653,8 @@ private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
                 overscan: 720,
                 maximumMountedRows: 96,
                 maximumReusableHosts: 144,
+                maximumDeferredOverscanMountsPerPass: 1,
+                maximumDeferredOverscanDuration: 0.002,
                 renderer: { row, key in
                     OverlayTranscriptRowHost(
                         row: row,

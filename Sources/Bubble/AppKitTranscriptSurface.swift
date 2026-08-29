@@ -1248,7 +1248,7 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
         // A live wheel sequence owns the main-thread budget. Defer warm-cache
         // work until the gesture settles instead of competing with visible
         // row mounts on every packet.
-        let delay = max(0.01, requestedDelay ?? (isUserScrollActive ? 0.36 : 0.05))
+        let delay = max(0.01, requestedDelay ?? (isUserScrollActive ? 0.36 : 0.017))
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self else { return }
             self.overscanRefillQueued = false
