@@ -3,6 +3,15 @@ import BubbleMounts
 import BubbleSessions
 import SwiftUI
 
+private func requestTranscriptRowMeasurement(_ sourceID: String) {
+    DispatchQueue.main.async {
+        NotificationCenter.default.post(
+            name: .transcriptRowIntrinsicSizeChanged,
+            object: sourceID
+        )
+    }
+}
+
 enum OverlayMetrics {
     static let inputWidth: CGFloat = 520
     static let transcriptWidthDefault: CGFloat = 760
@@ -85,9 +94,11 @@ struct OverlayView: View {
     @State private var transcriptProjectionStore = TranscriptProjectionStore<TranscriptRow>()
     @State private var transcriptRenderRowStore = TranscriptProjectionStore<MainTranscriptRenderRow>()
     @State private var transcriptSurfaceEntryStore = TranscriptProjectionStore<OverlayTranscriptSurfaceEntry>()
-    @State private var transcriptProjectionSessionID: String?
-    @State private var transcriptProjectionRevision: UInt64 = .max
-    @State private var transcriptProjectionStructureKey: OverlayTranscriptStructureKey?
+    @State private var transcriptProjectionSync = TranscriptProjectionSyncState()
+    @State private var workspaceRowsCache = TranscriptProjectionCache<
+        WorkspaceRowsProjectionKey,
+        [WorkspaceTranscriptRow]
+    >()
     private var inputShape: RoundedRectangle {
         RoundedRectangle(cornerRadius: OverlayMetrics.cornerRadius, style: .continuous)
     }
@@ -118,7 +129,7 @@ struct OverlayView: View {
 
     private var isTranscriptPresented: Bool {
         OverlayLayoutPolicy.isTranscriptPresented(
-            itemCount: store.visibleItems.count,
+            itemCount: store.hasTranscriptItems ? 1 : 0,
             isStartingSession: store.isStartingSession,
             sessionTabCount: sessionTabCount
         ) || store.sideStagePresented
@@ -306,9 +317,9 @@ struct OverlayView: View {
         transcriptProjectionStore.reset()
         transcriptRenderRowStore.reset()
         transcriptSurfaceEntryStore.reset()
-        transcriptProjectionSessionID = nil
-        transcriptProjectionRevision = .max
-        transcriptProjectionStructureKey = nil
+        transcriptProjectionSync.sessionID = nil
+        transcriptProjectionSync.revision = .max
+        transcriptProjectionSync.structureKey = nil
         QuoteSelectionMonitor.shared.dismiss()
     }
 
@@ -384,7 +395,7 @@ struct OverlayView: View {
                 Text(stage.name)
                     .font(.system(size: 13, weight: .medium))
                     .lineLimit(1)
-                if let item = store.items.first(where: { $0.id == stage.cardId }),
+                if let item = store.transcriptItem(stage.cardId),
                    let status = item.workspaceStatus {
                     if status == "running" {
                         RunningSweepLabel()
@@ -415,7 +426,14 @@ struct OverlayView: View {
     }
 
     private var workspaceTranscriptList: some View {
-        let rows = workspaceRows(from: store.visibleWorkspacePaneItems)
+        let rows = workspaceRowsCache.value(for: WorkspaceRowsProjectionKey(
+            revision: store.workspacePaneRevision,
+            workspaceRoot: store.workspaceStage?.path,
+            childBusy: store.childBusy,
+            streamingAssistantID: store.workspacePaneStreamingAssistantId
+        )) {
+            workspaceRows(from: store.visibleWorkspacePaneItems)
+        }
         let live = store.childBusy && store.workspaceStage?.path == store.activeWorkspaceBrief?.path
         return ScrollViewReader { proxy in
             ScrollView {
@@ -448,7 +466,9 @@ struct OverlayView: View {
                         .padding(.top, row.isContinuation ? -10 : 0)
                         .id(workspaceRowScrollId(row))
                     }
-                    if live, let started = store.items.first(where: { $0.id == store.workspaceStage?.cardId })?.workspaceStartedAt {
+                    if live,
+                       let cardID = store.workspaceStage?.cardId,
+                       let started = store.transcriptItem(cardID)?.workspaceStartedAt {
                         WorkingRow(startedAt: Date(timeIntervalSince1970: started))
                             .id("ws-workspace-working")
                     }
@@ -679,53 +699,96 @@ struct OverlayView: View {
     private func synchronizeTranscriptProjection() -> TranscriptProjectionUpdateResult {
         let sessionID = transcriptSessionIdentity
         let structureKey = transcriptProjectionStructureKeyValue
-        let needsStructureReplace = transcriptProjectionSessionID != sessionID
-            || transcriptProjectionStructureKey != structureKey
-            || transcriptProjectionStore.isEmpty
+        let needsStructureReplace = transcriptProjectionSync.sessionID != sessionID
+            || transcriptProjectionSync.structureKey != structureKey
         let didStructureReplace = needsStructureReplace
         if needsStructureReplace {
             transcriptProjectionStore.reset()
             transcriptRenderRowStore.reset()
             transcriptSurfaceEntryStore.reset()
-            transcriptProjectionSessionID = sessionID
-            transcriptProjectionStructureKey = structureKey
+            transcriptProjectionSync.sessionID = sessionID
+            transcriptProjectionSync.structureKey = structureKey
             // The structural rebuild already reflects the current source
             // revision. Mark it consumed so the subsequent planner call does
             // not repeat the same full grouping pass with a stale `.rebuild`
             // delta.
-            transcriptProjectionRevision = store.transcriptRevision
+            transcriptProjectionSync.revision = store.transcriptRevision
             rebuildTranscriptProjection()
         }
 
         let revision = store.transcriptRevision
-        var sourceDeltaApplied = true
+        // Composer focus, hover, palette, and other parent-state updates can
+        // reevaluate this body while the transcript itself is unchanged. Do
+        // not re-enter the planner (whose cold correctness path may inspect
+        // the complete seed sequence) unless either structure or revision
+        // actually changed.
+        if !didStructureReplace, transcriptProjectionSync.revision == revision {
+            return TranscriptProjectionUpdateResult(
+                changedRows: [],
+                requiresSurfaceReplace: false
+            )
+        }
+        var sourceUpdates: [ChatItem] = []
         let delta = store.transcriptDelta
-        if !didStructureReplace && transcriptProjectionRevision != revision {
-            sourceDeltaApplied = applyTranscriptDelta(delta)
-            if !sourceDeltaApplied {
+        if !didStructureReplace && transcriptProjectionSync.revision != revision {
+            let consumed = transcriptProjectionSync.revision
+            let skippedRevision = consumed != .max
+                && revision > consumed
+                && revision - consumed > 1
+            if !skippedRevision, let updates = applyTranscriptDelta(delta) {
+                sourceUpdates = updates
+            } else {
+                // Observation may coalesce multiple producer commits into one
+                // body pass. The latest delta cannot describe an earlier
+                // source mutation, so a revision gap is an explicit cold
+                // correctness boundary rather than silently dropping a row.
                 rebuildTranscriptProjection()
             }
-            transcriptProjectionRevision = revision
+            transcriptProjectionSync.revision = revision
         }
 
         var streamingSeedIDs: Set<String> = []
         if store.isBusy, let id = store.streamingAssistantId {
             streamingSeedIDs.insert(id.uuidString)
         }
-        if sourceDeltaApplied,
-           case .update(let item) = delta,
-           let seedIndex = transcriptProjectionStore.index(of: item.id.uuidString),
-           let record = transcriptProjectionStore.record(at: seedIndex),
-           let delta = store.transcriptPlanner.applyStreamingUpdate(
-               seedIndex: seedIndex,
-               seed: record.seed,
-               streaming: streamingSeedIDs.contains(record.seed.id),
-               branchSourceID: store.branchDraft?.sourceItemID.uuidString
-           ),
-           let changedRows = applyTranscriptRenderPlanDelta(delta) {
+        if store.isBusy, let id = store.streamingThoughtId {
+            streamingSeedIDs.insert(id.uuidString)
+        }
+        var plannerDeltas: [TranscriptRenderPlannerDelta] = []
+        var directUpdatesAccepted = !sourceUpdates.isEmpty
+        for item in sourceUpdates {
+            guard let record = transcriptProjectionStore.record(id: item.id.uuidString)
+                    ?? transcriptProjectionStore.record(sourceID: item.id.uuidString),
+                  let seedIndex = transcriptProjectionStore.index(of: record.id),
+                  let plannerDelta = store.transcriptPlanner.applyStreamingUpdate(
+                    seedIndex: seedIndex,
+                    seed: record.seed,
+                    streaming: streamingSeedIDs.contains(record.seed.id),
+                    branchSourceID: store.branchDraft?.sourceItemID.uuidString
+                  ) else {
+                directUpdatesAccepted = false
+                break
+            }
+            plannerDeltas.append(plannerDelta)
+        }
+        var directChangedRows: [MainTranscriptRenderRow] = []
+        if directUpdatesAccepted {
+            for plannerDelta in plannerDeltas {
+                guard let rows = applyTranscriptRenderPlanDelta(plannerDelta) else {
+                    directUpdatesAccepted = false
+                    break
+                }
+                directChangedRows.append(contentsOf: rows)
+            }
+        }
+        if directUpdatesAccepted {
+            let changedRows = directChangedRows
+            let needsSurfaceReplace = changedRows.contains {
+                transcriptSurfaceEntryStore.record(id: $0.id) == nil
+            }
             return TranscriptProjectionUpdateResult(
-                changedRows: changedRows,
-                requiresSurfaceReplace: false
+                changedRows: needsSurfaceReplace ? [] : changedRows,
+                requiresSurfaceReplace: needsSurfaceReplace
             )
         }
 
@@ -734,11 +797,24 @@ struct OverlayView: View {
             branchSourceID: store.branchDraft?.sourceItemID.uuidString,
             streamingSeedIDs: streamingSeedIDs
         )
+        if sourceUpdates.count > 1 {
+            // A failed multi-row direct update may already have advanced one
+            // planner cache entry. Rebuild the authoritative render rows so
+            // no coalesced thought/assistant update can be omitted.
+            rebuildTranscriptRenderRows(planUpdate.plan)
+            return TranscriptProjectionUpdateResult(
+                changedRows: [],
+                requiresSurfaceReplace: true
+            )
+        }
         if planUpdate.isIncremental,
            let changedRows = applyTranscriptRenderPlanUpdate(planUpdate) {
+            let needsSurfaceReplace = changedRows.contains {
+                transcriptSurfaceEntryStore.record(id: $0.id) == nil
+            }
             return TranscriptProjectionUpdateResult(
-                changedRows: changedRows,
-                requiresSurfaceReplace: false
+                changedRows: needsSurfaceReplace ? [] : changedRows,
+                requiresSurfaceReplace: needsSurfaceReplace
             )
         } else {
             rebuildTranscriptRenderRows(planUpdate.plan)
@@ -749,24 +825,33 @@ struct OverlayView: View {
         }
     }
 
-    private func applyTranscriptDelta(_ delta: ChatStoreTranscriptDelta) -> Bool {
+    private func applyTranscriptDelta(_ delta: ChatStoreTranscriptDelta) -> [ChatItem]? {
+        let items: [ChatItem]
         switch delta {
         case .update(let item):
-            guard let existing = transcriptProjectionStore.record(id: item.id.uuidString),
+            items = [item]
+        case .updates(let updates):
+            items = updates
+        case .append, .remove, .rebuild:
+            // New user/tool rows can change collapsed-tool and file-change
+            // grouping, so append/remove deltas deliberately rebuild.
+            return nil
+        }
+        for item in items {
+            let sourceID = item.id.uuidString
+            guard let existing = transcriptProjectionStore.record(id: sourceID)
+                    ?? transcriptProjectionStore.record(sourceID: sourceID),
                   let source = updatedTranscriptRow(existing.source, with: item) else {
-                return false
+                return nil
             }
             let work = transcriptProjectionStore.apply(.update(record: TranscriptProjectionRecord(
                 id: existing.id,
                 seed: transcriptRenderSeed(for: source),
                 source: source
             )))
-            return work.mode == .incremental
-        case .append, .remove, .rebuild:
-            // New user/tool rows can change collapsed-tool and file-change
-            // grouping, so append/remove deltas deliberately rebuild.
-            return false
+            guard work.mode == .incremental else { return nil }
         }
+        return items
     }
 
     private func rebuildTranscriptProjection() {
@@ -840,8 +925,11 @@ struct OverlayView: View {
         _ delta: TranscriptRenderPlannerDelta
     ) -> [MainTranscriptRenderRow]? {
         let oldRange = delta.previousUnitRange
-        guard oldRange.upperBound == transcriptRenderRowStore.count,
-              delta.changedUnits.count >= oldRange.count else { return nil }
+        guard oldRange.lowerBound >= 0,
+              oldRange.upperBound <= transcriptRenderRowStore.count,
+              delta.changedUnits.count >= oldRange.count,
+              oldRange.upperBound == transcriptRenderRowStore.count
+                || delta.changedUnits.count == oldRange.count else { return nil }
         var changedRows: [MainTranscriptRenderRow] = []
         changedRows.reserveCapacity(delta.changedUnits.count)
         for (offset, unit) in delta.changedUnits.enumerated() {
@@ -882,6 +970,21 @@ struct OverlayView: View {
         case .message(let item) where item.kind == .user:
             kind = .user
             text = item.text
+        case .message(let item) where item.kind == .thought:
+            // Thought/COT rows stream through the same single-row delta seam.
+            // Keeping their text in the seed lets the planner update the live
+            // row instead of falling back to a full surface replacement for
+            // every thought token.
+            kind = .thought
+            text = item.text
+        case .tool(let item):
+            // Tool rows have a presentation id (`tool-<item id>`) that is
+            // different from their ChatStore source id. A compact visible-
+            // content fingerprint lets source-indexed updates stay on the
+            // same single-row planner path without copying full output into
+            // the render seed.
+            kind = .other
+            text = transcriptToolSeedFingerprint(item)
         default:
             kind = .other
             text = ""
@@ -894,8 +997,24 @@ struct OverlayView: View {
             hasMedia: {
                 if case .message(let item) = row { return !(item.imageNames ?? []).isEmpty }
                 return false
+            }(),
+            contentVersion: row.sourceItemIDs.compactMap(UUID.init(uuidString:))
+                .map(store.transcriptItemVersion).max() ?? 0,
+            appendedText: row.sourceItemIDs.compactMap(UUID.init(uuidString:))
+                .compactMap(store.transcriptItemAppend).last,
+            isChunkable: {
+                if case .message(let item) = row {
+                    return item.kind == .assistant || item.kind == .thought
+                }
+                return false
             }()
         )
+    }
+
+    private func transcriptToolSeedFingerprint(_ item: ChatItem) -> String {
+        // Actual tool content lives on the source row. The planner only needs
+        // a stable non-growing payload; `contentVersion` carries mutations.
+        "tool"
     }
 
     private func transcriptRenderSeed(for row: MainTranscriptRenderRow) -> TranscriptRenderSeed {
@@ -1229,16 +1348,26 @@ struct OverlayView: View {
     private func appKitTranscriptEntry(
         _ row: MainTranscriptRenderRow
     ) -> OverlayTranscriptSurfaceEntry {
-        let key = mainRowRenderKey(row)
-        let fingerprint = String(describing: key)
+        let mutableLiveRow = row.isStreaming || !appKitTranscriptRowIsCompleted(row)
+        // A live code block, thought, or tool output can be hundreds of KB.
+        // Its producer revision is already the invalidation authority, so do
+        // not stringify and hash the complete growing RowRenderKey per token.
+        // Completed rows still receive their stable content-derived identity.
+        let fingerprint = mutableLiveRow
+            ? "\(row.id)-live-r\(store.transcriptRevision)-branch\(row.isAfterBranchPoint)-start\(row.startsAfterBranchPoint)"
+            : "\(String(describing: mainRowRenderKey(row)))-branch\(row.isAfterBranchPoint)-start\(row.startsAfterBranchPoint)"
+        let estimatedHeight = mutableLiveRow
+            ? transcriptSurfaceEntryStore.record(id: row.id)?.source.snapshot.estimatedHeight
+                ?? appKitTranscriptEstimatedHeight(row.text)
+            : appKitTranscriptEstimatedHeight(row.text)
         return OverlayTranscriptSurfaceEntry(
             snapshot: appKitTranscriptSnapshot(
                 id: row.id,
                 kind: appKitTranscriptRowKind(row),
                 text: row.text,
-                estimatedHeight: appKitTranscriptEstimatedHeight(row.text),
+                estimatedHeight: estimatedHeight,
                 fingerprint: fingerprint,
-                isCompleted: row.isTerminal && !row.isStreaming,
+                isCompleted: appKitTranscriptRowIsCompleted(row),
                 historyTickID: row.historyTickID
             ),
             render: { [self] in
@@ -1352,7 +1481,7 @@ struct OverlayView: View {
                     kind: .system,
                     text: "Working",
                     estimatedHeight: 30,
-                    fingerprint: "working-v1",
+                    fingerprint: "working-\(startedAt.timeIntervalSince1970)",
                     isCompleted: false
                 ),
                 render: { AnyView(WorkingRow(startedAt: startedAt)) }
@@ -1475,6 +1604,16 @@ struct OverlayView: View {
         case .fileChanges:
             return .system
         }
+    }
+
+    private func appKitTranscriptRowIsCompleted(_ row: MainTranscriptRenderRow) -> Bool {
+        if case .tool(let item) = row.source {
+            return ["completed", "failed", "cancelled"].contains(item.toolStatus ?? "")
+        }
+        if case .message(let item) = row.source, item.kind == .tool {
+            return ["completed", "failed", "cancelled"].contains(item.toolStatus ?? "")
+        }
+        return row.isTerminal && !row.isStreaming
     }
 
     private func appKitTranscriptEstimatedHeight(_ text: String) -> CGFloat {
@@ -2263,11 +2402,11 @@ struct OverlayView: View {
         // every chunk key would invalidate all stable prefix rows per token.
         source.text = TranscriptChunkRenderPolicy.sourceText(
             source.text,
-            isChunked: row.isAssistantChunk
+            isChunked: row.isTextChunk
         )
         source.live = TranscriptChunkRenderPolicy.sourceIsLive(
             sourceIsLive: source.live,
-            isChunked: row.isAssistantChunk,
+            isChunked: row.isTextChunk,
             isStreaming: row.isStreaming,
             isTerminal: row.isTerminal
         )
@@ -2370,6 +2509,13 @@ struct OverlayView: View {
                 text: row.text,
                 copyText: row.copyText,
                 live: row.isStreaming && row.isTerminal
+            )
+        } else if row.isThoughtChunk, case .message(let item) = row.source {
+            ThoughtChunkBlockHost(
+                itemID: item.id,
+                text: row.text,
+                isContinuation: row.isContinuation,
+                live: row.isStreaming
             )
         } else {
             transcriptRow(row.source)
@@ -2895,7 +3041,7 @@ struct OverlayView: View {
     ) -> some View {
         LazyVStack(alignment: .leading, spacing: 8) {
             ForEach(summary.groups) { group in
-                FileChangeFolderBlock(group: group, plus: plus, minus: minus) { file in
+                FileChangeFolderBlock(rowID: summary.id, group: group, plus: plus, minus: minus) { file in
                     openChangedFile(file, workspaceRoot: summary.workspaceRoot)
                 }
             }
@@ -3018,6 +3164,96 @@ private struct ThoughtBlockHost: View {
         var transaction = Transaction()
         transaction.disablesAnimations = !TranscriptRowInteractionPolicy.animatesTranscriptLayout
         withTransaction(transaction, mutation)
+        requestTranscriptRowMeasurement(item.id.uuidString)
+    }
+}
+
+@MainActor
+private final class ThoughtDisclosureState: ObservableObject {
+    @Published var expanded = false
+}
+
+@MainActor
+private enum ThoughtDisclosureRegistry {
+    private static var states: [UUID: ThoughtDisclosureState] = [:]
+    private static var order: [UUID] = []
+    private static let limit = TranscriptVirtualizationLimits.retainedItems
+
+    static func state(for id: UUID) -> ThoughtDisclosureState {
+        if let state = states[id] {
+            order.removeAll { $0 == id }
+            order.append(id)
+            return state
+        }
+        let state = ThoughtDisclosureState()
+        states[id] = state
+        order.append(id)
+        while order.count > limit {
+            states[order.removeFirst()] = nil
+        }
+        return state
+    }
+}
+
+/// Virtualized counterpart of `ThoughtBlockHost`. Every paragraph chunk is a
+/// separate AppKit-hosted row, while a shared disclosure model keeps the
+/// header and continuation rows behaving as one logical COT block.
+private struct ThoughtChunkBlockHost: View {
+    let itemID: UUID
+    let text: String
+    let isContinuation: Bool
+    let live: Bool
+    @StateObject private var disclosure: ThoughtDisclosureState
+
+    init(itemID: UUID, text: String, isContinuation: Bool, live: Bool) {
+        self.itemID = itemID
+        self.text = text
+        self.isContinuation = isContinuation
+        self.live = live
+        _disclosure = StateObject(wrappedValue: ThoughtDisclosureRegistry.state(for: itemID))
+    }
+
+    var body: some View {
+        let open = TranscriptRowInteractionPolicy.isOpen(
+            isLive: live,
+            isExpanded: disclosure.expanded
+        )
+        VStack(alignment: .leading, spacing: 6) {
+            if !isContinuation {
+                Button {
+                    guard TranscriptRowInteractionPolicy.canToggle(isLive: live) else { return }
+                    var transaction = Transaction()
+                    transaction.disablesAnimations = !TranscriptRowInteractionPolicy.animatesTranscriptLayout
+                    withTransaction(transaction) { disclosure.expanded.toggle() }
+                    requestTranscriptRowMeasurement(itemID.uuidString)
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: open ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 9, weight: .bold))
+                            .frame(width: 8)
+                        Image(systemName: "quote.opening")
+                            .font(.system(size: 10, weight: .semibold))
+                        Text(live ? "Thinking" : "Thoughts")
+                        Spacer(minLength: 0)
+                    }
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.tertiary)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            if open {
+                HStack(alignment: .top, spacing: 10) {
+                    Capsule()
+                        .fill(Color.primary.opacity(0.16))
+                        .frame(width: 2)
+                    ThoughtTextView(text: text, live: live)
+                }
+                .padding(.leading, 14)
+            }
+        }
+        .padding(.vertical, isContinuation ? 0 : 2)
+        .opacity(0.92)
     }
 }
 
@@ -3115,6 +3351,7 @@ private struct ToolRowHost: View {
         var transaction = Transaction()
         transaction.disablesAnimations = !TranscriptRowInteractionPolicy.animatesTranscriptLayout
         withTransaction(transaction, mutation)
+        requestTranscriptRowMeasurement("tool-\(item.id.uuidString)")
     }
 }
 
@@ -3194,6 +3431,7 @@ private struct CollapsedToolsHost: View {
         var transaction = Transaction()
         transaction.disablesAnimations = !TranscriptRowInteractionPolicy.animatesTranscriptLayout
         withTransaction(transaction, mutation)
+        requestTranscriptRowMeasurement(id)
     }
 }
 
@@ -3269,6 +3507,7 @@ private struct FileChangeCardExpansionHost<Content: View>: View {
                 userInfo: ["expanded": expanded]
             )
         }
+        requestTranscriptRowMeasurement(id)
         if ProcessInfo.processInfo.environment["BUBBLE_FILE_CHANGE_DIAGNOSTICS"] == "1" {
             let marker = expanded ? CGFloat(1) : CGFloat(0)
             OverlayPulse.shared.onNextFrame {
@@ -3370,6 +3609,7 @@ private struct FileChangeTreeReveal<Content: View>: View {
 }
 
 private struct FileChangeFolderBlock: View {
+    let rowID: String
     let group: FileChangeGroup
     let plus: Color
     let minus: Color
@@ -3391,6 +3631,7 @@ private struct FileChangeFolderBlock: View {
                         transaction.disablesAnimations = true
                         withTransaction(transaction, mutation)
                     }
+                    requestTranscriptRowMeasurement(rowID)
                 } label: {
                     HStack(spacing: 6) {
                         Image(systemName: open ? "chevron.down" : "chevron.right")
@@ -4034,6 +4275,10 @@ private struct MainTranscriptRenderRow: Identifiable {
     var isAssistantChunk: Bool {
         unit.kind == .assistant && unit.isChunked
     }
+    var isThoughtChunk: Bool {
+        unit.kind == .thought && unit.isChunked
+    }
+    var isTextChunk: Bool { isAssistantChunk || isThoughtChunk }
 }
 
 private struct OverlayTranscriptStructureKey: Equatable {
@@ -4058,6 +4303,22 @@ private struct OverlayTranscriptStructureKey: Equatable {
     let queuedLastText: String?
 }
 
+/// Reference-backed consumption cursor. Mutating it while producing the
+/// representable snapshot must not publish a second SwiftUI body invalidation
+/// for the same transcript revision.
+private final class TranscriptProjectionSyncState {
+    var sessionID: String?
+    var revision: UInt64 = .max
+    var structureKey: OverlayTranscriptStructureKey?
+}
+
+private struct WorkspaceRowsProjectionKey: Equatable {
+    let revision: UInt64
+    let workspaceRoot: String?
+    let childBusy: Bool
+    let streamingAssistantID: UUID?
+}
+
 private struct OverlayHistoryTicksKey: Equatable {
     let projection: OverlayTranscriptStructureKey
     let treeLeafID: String?
@@ -4077,8 +4338,8 @@ private final class OverlayTranscriptRenderBox {
     var onMeasuredHeight: ((_ rowID: String, _ height: CGFloat) -> Void)?
     var shouldMeasure: (() -> Bool)?
 
-    func update(entries: [OverlayTranscriptSurfaceEntry], signal: UInt64) {
-        guard lastEntriesSignal != signal else { return }
+    func update(entries: [OverlayTranscriptSurfaceEntry], signal: UInt64, force: Bool = false) {
+        guard force || lastEntriesSignal != signal else { return }
         renderers = Dictionary(uniqueKeysWithValues: entries.map { ($0.snapshot.id, $0.render) })
         lastEntriesSignal = signal
     }
@@ -4102,6 +4363,8 @@ private final class OverlayTranscriptRowHost: AppKitTranscriptRowHost {
     private let shouldMeasure: () -> Bool
     private var lastMeasuredHeight: CGFloat = -.greatestFiniteMagnitude
     private var lastMeasuredWidth: CGFloat = -.greatestFiniteMagnitude
+    private var measurementDirty = true
+    private var measurementObserver: NSObjectProtocol?
 
     init(
         row: TranscriptRowSnapshot,
@@ -4124,6 +4387,23 @@ private final class OverlayTranscriptRowHost: AppKitTranscriptRowHost {
         hostingView.translatesAutoresizingMaskIntoConstraints = true
         hostingView.appearance = NSApp.effectiveAppearance
         addSubview(hostingView)
+        measurementObserver = NotificationCenter.default.addObserver(
+            forName: .transcriptRowIntrinsicSizeChanged,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let self, let sourceID = notification.object as? String else { return }
+            let currentID = self.row.id
+            guard currentID == sourceID || currentID.hasPrefix("\(sourceID)-chunk-") else { return }
+            self.measurementDirty = true
+            self.needsLayout = true
+        }
+    }
+
+    deinit {
+        if let measurementObserver {
+            NotificationCenter.default.removeObserver(measurementObserver)
+        }
     }
 
     override func configure(row: TranscriptRowSnapshot, key: AppKitTranscriptRowReuseKey) {
@@ -4133,6 +4413,7 @@ private final class OverlayTranscriptRowHost: AppKitTranscriptRowHost {
         hostingView.appearance = NSApp.effectiveAppearance
         lastMeasuredHeight = -.greatestFiniteMagnitude
         lastMeasuredWidth = -.greatestFiniteMagnitude
+        measurementDirty = true
         invalidateIntrinsicContentSize()
         needsLayout = true
     }
@@ -4145,6 +4426,7 @@ private final class OverlayTranscriptRowHost: AppKitTranscriptRowHost {
         hostingView.rootView = AnyView(EmptyView())
         lastMeasuredHeight = -.greatestFiniteMagnitude
         lastMeasuredWidth = -.greatestFiniteMagnitude
+        measurementDirty = true
     }
 
     override func layout() {
@@ -4152,12 +4434,12 @@ private final class OverlayTranscriptRowHost: AppKitTranscriptRowHost {
         hostingView.frame = bounds
         guard shouldMeasure() else { return }
         guard bounds.width.isFinite, bounds.width > 0,
-              lastMeasuredHeight == -.greatestFiniteMagnitude
-                || abs(bounds.width - lastMeasuredWidth) > 0.5 else { return }
+              measurementDirty || abs(bounds.width - lastMeasuredWidth) > 0.5 else { return }
         hostingView.layoutSubtreeIfNeeded()
         let fittingHeight = hostingView.fittingSize.height
         guard fittingHeight.isFinite, fittingHeight > 0 else { return }
         lastMeasuredWidth = bounds.width
+        measurementDirty = false
         let measuredHeight = max(1, fittingHeight)
         guard abs(measuredHeight - lastMeasuredHeight) > 0.5 else { return }
         lastMeasuredHeight = measuredHeight
@@ -4196,6 +4478,7 @@ private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
         private var userScrollSequenceHandler: (() -> Void)?
         private var directMountAuditStarted = false
         private var directMountAuditTimer: Timer?
+        private var lastLeadingInset: CGFloat?
         var lastCommandToken: UInt64 = 0
         var lastSurfaceSignal: UInt64?
 
@@ -4321,7 +4604,7 @@ private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
             onCommandCompleted: @escaping (_ operation: AppKitTranscriptSurfaceOperation, _ atEnd: Bool) -> Void
         ) {
             if replaceSurface {
-                renderBox.update(entries: entries, signal: surfaceSignal)
+                renderBox.update(entries: entries, signal: surfaceSignal, force: true)
             } else {
                 for entry in rowUpdates {
                     renderBox.update(entry: entry)
@@ -4340,6 +4623,10 @@ private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
                         .foregroundStyle(OverlaySurface.conversationInk)
                 )
             }
+            if let lastLeadingInset, abs(lastLeadingInset - leadingInset) > 0.5 {
+                adapter.invalidateMountedRowsForLayoutChange()
+            }
+            lastLeadingInset = leadingInset
             configureCallbacks(
                 onOpenFilePreview: onOpenFilePreview,
                 onViewportChanged: onViewportChanged,
@@ -4378,6 +4665,8 @@ private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
                 startDirectMountAuditIfNeeded()
             } else if !replaceSurface {
                 var nextRevision = current.revision
+                var updates: [(row: TranscriptRowSnapshot, session: TranscriptSessionHandle)] = []
+                updates.reserveCapacity(rowUpdates.count)
                 for entry in rowUpdates {
                     nextRevision = max(
                         nextRevision == UInt64.max ? nextRevision : nextRevision + 1,
@@ -4388,9 +4677,14 @@ private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
                         generation: snapshot.session.generation,
                         revision: nextRevision
                     )
+                    updates.append((entry.snapshot, handle))
+                }
+                if updates.count > 1 {
+                    _ = adapter.applyStreamingRowUpdates(updates)
+                } else if let update = updates.first {
                     _ = adapter.apply(.update(
-                        row: entry.snapshot,
-                        session: handle,
+                        row: update.row,
+                        session: update.session,
                         preserving: adapter.currentVisibleAnchor()
                     ))
                 }

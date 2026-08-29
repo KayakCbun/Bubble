@@ -34,6 +34,37 @@ enum WorkspaceTranscriptChunker {
         return chunks
     }
 
+    /// Re-chunk only the mutable final paragraph group. Completed chunks are
+    /// retained byte-for-byte, so token delivery is bounded by the live tail
+    /// instead of the total assistant/thought length.
+    static func appending(
+        _ appendedText: String,
+        to existingChunks: [String],
+        target: Int = targetBytes
+    ) -> [String] {
+        guard let liveTail = existingChunks.last else {
+            return buildChunks(appendedText, target: target)
+        }
+        var result = Array(existingChunks.dropLast())
+        result.append(contentsOf: buildChunks(liveTail + appendedText, target: target))
+        return result
+    }
+
+    static func replacementTailChunks(
+        liveTail: String,
+        appendedText: String,
+        target: Int = targetBytes
+    ) -> [String] {
+        buildChunks(liveTail + appendedText, target: target)
+    }
+
+    /// Document-scoped constructs can retroactively change the meaning of
+    /// earlier paragraphs. Those rare transitions deliberately take the cold
+    /// correctness path instead of splicing an invalid Markdown document.
+    static func canIncrementallyAppend(_ text: String) -> Bool {
+        isParagraphLocal(text)
+    }
+
     static func visibleEdges(_ text: String, identity: String) -> [String] {
         let chunks = chunks(text, identity: identity)
         guard chunks.count > 1 else { return chunks }

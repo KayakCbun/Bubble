@@ -92,6 +92,10 @@ final class TranscriptProjectionStore<Source> {
 
     private var segments: [Segment] = []
     private var positions: [String: Position] = [:]
+    /// Grouped transcript rows (for example `tool-<item id>`) do not always
+    /// share the ChatStore item's identity. This reverse index lets a source
+    /// delta still find its owning render row without scanning history.
+    private var recordIDBySourceID: [String: String] = [:]
     /// The flat seed buffer is only exposed read-only to the planner.  Since
     /// the store is its sole owner, assigning one streamed seed is O(1) and
     /// does not trigger Array COW.  Structural replacements recreate it.
@@ -134,6 +138,11 @@ final class TranscriptProjectionStore<Source> {
     func record(id: String) -> TranscriptProjectionRecord<Source>? {
         guard let location = positions[id] else { return nil }
         return segments[location.segment].records[location.offset]
+    }
+
+    func record(sourceID: String) -> TranscriptProjectionRecord<Source>? {
+        guard let recordID = recordIDBySourceID[sourceID] else { return nil }
+        return record(id: recordID)
     }
 
     func index(of id: String) -> Int? {
@@ -196,6 +205,7 @@ final class TranscriptProjectionStore<Source> {
     func reset() {
         segments.removeAll(keepingCapacity: true)
         positions.removeAll(keepingCapacity: true)
+        recordIDBySourceID.removeAll(keepingCapacity: true)
         seedBuffer.removeAll(keepingCapacity: true)
         userTickBuffer.removeAll(keepingCapacity: true)
         generation &+= 1
@@ -210,6 +220,7 @@ final class TranscriptProjectionStore<Source> {
         }
         segments.removeAll(keepingCapacity: true)
         positions.removeAll(keepingCapacity: true)
+        recordIDBySourceID.removeAll(keepingCapacity: true)
         seedBuffer.removeAll(keepingCapacity: true)
         userTickBuffer.removeAll(keepingCapacity: true)
         seedBuffer.reserveCapacity(records.count)
@@ -230,6 +241,9 @@ final class TranscriptProjectionStore<Source> {
                 offset: segment.records.count,
                 index: seedBuffer.count
             )
+            for sourceID in record.seed.sourceIDs {
+                recordIDBySourceID[sourceID] = record.id
+            }
             segment.records.append(record)
             seedBuffer.append(record.seed)
             let previousUser = userTickBuffer.last ?? nil
@@ -271,6 +285,9 @@ final class TranscriptProjectionStore<Source> {
                 offset: offset,
                 index: seedBuffer.count
             )
+            for sourceID in record.seed.sourceIDs {
+                recordIDBySourceID[sourceID] = record.id
+            }
             seedBuffer.append(record.seed)
             let previousUser = userTickBuffer.last ?? nil
             userTickBuffer.append(record.seed.kind == .user ? record.id : previousUser)

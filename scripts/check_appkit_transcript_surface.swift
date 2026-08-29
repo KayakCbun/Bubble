@@ -325,6 +325,32 @@ private enum AppKitTranscriptSurfaceCheck {
                 || (adapter.hostConfigureCount(rowID: stableID) ?? 0) > beforeLayoutConfigure,
             "layout-only row change refreshes the mounted host"
         )
+        if let existing = adapter.snapshot.row(id: stableID) {
+            let layoutOnlyUpdate = TranscriptRowSnapshot(
+                id: existing.id,
+                contentVersion: existing.contentVersion,
+                contentHash: existing.contentHash,
+                estimatedHeight: existing.estimatedHeight + 2,
+                isCompleted: existing.isCompleted,
+                kind: existing.kind,
+                text: existing.text,
+                historyTickID: existing.historyTickID,
+                typography: existing.typography,
+                geometry: TranscriptLocalGeometryState(
+                    isExpanded: !existing.geometry.isExpanded,
+                    accessorySignature: existing.geometry.accessorySignature
+                ),
+                layoutVersion: existing.layoutVersion + 1
+            )
+            _ = adapter.apply(.update(
+                row: layoutOnlyUpdate,
+                session: adapter.currentHandle.nextRevision()
+            ))
+            expect(
+                adapter.snapshot.row(id: stableID)?.layoutIdentity == layoutOnlyUpdate.layoutIdentity,
+                "direct row update persists layout-only changes"
+            )
+        }
 
         // Line-based mouse wheels bypass AppKit's delayed smoothing and move
         // the production viewport in the same event. Trackpads still carry

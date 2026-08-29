@@ -15,6 +15,9 @@ extension Notification.Name {
     static let fileChangeExpansionChanged = Notification.Name(
         "BubbleFileChangeExpansionChanged"
     )
+    static let transcriptRowIntrinsicSizeChanged = Notification.Name(
+        "BubbleTranscriptRowIntrinsicSizeChanged"
+    )
 }
 
 enum OverlayMotion {

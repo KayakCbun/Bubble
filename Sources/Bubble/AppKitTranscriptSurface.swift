@@ -9,6 +9,7 @@ struct AppKitTranscriptRowReuseKey: Equatable, Hashable {
     let kind: TranscriptRowKind
     let id: String
     let contentVersion: UInt64
+    let isCompleted: Bool
     /// Anchor ownership is part of the mounted row's semantic output. A
     /// branch/replay may keep prose content stable while moving a continuation
     /// under a different user turn; reusing that host would leave a stale
@@ -20,12 +21,14 @@ struct AppKitTranscriptRowReuseKey: Equatable, Hashable {
         kind: TranscriptRowKind,
         id: String,
         contentVersion: UInt64,
+        isCompleted: Bool = true,
         historyTickID: String? = nil,
         layoutIdentity: TranscriptRowLayoutIdentity = .default
     ) {
         self.kind = kind
         self.id = id
         self.contentVersion = contentVersion
+        self.isCompleted = isCompleted
         self.historyTickID = historyTickID
         self.layoutIdentity = layoutIdentity
     }
@@ -35,6 +38,7 @@ struct AppKitTranscriptRowReuseKey: Equatable, Hashable {
             kind: row.kind,
             id: row.id,
             contentVersion: row.contentVersion,
+            isCompleted: row.isCompleted,
             historyTickID: row.historyTickID,
             layoutIdentity: row.layoutIdentity
         )
@@ -398,6 +402,7 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
     private var lastViewportReportUptime: TimeInterval = -.greatestFiniteMagnitude
     private var lastUserScrollUptime: TimeInterval = -.greatestFiniteMagnitude
     private var settledMeasurementWorkItem: DispatchWorkItem?
+    private var settledMeasurementGeneration: UInt64 = 0
     private var overscanRefillQueued = false
     private(set) var metrics = AppKitTranscriptSurfaceMetrics()
 
@@ -648,6 +653,17 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
         let events = state.apply(command)
         guard accepted(events) else { return events }
 
+        if case .replace = command.kind,
+           (oldSnapshot.session.sessionID != state.snapshot.session.sessionID
+                || oldSnapshot.session.generation != state.snapshot.session.generation) {
+            for (id, cell) in Array(mounted) {
+                unmount(id: id, cell: cell)
+            }
+            for host in reusableHostsByKey.values { host.prepareForReuse() }
+            reusableHostsByKey.removeAll(keepingCapacity: true)
+            reusableHostLRU.removeAll(keepingCapacity: true)
+        }
+
         if requestsFollowLatest(command.kind) {
             userDetachedFromLatest = false
         }
@@ -710,6 +726,8 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
 
         let contentChanged = oldRow.contentIdentity != row.contentIdentity
         let layoutChanged = oldRow.layoutIdentity != row.layoutIdentity
+            || oldRow.historyTickID != row.historyTickID
+            || oldRow.estimatedHeight != row.estimatedHeight
         let nextKey = AppKitTranscriptRowReuseKey(row: row)
         var mountedHostCount = 0
         if let cell = mounted[row.id] {
@@ -749,6 +767,70 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
             restore(anchor)
         }
         return events
+    }
+
+    /// Coalesces the normal same-frame thought + answer mutation into one
+    /// AppKit layout/follow pass. State revisions still advance in order, but
+    /// the mounted viewport is reflowed only after all point updates land.
+    @discardableResult
+    func applyStreamingRowUpdates(
+        _ updates: [(row: TranscriptRowSnapshot, session: TranscriptSessionHandle)]
+    ) -> [[TranscriptSurfaceEvent]] {
+        guard updates.count > 1 else {
+            return updates.map {
+                apply(.update(row: $0.row, session: $0.session, preserving: currentVisibleAnchor()))
+            }
+        }
+        let anchor = currentVisibleAnchor()
+        var allEvents: [[TranscriptSurfaceEvent]] = []
+        var needsDocumentFrame = false
+        var needsRelayout = false
+        for update in updates {
+            guard let index = rowIndexByID[update.row.id],
+                  let oldRow = state.row(at: index) else {
+                allEvents.append([])
+                continue
+            }
+            let command = TranscriptSurfaceCommand.update(
+                row: update.row,
+                session: update.session,
+                preserving: anchor
+            )
+            let events = state.apply(command)
+            allEvents.append(events)
+            guard accepted(events) else { continue }
+
+            followsLatest = userDetachedFromLatest ? false : state.snapshot.followsLatest
+            let contentChanged = oldRow.contentIdentity != update.row.contentIdentity
+            let layoutChanged = oldRow.layoutIdentity != update.row.layoutIdentity
+                || oldRow.historyTickID != update.row.historyTickID
+                || oldRow.estimatedHeight != update.row.estimatedHeight
+            let nextKey = AppKitTranscriptRowReuseKey(row: update.row)
+            var mountedHostCount = 0
+            if let cell = mounted[update.row.id],
+               cell.key != nextKey || contentChanged || layoutChanged {
+                cell.host.configure(row: update.row, key: nextKey)
+                cell.key = nextKey
+                mountedHostCount = 1
+            }
+            if contentChanged || layoutChanged {
+                let height = cachedHeightOrEstimate(update.row)
+                if heightIndex.update(index: index, height: height) != 0 {
+                    metrics.recordHeightIndexPointUpdate()
+                    needsDocumentFrame = true
+                }
+            }
+            metrics.recordRowUpdate(inspectedRows: 1, mountedHosts: mountedHostCount)
+            needsRelayout = needsRelayout || mountedHostCount > 0 || needsDocumentFrame
+        }
+        if needsDocumentFrame { updateDocumentFrame() }
+        if needsRelayout { relayoutNow() }
+        if followsLatest {
+            scrollToEnd()
+        } else if let anchor {
+            restore(anchor)
+        }
+        return allEvents
     }
 
     @discardableResult
@@ -843,6 +925,8 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
 
     private func scheduleSettledMeasurements() {
         settledMeasurementWorkItem?.cancel()
+        settledMeasurementGeneration &+= 1
+        let generation = settledMeasurementGeneration
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
             self.settledMeasurementWorkItem = nil
@@ -850,14 +934,30 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
                 self.scheduleSettledMeasurements()
                 return
             }
-            for cell in self.mounted.values {
-                cell.host.needsLayout = true
-            }
-            self.document.needsLayout = true
-            self.document.layoutSubtreeIfNeeded()
+            self.measureSettledRows(
+                Array(self.mounted.keys),
+                generation: generation
+            )
         }
         settledMeasurementWorkItem = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.36, execute: work)
+    }
+
+    private func measureSettledRows(_ rowIDs: [String], generation: UInt64) {
+        guard generation == settledMeasurementGeneration,
+              !isUserScrollActive,
+              !rowIDs.isEmpty else { return }
+        let batch = rowIDs.prefix(4)
+        for rowID in batch {
+            mounted[rowID]?.host.needsLayout = true
+        }
+        document.needsLayout = true
+        document.layoutSubtreeIfNeeded()
+        let remaining = Array(rowIDs.dropFirst(batch.count))
+        guard !remaining.isEmpty else { return }
+        DispatchQueue.main.async { [weak self] in
+            self?.measureSettledRows(remaining, generation: generation)
+        }
     }
 
     func invalidate(rowIDs: [String]) {
@@ -875,6 +975,17 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
         }
         // Local invalidation is deliberately one layout pass.  It never
         // changes the session snapshot or starts a transcript-wide animation.
+        relayoutNow()
+    }
+
+    func invalidateMountedRowsForLayoutChange() {
+        guard !mounted.isEmpty else { return }
+        for (rowID, cell) in mounted {
+            guard let index = rowIndexByID[rowID], snapshot.rows.indices.contains(index) else { continue }
+            let row = snapshot.rows[index]
+            heightCache.removeValue(for: layoutCacheKey(for: row))
+            cell.host.configure(row: row, key: cell.key)
+        }
         relayoutNow()
     }
 

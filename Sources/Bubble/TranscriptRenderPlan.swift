@@ -25,6 +25,7 @@ struct TranscriptRenderSeed: Equatable, Sendable {
     enum Kind: Equatable, Sendable {
         case user
         case assistant
+        case thought
         case other
     }
 
@@ -33,13 +34,33 @@ struct TranscriptRenderSeed: Equatable, Sendable {
     var text: String
     var sourceIDs: Set<String>
     var hasMedia: Bool
+    /// Producer-owned O(1) mutation token. Direct streaming updates compare
+    /// this instead of rescanning an ever-growing String for equality.
+    var contentVersion: UInt64
+    /// Exact newly appended stream fragment when the producer can prove the
+    /// mutation was append-only. It lets the chunker revisit only the live
+    /// tail instead of reparsing completed paragraphs.
+    var appendedText: String?
+    var isChunkable: Bool
 
-    init(id: String, kind: Kind, text: String, sourceIDs: Set<String> = [], hasMedia: Bool = false) {
+    init(
+        id: String,
+        kind: Kind,
+        text: String,
+        sourceIDs: Set<String> = [],
+        hasMedia: Bool = false,
+        contentVersion: UInt64 = 0,
+        appendedText: String? = nil,
+        isChunkable: Bool? = nil
+    ) {
         self.id = id
         self.kind = kind
         self.text = text
         self.sourceIDs = sourceIDs
         self.hasMedia = hasMedia
+        self.contentVersion = contentVersion
+        self.appendedText = appendedText
+        self.isChunkable = isChunkable ?? (kind == .assistant && !hasMedia)
     }
 }
 
@@ -133,17 +154,43 @@ struct TranscriptRenderPlan: Equatable, Sendable {
         // Paragraph-local assistant prose is safe to split while it streams.
         // Existing chunk identities stay put as the tail grows, so SwiftUI only
         // has to remeasure the live tail instead of one ever-growing row.
-        let chunks = seed.kind == .assistant && !seed.hasMedia
+        let chunks = seed.isChunkable && !seed.hasMedia
             ? WorkspaceTranscriptChunker.chunks(seed.text, identity: seed.id)
             : [seed.text]
+        return templates(seed: seed, chunks: chunks, streaming: streaming)
+    }
+
+    fileprivate static func templates(
+        seed: TranscriptRenderSeed,
+        appending appendedText: String,
+        to existing: [TranscriptRenderTemplate],
+        streaming: Bool
+    ) -> [TranscriptRenderTemplate] {
+        guard seed.isChunkable, !seed.hasMedia, !existing.isEmpty else {
+            return templates(for: seed, streaming: streaming)
+        }
+        let chunks = WorkspaceTranscriptChunker.appending(
+            appendedText,
+            to: existing.map(\.text)
+        )
+        return templates(seed: seed, chunks: chunks, streaming: streaming)
+    }
+
+    fileprivate static func templates(
+        seed: TranscriptRenderSeed,
+        chunks: [String],
+        streaming: Bool,
+        startingAt startIndex: Int = 0
+    ) -> [TranscriptRenderTemplate] {
         return chunks.enumerated().map { chunkIndex, text in
+            let globalIndex = startIndex + chunkIndex
             let isLast = chunkIndex == chunks.count - 1
             return TranscriptRenderTemplate(
-                id: chunkIndex == 0 ? seed.id : "\(seed.id)-chunk-\(chunkIndex)",
+                id: globalIndex == 0 ? seed.id : "\(seed.id)-chunk-\(globalIndex)",
                 text: text,
-                copyText: chunks.count > 1 && isLast && !streaming ? seed.text : nil,
-                isContinuation: chunkIndex > 0,
-                isChunked: chunks.count > 1,
+                copyText: (startIndex + chunks.count) > 1 && isLast && !streaming ? seed.text : nil,
+                isContinuation: globalIndex > 0,
+                isChunked: (startIndex + chunks.count) > 1,
                 isTerminal: isLast,
                 isStreaming: streaming
             )
@@ -219,11 +266,23 @@ struct TranscriptRenderPlannerDelta: Sendable {
 /// per-seed cache means a streaming tail rebuilds only its own render unit;
 /// completed history reuses the same chunk strings and identities.
 final class TranscriptRenderPlanner {
-    private struct CachedSeed {
+    private final class CachedSeed {
         var seed: TranscriptRenderSeed
         var streaming: Bool
         var templates: [TranscriptRenderTemplate]
         var units: [TranscriptRenderUnit]
+
+        init(
+            seed: TranscriptRenderSeed,
+            streaming: Bool,
+            templates: [TranscriptRenderTemplate],
+            units: [TranscriptRenderUnit]
+        ) {
+            self.seed = seed
+            self.streaming = streaming
+            self.templates = templates
+            self.units = units
+        }
     }
 
     private var cachedSeeds: [CachedSeed] = []
@@ -262,8 +321,9 @@ final class TranscriptRenderPlanner {
     /// Applies a known streaming-tail seed update without walking the prefix
     /// or creating an Array snapshot.  The caller supplies the existing seed
     /// index from its source projection, so no id search/structure comparison
-    /// is needed here.  Tail updates are constrained to the final seed: a
-    /// middle-sequence edit can shift every flattened unit and must rebuild.
+    /// is needed here. A middle-sequence edit is accepted only when its unit
+    /// count remains stable; count-changing edits rebuild because they shift
+    /// every later flattened range.
     func applyStreamingUpdate(
         seedIndex: Int,
         seed: TranscriptRenderSeed,
@@ -272,7 +332,6 @@ final class TranscriptRenderPlanner {
     ) -> TranscriptRenderPlannerDelta? {
         guard !cachedSeeds.isEmpty,
               cachedSeeds.indices.contains(seedIndex),
-              seedIndex == cachedSeeds.count - 1,
               cachedBranchSourceID == branchSourceID else {
             return nil
         }
@@ -280,10 +339,12 @@ final class TranscriptRenderPlanner {
         guard cached.seed.id == seed.id,
               cached.seed.kind == seed.kind,
               cached.seed.sourceIDs == seed.sourceIDs,
-              cached.seed.hasMedia == seed.hasMedia else {
+              cached.seed.hasMedia == seed.hasMedia,
+              cached.seed.isChunkable == seed.isChunkable else {
             return nil
         }
-        guard cached.streaming != streaming || cached.seed.text != seed.text else {
+        guard cached.streaming != streaming
+                || cached.seed.contentVersion != seed.contentVersion else {
             lastWork = TranscriptRenderPlannerWork(
                 mode: .cached,
                 inspectedSeedCount: 1,
@@ -294,14 +355,69 @@ final class TranscriptRenderPlanner {
             return nil
         }
 
-        let templates = TranscriptRenderPlan.templates(for: seed, streaming: streaming)
+        if cached.streaming,
+           streaming,
+           let appendedText = seed.appendedText,
+           !appendedText.isEmpty,
+           WorkspaceTranscriptChunker.canIncrementallyAppend(appendedText),
+           let delta = applyAppendOnlyUpdate(
+                cached: cached,
+                seedIndex: seedIndex,
+                seed: seed,
+                appendedText: appendedText
+           ) {
+            return delta
+        }
+
+        let templates: [TranscriptRenderTemplate]
+        if cached.streaming,
+           streaming,
+           let appendedText = seed.appendedText,
+           !appendedText.isEmpty,
+           WorkspaceTranscriptChunker.canIncrementallyAppend(appendedText) {
+            templates = TranscriptRenderPlan.templates(
+                seed: seed,
+                appending: appendedText,
+                to: cached.templates,
+                streaming: streaming
+            )
+        } else {
+            templates = TranscriptRenderPlan.templates(for: seed, streaming: streaming)
+        }
         let units = TranscriptRenderPlan.units(
             for: seed,
             seedIndex: seedIndex,
             branchSeedIndex: cachedPlan.branchSeedIndex,
             templates: templates
         )
+        // A middle seed may update in place only when it keeps the same unit
+        // count; otherwise every later flattened range would shift. The live
+        // tail may grow or shrink because no subsequent range depends on it.
+        guard seedIndex == cachedSeeds.count - 1 || units.count == cached.units.count else {
+            return nil
+        }
         let oldRange = cachedUnitRanges[seedIndex]
+        // Paragraph chunks before the live edge are immutable. Return only
+        // the first changed suffix to Overlay so an incoming token does not
+        // reconfigure every already-rendered chunk of a long answer. The
+        // comparison is confined to the active seed; completed history is
+        // never visited.
+        var stableUnitPrefixCount = 0
+        let comparableCount = min(cached.units.count, units.count)
+        while stableUnitPrefixCount < comparableCount,
+              cached.units[stableUnitPrefixCount] == units[stableUnitPrefixCount] {
+            stableUnitPrefixCount += 1
+        }
+        if stableUnitPrefixCount == comparableCount,
+           seed.contentVersion != cached.seed.contentVersion,
+           stableUnitPrefixCount > 0 {
+            // Source-only mutations (tool status/output, assistant images,
+            // branch/media metadata) still have to refresh the mounted row
+            // even when their flattened text unit is byte-identical.
+            stableUnitPrefixCount -= 1
+        }
+        let changedOldRange = (oldRange.lowerBound + stableUnitPrefixCount)..<oldRange.upperBound
+        let changedUnits = Array(units.dropFirst(stableUnitPrefixCount))
         // Mutate the planner's sole-owned arrays in place. No previous plan
         // is handed to this API, so replacing this final range cannot trigger
         // a full-prefix COW allocation.
@@ -321,8 +437,8 @@ final class TranscriptRenderPlanner {
             mode: .incremental,
             inspectedSeedCount: 1,
             rebuiltSeedCount: 1,
-            rebuiltUnitCount: units.count,
-            reusedUnitCount: max(0, cachedPlan.units.count - units.count),
+            rebuiltUnitCount: changedUnits.count,
+            reusedUnitCount: max(0, cachedPlan.units.count - changedUnits.count),
             planUnitCount: cachedPlan.units.count,
             changedSeedIndices: [seedIndex]
         )
@@ -330,8 +446,75 @@ final class TranscriptRenderPlanner {
         return TranscriptRenderPlannerDelta(
             work: work,
             changedSeedIndex: seedIndex,
-            previousUnitRange: oldRange,
-            changedUnits: units,
+            previousUnitRange: changedOldRange,
+            changedUnits: changedUnits,
+            fullUnitCount: cachedPlan.units.count
+        )
+    }
+
+    private func applyAppendOnlyUpdate(
+        cached: CachedSeed,
+        seedIndex: Int,
+        seed: TranscriptRenderSeed,
+        appendedText: String
+    ) -> TranscriptRenderPlannerDelta? {
+        guard seed.isChunkable,
+              !seed.hasMedia,
+              let liveTemplate = cached.templates.last else { return nil }
+        let replacementChunks: [String]
+        if cached.templates.count == 1, !appendedText.contains("\n\n") {
+            // Fenced Markdown and long single paragraphs intentionally stay a
+            // single semantic unit. Updating that unit does not require
+            // rescanning the complete document in the planner.
+            replacementChunks = [seed.text]
+        } else {
+            replacementChunks = WorkspaceTranscriptChunker.replacementTailChunks(
+                liveTail: liveTemplate.text,
+                appendedText: appendedText
+            )
+        }
+        let replacementStart = max(0, cached.templates.count - 1)
+        let replacementTemplates = TranscriptRenderPlan.templates(
+            seed: seed,
+            chunks: replacementChunks,
+            streaming: true,
+            startingAt: replacementStart
+        )
+        let replacementUnits = TranscriptRenderPlan.units(
+            for: seed,
+            seedIndex: seedIndex,
+            branchSeedIndex: cachedPlan.branchSeedIndex,
+            templates: replacementTemplates
+        )
+        let oldSeedRange = cachedUnitRanges[seedIndex]
+        let changedOldRange = (oldSeedRange.upperBound - 1)..<oldSeedRange.upperBound
+        let newSeedUnitCount = cached.units.count - 1 + replacementUnits.count
+        guard seedIndex == cachedSeeds.count - 1 || newSeedUnitCount == cached.units.count else {
+            return nil
+        }
+
+        cached.seed = seed
+        cached.streaming = true
+        cached.templates.replaceSubrange(replacementStart..<cached.templates.count, with: replacementTemplates)
+        cached.units.replaceSubrange((cached.units.count - 1)..<cached.units.count, with: replacementUnits)
+        cachedPlan.units.replaceSubrange(changedOldRange, with: replacementUnits)
+        cachedUnitRanges[seedIndex] = oldSeedRange.lowerBound..<(oldSeedRange.lowerBound + newSeedUnitCount)
+        seedCache[seed.id] = cached
+        let work = TranscriptRenderPlannerWork(
+            mode: .incremental,
+            inspectedSeedCount: 1,
+            rebuiltSeedCount: 1,
+            rebuiltUnitCount: replacementUnits.count,
+            reusedUnitCount: max(0, cachedPlan.units.count - replacementUnits.count),
+            planUnitCount: cachedPlan.units.count,
+            changedSeedIndices: [seedIndex]
+        )
+        lastWork = work
+        return TranscriptRenderPlannerDelta(
+            work: work,
+            changedSeedIndex: seedIndex,
+            previousUnitRange: changedOldRange,
+            changedUnits: replacementUnits,
             fullUnitCount: cachedPlan.units.count
         )
     }
@@ -441,7 +624,9 @@ final class TranscriptRenderPlanner {
             let seed = seeds[index]
             let nextStreaming = streamingSeedIDs.contains(seed.id)
             let cached = cachedSeeds[index]
-            if nextStreaming != cached.streaming || seed.text != cached.seed.text {
+            if nextStreaming != cached.streaming
+                || seed.contentVersion != cached.seed.contentVersion
+                || seed.text != cached.seed.text {
                 changedIndices.append(index)
             }
         }
@@ -517,7 +702,8 @@ final class TranscriptRenderPlanner {
             guard seed.id == cached.id,
                   seed.kind == cached.kind,
                   seed.sourceIDs == cached.sourceIDs,
-                  seed.hasMedia == cached.hasMedia else {
+                  seed.hasMedia == cached.hasMedia,
+                  seed.isChunkable == cached.isChunkable else {
                 return false
             }
         }

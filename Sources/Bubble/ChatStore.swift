@@ -104,6 +104,7 @@ enum ChatStoreTranscriptDelta: @unchecked Sendable {
     case rebuild
     case append([ChatItem])
     case update(ChatItem)
+    case updates([ChatItem])
     case remove([UUID])
 }
 
@@ -220,7 +221,10 @@ final class ChatStore {
     var overlayPinned = UserDefaults.standard.bool(forKey: "bubble.overlay.pinned")
     var filePreview: FilePreviewDocument?
     var workspaceStage: WorkspaceStage?
-    var workspacePaneItems: [ChatItem] = []
+    var workspacePaneItems: [ChatItem] = [] {
+        didSet { workspacePaneRevision &+= 1 }
+    }
+    private(set) var workspacePaneRevision: UInt64 = 0
     var workspacePaneStreamingAssistantId: UUID?
     var workspacePaneStreamingThoughtId: UUID?
     var workspacePaneScrollToken = 0
@@ -274,6 +278,11 @@ final class ChatStore {
     private(set) var transcriptDelta: ChatStoreTranscriptDelta = .rebuild
     var transcriptHistoryTurnCapacity = TranscriptHistoryWindow.configuredInitialCapacity
     @ObservationIgnored private var pendingTranscriptDelta: ChatStoreTranscriptDelta?
+    @ObservationIgnored private var transcriptMutationBatchDepth = 0
+    @ObservationIgnored private var transcriptItemVersions: [UUID: UInt64] = [:]
+    @ObservationIgnored private var transcriptItemAppends: [UUID: String] = [:]
+    @ObservationIgnored private var transcriptItemIndexCache: [UUID: Int] = [:]
+    @ObservationIgnored private var transcriptToolIndexCache: [String: Int] = [:]
     @ObservationIgnored private var resumeActionGeneration = 0
     var conversationTree: ConversationTreeSnapshot?
     var branchDraft: ConversationBranchDraft? {
@@ -1349,6 +1358,14 @@ final class ChatStore {
                 return true
             }
         }
+    }
+
+    /// Layout only needs to know whether the transcript card exists. Avoid
+    /// filtering the retained history on every streamed token.
+    var hasTranscriptItems: Bool { !items.isEmpty }
+
+    func transcriptItem(_ id: UUID) -> ChatItem? {
+        transcriptItemIndex(id).map { items[$0] }
     }
 
     var currentSessionID: String? { client.sessionId }
@@ -3134,12 +3151,14 @@ final class ChatStore {
             items.append(item)
             markTranscriptDelta(.append([item]))
         } else if let id = streamingAssistantId,
-           let index = items.firstIndex(where: { $0.id == id }) {
+           let index = transcriptItemIndex(id) {
             appendAssistantImageName(name, to: &items[index])
+            transcriptItemAppends[id] = nil
             markTranscriptDelta(.update(items[index]))
         } else if let index = TranscriptStream.resumeAssistantIndex(kinds: items.map(\.kind.rawValue)) {
             appendAssistantImageName(name, to: &items[index])
             streamingAssistantId = items[index].id
+            transcriptItemAppends[items[index].id] = nil
             markTranscriptDelta(.update(items[index]))
         } else {
             let item = ChatItem(
@@ -3210,8 +3229,10 @@ final class ChatStore {
         }
         guard !streamFlushQueued else { return }
         streamFlushQueued = true
-        let renderedAssistantBytes = items.last(where: { $0.id == streamingAssistantId })?.text.utf8.count ?? 0
-        let renderedThoughtBytes = items.last(where: { $0.id == streamingThoughtId })?.text.utf8.count ?? 0
+        let renderedAssistantBytes = streamingAssistantId
+            .flatMap(transcriptItemIndex).map { items[$0].text.utf8.count } ?? 0
+        let renderedThoughtBytes = streamingThoughtId
+            .flatMap(transcriptItemIndex).map { items[$0].text.utf8.count } ?? 0
         let interval = OverlayRenderPolicy.streamFlushInterval(
             renderedBytes: max(
                 renderedAssistantBytes + pendingAssistantChunk.utf8.count,
@@ -3235,12 +3256,21 @@ final class ChatStore {
         let thought = pendingThoughtChunk
         pendingAssistantChunk = ""
         pendingThoughtChunk = ""
-        // Thoughts first so a same-frame thought lands above the answer.
+        // Thoughts first so a same-frame thought lands above the answer. If
+        // both channels flush together, publish one combined structural
+        // revision: exposing only the second delta can leave the thought row
+        // stale when Observation coalesces both mutations into one body pass.
+        let batchesMultipleRows = !thought.isEmpty && !assistant.isEmpty
+        if batchesMultipleRows { transcriptMutationBatchDepth += 1 }
         if !thought.isEmpty {
             commitThought(thought)
         }
         if !assistant.isEmpty {
             commitAssistant(assistant)
+        }
+        if batchesMultipleRows {
+            transcriptMutationBatchDepth -= 1
+            persist()
         }
     }
 
@@ -3257,7 +3287,7 @@ final class ChatStore {
             return
         }
         if let id = streamingAssistantId,
-           let index = items.firstIndex(where: { $0.id == id }) {
+           let index = transcriptItemIndex(id) {
             applyAssistant(raw, at: index)
             return
         }
@@ -3286,16 +3316,22 @@ final class ChatStore {
         } else {
             items[index].text = cleaned
             streamingAssistantId = items[index].id
-            markTranscriptDelta(.update(items[index]))
+            markTranscriptDelta(
+                .update(items[index]),
+                appendedText: cleaned.hasSuffix(raw) ? (items[index].id, raw) : nil
+            )
         }
         persist()
     }
 
     private func commitThought(_ raw: String) {
         if let id = streamingThoughtId,
-           let index = items.firstIndex(where: { $0.id == id }) {
+           let index = transcriptItemIndex(id) {
             items[index].text = Self.stripDiagnostics(items[index].text + raw)
-            markTranscriptDelta(.update(items[index]))
+            markTranscriptDelta(
+                .update(items[index]),
+                appendedText: items[index].text.hasSuffix(raw) ? (items[index].id, raw) : nil
+            )
         } else {
             let cleaned = Self.stripDiagnostics(raw)
             guard !cleaned.isEmpty else { return }
@@ -3316,7 +3352,7 @@ final class ChatStore {
         let kind = update.string("kind")
         let payload = extractToolPayload(update)
         let imageNames = persistedImageNames(payload.images)
-        if let index = items.lastIndex(where: { $0.kind == .tool && $0.toolId == callId }) {
+        if let index = transcriptToolIndex(callId) {
             if let title, !title.isEmpty {
                 items[index].text = title
             }
@@ -3731,7 +3767,39 @@ final class ChatStore {
     /// Mark a mutation before calling `persist()`.  Stream handlers use the
     /// precise append/update/remove forms; all other callers safely fall back
     /// to a structural rebuild when they do not provide a marker.
-    private func markTranscriptDelta(_ delta: ChatStoreTranscriptDelta) {
+    private func markTranscriptDelta(
+        _ delta: ChatStoreTranscriptDelta,
+        appendedText: (id: UUID, text: String)? = nil
+    ) {
+        switch delta {
+        case .update(let item):
+            transcriptItemVersions[item.id, default: 0] &+= 1
+            transcriptItemAppends[item.id] = nil
+        case .updates(let items):
+            for item in items {
+                transcriptItemVersions[item.id, default: 0] &+= 1
+                transcriptItemAppends[item.id] = nil
+            }
+        case .append(let items):
+            for item in items {
+                transcriptItemVersions[item.id, default: 0] &+= 1
+                transcriptItemAppends[item.id] = nil
+            }
+        case .remove(let ids):
+            for id in ids {
+                transcriptItemVersions[id] = nil
+                transcriptItemAppends[id] = nil
+            }
+        case .rebuild:
+            transcriptItemAppends.removeAll(keepingCapacity: true)
+            let liveIDs = Set(items.map(\.id))
+            transcriptItemVersions = transcriptItemVersions.filter { liveIDs.contains($0.key) }
+            transcriptItemIndexCache.removeAll(keepingCapacity: true)
+            transcriptToolIndexCache.removeAll(keepingCapacity: true)
+        }
+        if let appendedText {
+            transcriptItemAppends[appendedText.id] = appendedText.text
+        }
         switch (pendingTranscriptDelta, delta) {
         case (nil, _):
             pendingTranscriptDelta = delta
@@ -3740,7 +3808,16 @@ final class ChatStore {
         case (.some(.append(var existing)), .append(let next)):
             existing.append(contentsOf: next)
             pendingTranscriptDelta = .append(existing)
-        case (.some(.update), _), (.some(.remove), _), (.some(.append), _):
+        case (.some(.update(let existing)), .update(let next)):
+            pendingTranscriptDelta = .updates(existing.id == next.id ? [next] : [existing, next])
+        case (.some(.updates(var existing)), .update(let next)):
+            if let index = existing.firstIndex(where: { $0.id == next.id }) {
+                existing[index] = next
+            } else {
+                existing.append(next)
+            }
+            pendingTranscriptDelta = .updates(existing)
+        case (.some(.updates), _), (.some(.update), _), (.some(.remove), _), (.some(.append), _):
             // Multiple mutations in one revision may alter grouping/order;
             // force the consumer to resynchronize from its authoritative
             // source rather than attempting to compose an unsafe delta.
@@ -3748,8 +3825,45 @@ final class ChatStore {
         }
     }
 
-    private func markTranscriptRebuild() {
-        pendingTranscriptDelta = .rebuild
+    /// Streaming ids and tool-call ids are stable for the duration of a run.
+    /// Validate cached indexes defensively because restores/removals can shift
+    /// the backing array; the hot token/tool path is O(1), while a structural
+    /// mutation pays a single recovery scan.
+    private func transcriptItemIndex(_ id: UUID) -> Int? {
+        if let cached = transcriptItemIndexCache[id],
+           items.indices.contains(cached),
+           items[cached].id == id {
+            return cached
+        }
+        guard let index = items.firstIndex(where: { $0.id == id }) else {
+            transcriptItemIndexCache[id] = nil
+            return nil
+        }
+        transcriptItemIndexCache[id] = index
+        return index
+    }
+
+    private func transcriptToolIndex(_ callID: String) -> Int? {
+        if let cached = transcriptToolIndexCache[callID],
+           items.indices.contains(cached),
+           items[cached].kind == .tool,
+           items[cached].toolId == callID {
+            return cached
+        }
+        guard let index = items.lastIndex(where: { $0.kind == .tool && $0.toolId == callID }) else {
+            transcriptToolIndexCache[callID] = nil
+            return nil
+        }
+        transcriptToolIndexCache[callID] = index
+        return index
+    }
+
+    func transcriptItemVersion(_ id: UUID) -> UInt64 {
+        transcriptItemVersions[id, default: 0]
+    }
+
+    func transcriptItemAppend(_ id: UUID) -> String? {
+        transcriptItemAppends[id]
     }
 
     private static func savedConversationLeaves() -> [String: String] {
@@ -3772,6 +3886,7 @@ final class ChatStore {
     }
 
     private func persist(immediate: Bool = false) {
+        guard transcriptMutationBatchDepth == 0 else { return }
         transcriptRevision &+= 1
         transcriptDelta = pendingTranscriptDelta ?? .rebuild
         pendingTranscriptDelta = nil

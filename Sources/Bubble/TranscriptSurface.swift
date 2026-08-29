@@ -1044,7 +1044,7 @@ final class TranscriptSurfaceState: TranscriptSurfaceAdapter {
             )
             return [.completedRowMutationRejected(rowID: row.id)]
         }
-        if old.contentIdentity == row.contentIdentity {
+        if old == row {
             snapshot = TranscriptSurfaceSnapshot(
                 session: session,
                 rows: snapshot.rows,

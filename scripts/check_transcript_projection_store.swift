@@ -53,12 +53,28 @@ private enum TranscriptProjectionStoreCheck {
         expect(appended.mode == .incremental && store.count == 14, "append extends the projection without rebuild")
         expect(store.index(of: "row-13") == 13, "append updates the id index")
 
+        let groupedSeed = TranscriptRenderSeed(
+            id: "tool-source-row",
+            kind: .other,
+            text: "tool-v1",
+            sourceIDs: ["tool-source-id"]
+        )
+        _ = store.apply(.append(records: [TranscriptProjectionRecord(
+            id: "tool-source-row",
+            seed: groupedSeed,
+            source: 14
+        )]))
+        expect(
+            store.record(sourceID: "tool-source-id")?.id == "tool-source-row",
+            "grouped presentation rows resolve source-item deltas in O(1)"
+        )
+
         let rejected = store.apply(.update(record: record(999)))
         expect(rejected.mode == .rejected, "unknown update is rejected for structural safety")
-        expect(store.count == 14, "rejected update leaves the previous projection intact")
+        expect(store.count == 15, "rejected update leaves the previous projection intact")
 
         let removed = store.apply(.remove(ids: ["row-0"]))
-        expect(removed.mode == .rebuilt && store.count == 13, "remove uses an explicit structural rebuild")
+        expect(removed.mode == .rebuilt && store.count == 14, "remove uses an explicit structural rebuild")
         expect(store.record(at: 0)?.id == "row-1", "remove preserves remaining order")
 
         let generation = store.generation

@@ -683,7 +683,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
               ) else { return }
         let height = max(OverlayMetrics.minHeight, min(layout.totalHeight.rounded(), OverlayMetrics.maxHeight))
         let hasTranscript = layout.transcriptHeight > 1
-            || !store.visibleItems.isEmpty
+            || store.hasTranscriptItems
             || store.isStartingSession
             || store.sideStagePresented
         let chatWidth = hasTranscript
@@ -782,7 +782,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         apply(OverlayLayout(
             sessionID: store.runtimeID,
             totalHeight: contentHeight,
-            transcriptHeight: (store.visibleItems.isEmpty && !store.isStartingSession && !store.sideStagePresented && !sessions.showsTabs)
+            transcriptHeight: (!store.hasTranscriptItems && !store.isStartingSession && !store.sideStagePresented && !sessions.showsTabs)
                 ? 0
                 : max(0, contentHeight - OverlayMetrics.minHeight - OverlayMetrics.stackSpacing),
             pickerHeight: store.showAvatarPicker ? OverlayMetrics.pickerHeight : 0,
