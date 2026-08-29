@@ -162,6 +162,7 @@ metric_value() {
     echo "$benchmark_line" >&2
     exit 1
   fi
+  value="${value%ms}"
   printf '%s' "$value"
 }
 
