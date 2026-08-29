@@ -1037,12 +1037,20 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
         return mountedRows
     }
 
-    private func scheduleOverscanRefill() {
+    private func scheduleOverscanRefill(after requestedDelay: TimeInterval? = nil) {
         guard !overscanRefillQueued else { return }
         overscanRefillQueued = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+        // A live wheel sequence owns the main-thread budget. Defer warm-cache
+        // work until the gesture settles instead of competing with visible
+        // row mounts on every packet.
+        let delay = max(0.01, requestedDelay ?? (isUserScrollActive ? 0.36 : 0.05))
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self else { return }
             self.overscanRefillQueued = false
+            guard !self.isUserScrollActive else {
+                self.scheduleOverscanRefill(after: 0.36)
+                return
+            }
             let started = ProcessInfo.processInfo.systemUptime
             let mountedRows = self.updateMountedFrames(
                 repositionExisting: false,

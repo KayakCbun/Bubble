@@ -155,6 +155,12 @@ private enum AppKitTranscriptSurfaceCheck {
         expect(sawUserScroll, "user-scroll callback fires synchronously")
         expect(!adapter.snapshot.followsLatest, "user scroll detaches follow-latest")
         expect(userScrollSequenceStarts == 1, "closely spaced wheel packets share one scroll sequence")
+        let refillsBeforeActiveScroll = adapter.metrics.deferredOverscanRefillCount
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
+        expect(
+            adapter.metrics.deferredOverscanRefillCount == refillsBeforeActiveScroll,
+            "active user scrolling defers overscan refill work"
+        )
         let userScrollCountBeforeResize = userScrollCallbacks
         adapter.setViewportSize(NSSize(width: 480, height: 120))
         expect(userScrollCallbacks == userScrollCountBeforeResize, "resize does not masquerade as user scroll")
