@@ -104,6 +104,37 @@ private enum AppKitTranscriptSurfaceCheck {
             "pure viewport scrolling does not reconfigure a stable row host"
         )
 
+        // Leaving and re-entering a viewport should recover the exact
+        // immutable host from the bounded identity cache. Reusing the old
+        // rich tree avoids a second root transaction when a user reverses a
+        // wheel gesture over the same rows.
+        let cachedHost = adapter.hostObjectID(rowID: stableID)
+        let cachedConfigureCount = adapter.hostConfigureCount(rowID: stableID) ?? -1
+        adapter.setContentOffset(y: 8_000)
+        expect(adapter.hostObjectID(rowID: stableID) == nil, "offscreen row leaves the mounted window")
+        expect(
+            Set(adapter.mountedRowIDs) == Set(adapter.visibleRowIDs),
+            "viewport move mounts visible rows synchronously without overscan work"
+        )
+        adapter.setContentOffset(y: 312)
+        expect(adapter.hostObjectID(rowID: stableID) == cachedHost, "returning row reuses its identity-matched host")
+        expect(
+            adapter.hostConfigureCount(rowID: stableID) == cachedConfigureCount,
+            "identity-matched host does not reconfigure on viewport reversal"
+        )
+
+        // Overscan is refilled asynchronously and in bounded slices; the
+        // synchronous viewport path only mounts rows that are needed for
+        // visible correctness. The metrics keep those two costs distinct so
+        // a display-linked regression cannot hide in a pooled refill.
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.18))
+        expect(adapter.metrics.synchronousViewportLayoutCount > 0, "synchronous viewport work is measured")
+        expect(adapter.metrics.maximumSynchronousViewportDuration >= 0, "synchronous viewport duration is finite")
+        expect(adapter.metrics.deferredOverscanRefillCount > 0, "deferred overscan refill is measured")
+        expect(adapter.metrics.maximumDeferredOverscanRefillDuration >= 0, "deferred overscan duration is finite")
+        expect(adapter.metrics.maximumDeferredOverscanRefillMounts <= 4, "deferred overscan mounts stay time-sliced")
+        expect(adapter.reusableHostCount <= 24, "identity host cache stays within its configured bound")
+
         // A physical user-scroll handoff is synchronous, before AppKit applies
         // the wheel delta, and detaches follow-latest without consuming a
         // transcript revision.

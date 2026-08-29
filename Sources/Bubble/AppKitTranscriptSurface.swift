@@ -9,17 +9,24 @@ struct AppKitTranscriptRowReuseKey: Equatable, Hashable {
     let kind: TranscriptRowKind
     let id: String
     let contentVersion: UInt64
+    /// Anchor ownership is part of the mounted row's semantic output. A
+    /// branch/replay may keep prose content stable while moving a continuation
+    /// under a different user turn; reusing that host would leave a stale
+    /// history marker in the mounted tree.
+    let historyTickID: String?
     let layoutIdentity: TranscriptRowLayoutIdentity
 
     init(
         kind: TranscriptRowKind,
         id: String,
         contentVersion: UInt64,
+        historyTickID: String? = nil,
         layoutIdentity: TranscriptRowLayoutIdentity = .default
     ) {
         self.kind = kind
         self.id = id
         self.contentVersion = contentVersion
+        self.historyTickID = historyTickID
         self.layoutIdentity = layoutIdentity
     }
 
@@ -28,6 +35,7 @@ struct AppKitTranscriptRowReuseKey: Equatable, Hashable {
             kind: row.kind,
             id: row.id,
             contentVersion: row.contentVersion,
+            historyTickID: row.historyTickID,
             layoutIdentity: row.layoutIdentity
         )
     }
@@ -242,6 +250,19 @@ struct AppKitTranscriptSurfaceMetrics {
     private(set) var pooledReuses = 0
     private(set) var heightIndexRebuilds = 0
     private(set) var heightIndexPointUpdates = 0
+    /// Work performed synchronously in response to a clip-origin change.
+    /// This is the input-to-visible path and must stay bounded independently
+    /// of the deferred overscan refill cadence.
+    private(set) var synchronousViewportLayoutCount = 0
+    private(set) var lastSynchronousViewportDuration: TimeInterval = 0
+    private(set) var maximumSynchronousViewportDuration: TimeInterval = 0
+    /// Deferred work is intentionally time-sliced so a large rich-row cache
+    /// can never consume two display frames in one callback.
+    private(set) var deferredOverscanRefillCount = 0
+    private(set) var lastDeferredOverscanRefillDuration: TimeInterval = 0
+    private(set) var maximumDeferredOverscanRefillDuration: TimeInterval = 0
+    private(set) var deferredOverscanRefillMounts = 0
+    private(set) var maximumDeferredOverscanRefillMounts = 0
 
     mutating func recordLayout(duration: TimeInterval) {
         layoutCount += 1
@@ -266,6 +287,21 @@ struct AppKitTranscriptSurfaceMetrics {
 
     mutating func recordHeightIndexPointUpdate() {
         heightIndexPointUpdates += 1
+    }
+
+    mutating func recordSynchronousViewportWork(duration: TimeInterval) {
+        synchronousViewportLayoutCount += 1
+        lastSynchronousViewportDuration = duration
+        maximumSynchronousViewportDuration = max(maximumSynchronousViewportDuration, duration)
+    }
+
+    mutating func recordDeferredOverscanRefill(duration: TimeInterval, mountedRows: Int) {
+        deferredOverscanRefillCount += 1
+        lastDeferredOverscanRefillDuration = duration
+        maximumDeferredOverscanRefillDuration = max(maximumDeferredOverscanRefillDuration, duration)
+        let boundedRows = max(0, mountedRows)
+        deferredOverscanRefillMounts += boundedRows
+        maximumDeferredOverscanRefillMounts = max(maximumDeferredOverscanRefillMounts, boundedRows)
     }
 }
 
@@ -324,10 +360,20 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
     private let overscan: CGFloat
     private let maximumMountedRows: Int
     private let maximumReusableHosts: Int
+    /// Overscan is a warm cache, not part of the input-to-visible path. Keep
+    /// its refill bounded both by rows and wall time so a first traversal of
+    /// a rich transcript cannot monopolize two display frames.
+    private let maximumDeferredOverscanMountsPerPass: Int
+    private let maximumDeferredOverscanDuration: TimeInterval
     private var document: AppKitTranscriptDocumentView!
     private var clipBoundsObserver: NSObjectProtocol?
     private var mounted: [String: AppKitTranscriptMountedCell] = [:]
-    private var reusableHosts: [AppKitTranscriptRowHost] = []
+    /// Detached cells remain keyed by their immutable row identity. Returning
+    /// to a row therefore reattaches the existing rich tree without another
+    /// root transaction; a bounded LRU fallback still permits reuse when the
+    /// row identity has changed.
+    private var reusableHostsByKey: [AppKitTranscriptRowReuseKey: AppKitTranscriptRowHost] = [:]
+    private var reusableHostLRU: [AppKitTranscriptRowReuseKey] = []
     private var rowIndexByID: [String: Int] = [:]
     private var heightIndex: TranscriptHeightIndex
     private var layingOut = false
@@ -357,6 +403,8 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
         overscan: CGFloat = 560,
         maximumMountedRows: Int = 96,
         maximumReusableHosts: Int = 160,
+        maximumDeferredOverscanMountsPerPass: Int = 4,
+        maximumDeferredOverscanDuration: TimeInterval = 0.004,
         renderer: @escaping AppKitTranscriptRowHostFactory = { row, key in
             AppKitTranscriptRowHost(row: row, key: key)
         }
@@ -366,6 +414,8 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
         self.overscan = max(0, overscan)
         self.maximumMountedRows = max(1, maximumMountedRows)
         self.maximumReusableHosts = max(0, maximumReusableHosts)
+        self.maximumDeferredOverscanMountsPerPass = max(1, maximumDeferredOverscanMountsPerPass)
+        self.maximumDeferredOverscanDuration = max(0.0005, maximumDeferredOverscanDuration)
         self.heightIndex = TranscriptHeightIndex(
             heights: (snapshot?.rows ?? []).map(\.estimatedHeight)
         )
@@ -442,7 +492,7 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
     var heightCache: TranscriptHeightCache { state.heightCache }
     var currentHandle: TranscriptSessionHandle { state.currentHandle }
     var mountedRowIDs: [String] { mounted.keys.sorted() }
-    var reusableHostCount: Int { reusableHosts.count }
+    var reusableHostCount: Int { reusableHostsByKey.count }
     var currentHeightIndex: TranscriptHeightIndex { heightIndex }
     var isUserScrollActive: Bool {
         ProcessInfo.processInfo.systemUptime - lastUserScrollUptime <= 0.35
@@ -493,7 +543,6 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
             heightIndex.replace(with: snapshot.rows.map(cachedHeightOrEstimate))
             metrics.recordHeightIndexRebuild()
             updateDocumentFrame()
-            relayoutNow()
             if followsLatest {
                 scrollToEnd()
             } else if let anchor {
@@ -877,17 +926,27 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
         let started = ProcessInfo.processInfo.systemUptime
         defer {
             layingOut = false
-            metrics.recordLayout(duration: max(0, ProcessInfo.processInfo.systemUptime - started))
+            let duration = max(0, ProcessInfo.processInfo.systemUptime - started)
+            metrics.recordLayout(duration: duration)
+            metrics.recordSynchronousViewportWork(duration: duration)
         }
         updateMountedFrames(repositionExisting: false, mountNewOverscanRows: false)
         scheduleOverscanRefill()
     }
 
+    /// Returns how many hosts were mounted by this pass. A deferred refill
+    /// uses that value for bounded-work diagnostics and requeues itself when
+    /// the current overscan window still has missing rows.
+    @discardableResult
     private func updateMountedFrames(
         repositionExisting: Bool = true,
-        mountNewOverscanRows: Bool = true
-    ) {
-        guard document != nil else { return }
+        mountNewOverscanRows: Bool = true,
+        maximumNewMounts: Int? = nil,
+        maximumDuration: TimeInterval? = nil
+    ) -> Int {
+        guard document != nil else { return 0 }
+        let started = ProcessInfo.processInfo.systemUptime
+        var mountedRows = 0
         let viewport = scrollView.contentView.bounds
         let overscanRange = heightIndex.rows(
             intersecting: viewport.minY,
@@ -921,6 +980,14 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
         }
 
         for index in targetIndices where snapshot.rows.indices.contains(index) {
+            if let maximumNewMounts, mountedRows >= maximumNewMounts {
+                break
+            }
+            if let maximumDuration,
+               mountedRows > 0,
+               ProcessInfo.processInfo.systemUptime - started >= maximumDuration {
+                break
+            }
             let row = snapshot.rows[index]
             if !mountNewOverscanRows,
                !visibleIndices.contains(index),
@@ -940,12 +1007,17 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
             }
             let host: AppKitTranscriptRowHost
             let reused: Bool
-            if let pooled = reusableHosts.popLast() {
+            if let identityMatched = takeReusableHost(for: key) {
+                host = identityMatched.host
+                reused = true
+                // An exact identity hit keeps the existing rich SwiftUI tree
+                // intact. No root assignment or markdown parse occurs on the
+                // scroll hot path; only the AppKit frame is updated below.
+            } else if let pooled = takeOldestReusableHost() {
                 host = pooled
-                // `configure` replaces the old immutable root directly. An
-                // EmptyView transition here adds a second SwiftUI transaction
-                // and was visible as periodic two-frame misses while walking
-                // new rows for the first time.
+                // A changed identity can still reuse the bounded cell. The
+                // configure operation is isolated to this one visible row,
+                // never to the rest of the transcript.
                 host.configure(row: row, key: key)
                 reused = true
             } else {
@@ -956,11 +1028,13 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
             document.addSubview(host)
             mounted[row.id] = AppKitTranscriptMountedCell(key: key, host: host)
             metrics.recordMount(count: 1, peak: mounted.count, reused: reused)
+            mountedRows += 1
         }
         if repositionExisting {
             updateMountedFramesWithoutMounting()
         }
         reportVisibleRows()
+        return mountedRows
     }
 
     private func scheduleOverscanRefill() {
@@ -969,10 +1043,54 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
             guard let self else { return }
             self.overscanRefillQueued = false
-            self.updateMountedFrames(
+            let started = ProcessInfo.processInfo.systemUptime
+            let mountedRows = self.updateMountedFrames(
                 repositionExisting: false,
-                mountNewOverscanRows: true
+                mountNewOverscanRows: true,
+                maximumNewMounts: self.maximumDeferredOverscanMountsPerPass,
+                maximumDuration: self.maximumDeferredOverscanDuration
             )
+            let duration = max(0, ProcessInfo.processInfo.systemUptime - started)
+            self.metrics.recordDeferredOverscanRefill(duration: duration, mountedRows: mountedRows)
+            if self.hasMissingOverscanRows {
+                self.scheduleOverscanRefill()
+            }
+        }
+    }
+
+    private var hasMissingOverscanRows: Bool {
+        let viewport = scrollView.contentView.bounds
+        let range = heightIndex.rows(
+            intersecting: viewport.minY,
+            viewportHeight: viewport.height,
+            overscan: overscan
+        )
+        var targetIndices = Array(range)
+        if targetIndices.count > maximumMountedRows {
+            let visibleRange = heightIndex.rows(
+                intersecting: viewport.minY,
+                viewportHeight: viewport.height,
+                overscan: 0
+            )
+            let visibleIndices = Set(visibleRange)
+            let center = viewport.midY
+            targetIndices = Array(targetIndices.sorted { lhs, rhs in
+                let leftDistance = visibleIndices.contains(lhs) ? -1 : abs(
+                    heightIndex.offset(of: lhs)
+                        + (heightIndex.height(at: lhs) ?? 0) / 2
+                        - center
+                )
+                let rightDistance = visibleIndices.contains(rhs) ? -1 : abs(
+                    heightIndex.offset(of: rhs)
+                        + (heightIndex.height(at: rhs) ?? 0) / 2
+                        - center
+                )
+                return leftDistance < rightDistance
+            }.prefix(maximumMountedRows))
+        }
+        return targetIndices.contains { index in
+            guard snapshot.rows.indices.contains(index) else { return false }
+            return mounted[snapshot.rows[index].id] == nil
         }
     }
 
@@ -995,16 +1113,53 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
     private func unmount(id: String, cell: AppKitTranscriptMountedCell) {
         mounted.removeValue(forKey: id)
         cell.host.removeFromSuperview()
-        if reusableHosts.count < maximumReusableHosts {
+        if maximumReusableHosts > 0 {
             // Keep the detached immutable tree until this host is actually
             // reused. Clearing it here and then clearing it again in the reuse
             // branch performs two SwiftUI root swaps across adjacent scroll
             // frames and was the remaining first-traversal hitch.
-            reusableHosts.append(cell.host)
+            cacheReusableHost(cell.host, for: cell.key)
         } else {
             cell.host.prepareForReuse()
         }
         metrics.recordUnmount(count: 1)
+    }
+
+    private func takeReusableHost(
+        for key: AppKitTranscriptRowReuseKey
+    ) -> (host: AppKitTranscriptRowHost, exact: Bool)? {
+        guard let host = reusableHostsByKey.removeValue(forKey: key) else { return nil }
+        reusableHostLRU.removeAll { $0 == key }
+        return (host, true)
+    }
+
+    private func takeOldestReusableHost() -> AppKitTranscriptRowHost? {
+        while let key = reusableHostLRU.first {
+            reusableHostLRU.removeFirst()
+            if let host = reusableHostsByKey.removeValue(forKey: key) {
+                return host
+            }
+        }
+        // Keep the dictionary and recency list in sync even if a future
+        // caller invalidates a cached key while a refill is queued.
+        reusableHostsByKey.removeAll(keepingCapacity: true)
+        return nil
+    }
+
+    private func cacheReusableHost(
+        _ host: AppKitTranscriptRowHost,
+        for key: AppKitTranscriptRowReuseKey
+    ) {
+        if let previous = reusableHostsByKey.updateValue(host, forKey: key), previous !== host {
+            previous.prepareForReuse()
+        }
+        reusableHostLRU.removeAll { $0 == key }
+        reusableHostLRU.append(key)
+        while reusableHostLRU.count > maximumReusableHosts {
+            let evictedKey = reusableHostLRU.removeFirst()
+            guard let evicted = reusableHostsByKey.removeValue(forKey: evictedKey) else { continue }
+            evicted.prepareForReuse()
+        }
     }
 
     private func reportVisibleRows() {
