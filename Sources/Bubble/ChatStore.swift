@@ -2854,6 +2854,7 @@ final class ChatStore {
         let previousHistoryTurnCapacity = transcriptHistoryTurnCapacity
         isStartingSession = true
         items = []
+        resetTranscriptMutationCaches()
         transcriptHistoryTurnCapacity = TranscriptHistoryWindow.configuredInitialCapacity
         richTranscriptRows = [:]
         closeSideStage(animated: false)
@@ -2958,6 +2959,7 @@ final class ChatStore {
         writeTranscript()
         isStartingSession = true
         items = []
+        resetTranscriptMutationCaches()
         transcriptHistoryTurnCapacity = TranscriptHistoryWindow.configuredInitialCapacity
         richTranscriptRows = [:]
         streamingAssistantId = nil
@@ -4011,6 +4013,7 @@ final class ChatStore {
         )
         if mergedItems != items {
             items = mergedItems
+            resetTranscriptMutationCaches()
             // Restore may complete after Overlay has already rendered a live
             // setup/session state. Publish an explicit structural revision so
             // the projection cannot remain on the pre-restore rows.
@@ -4023,6 +4026,13 @@ final class ChatStore {
             if let key = Self.richKey(item) { richTranscriptRows[key] = item }
         }
         Self.prewarmTranscriptChunks(Array(items[transcriptHistoryLowerBound...]))
+    }
+
+    private func resetTranscriptMutationCaches() {
+        transcriptItemVersions.removeAll(keepingCapacity: true)
+        transcriptItemAppends.removeAll(keepingCapacity: true)
+        transcriptItemIndexCache.removeAll(keepingCapacity: true)
+        transcriptToolIndexCache.removeAll(keepingCapacity: true)
     }
 
     private static func loadTranscriptOffMain(sessionID: String) async -> TranscriptLoadResult {
