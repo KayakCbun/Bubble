@@ -1362,6 +1362,12 @@ struct OverlayView: View {
                         // Spacing must stay inside each host; moving content
                         // above its bounds cuts the first line after mounting.
                         mainTranscriptRow(row)
+                            .padding(
+                                .top,
+                                TranscriptChunkBoundaryPolicy.topInset(
+                                    isContinuation: row.isContinuation
+                                )
+                            )
                             .background {
                                 TranscriptRowAnchor(
                                     id: row.id,

@@ -222,6 +222,14 @@ enum RunningSweepPolicy {
     }
 }
 
+enum TranscriptChunkBoundaryPolicy {
+    static let minimumTopInset: CGFloat = 6
+
+    static func topInset(isContinuation: Bool) -> CGFloat {
+        isContinuation ? 8 : 0
+    }
+}
+
 enum OverlaySpring {
     static let panelResponse: CGFloat = 0.22
     static let panelDamping: CGFloat = 0.86
