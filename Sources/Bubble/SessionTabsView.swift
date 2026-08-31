@@ -49,7 +49,6 @@ struct SessionOverlayView: View {
 
 private enum SessionTabChrome {
     static let joinRadius: CGFloat = 5
-    static let unreadDot: CGFloat = 5
 }
 
 private struct SessionTabButton: View {
@@ -99,9 +98,6 @@ private struct SessionTabButton: View {
             height: metrics.height
         )
         .background(alignment: .leading) { folderFace }
-        .overlay(alignment: .topLeading) {
-            SessionTabStatusMarks(hasUnread: tab.hasUnread, isBusy: tab.isBusy)
-        }
         .contentShape(Rectangle())
         .onHover { isHovering in
             hovering = isHovering
@@ -174,29 +170,6 @@ private struct SessionTabButton: View {
             x: -1.5,
             y: 1
         )
-    }
-}
-
-private struct SessionTabStatusMarks: View {
-    let hasUnread: Bool
-    let isBusy: Bool
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            if hasUnread {
-                Circle()
-                    .fill(Color.accentColor)
-                    .frame(width: SessionTabChrome.unreadDot, height: SessionTabChrome.unreadDot)
-            }
-            if isBusy {
-                Capsule()
-                    .fill(Color.accentColor.opacity(0.85))
-                    .frame(width: 8, height: 2)
-            }
-        }
-        .padding(.leading, 4)
-        .padding(.top, 4)
-        .allowsHitTesting(false)
     }
 }
 

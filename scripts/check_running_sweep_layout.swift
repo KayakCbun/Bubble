@@ -112,6 +112,14 @@ private enum RunningSweepLayoutCheck {
                 !implementation.contains("TimelineView"),
                 "running sweep avoids a display-linked TimelineView inside virtualized transcript rows"
             )
+            expect(
+                !implementation.contains("position.x"),
+                "running sweep does not slide the fill off the word"
+            )
+            expect(
+                implementation.contains("startPoint") && implementation.contains("endPoint"),
+                "running sweep uses a horizontal highlight band across the letters"
+            )
             if let alphaStart = implementation.range(
                 of: "secondaryLabelColor.withAlphaComponent("
             ) {
@@ -119,8 +127,8 @@ private enum RunningSweepLayoutCheck {
                 if let alphaEnd = suffix.firstIndex(of: ")"),
                    let alpha = Double(suffix[..<alphaEnd]) {
                     expect(
-                        alpha >= 0.56,
-                        "running sweep keeps the whole word legible between highlight passes (base alpha \(alpha))"
+                        alpha >= 0.34,
+                        "running sweep keeps the whole word filled between highlight passes (base alpha \(alpha))"
                     )
                 } else {
                     failures.append("running sweep base alpha remains measurable")

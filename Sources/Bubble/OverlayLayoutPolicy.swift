@@ -220,6 +220,24 @@ enum RunningSweepPolicy {
         let end = 1 + highlightRadius + offscreenPadding
         return start + (end - start) * progress(at: time)
     }
+
+    /// Horizontal axial gradient start, in unit space across the word.
+    static func startPointX(at progress: Double) -> Double {
+        progress - highlightRadius
+    }
+
+    /// Horizontal axial gradient end, in unit space across the word.
+    static func endPointX(at progress: Double) -> Double {
+        progress + highlightRadius
+    }
+}
+
+enum RunningSweepPresentationPolicy {
+    /// Show a transcript-level running label as soon as the turn starts,
+    /// before the first assistant token creates a live bubble to host it.
+    static func showsPendingLabel(isBusy: Bool, streamingAssistantID: UUID?) -> Bool {
+        isBusy && streamingAssistantID == nil
+    }
 }
 
 enum TranscriptChunkBoundaryPolicy {
