@@ -114,10 +114,9 @@ private struct SessionTabButton: View {
             }
             .overlay(alignment: .bottomLeading) {
                 if tab.isBusy {
-                    Capsule()
-                        .fill(Color.accentColor.opacity(0.8))
-                        .frame(width: 8, height: 2)
-                        .offset(x: 3, y: -3)
+                    OrbLoadingIndicator(diameter: 10)
+                        .accessibilityLabel("Session running")
+                        .offset(x: 2, y: -1)
                 }
             }
             .contentShape(Rectangle())

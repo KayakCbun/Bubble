@@ -333,21 +333,48 @@ struct OverlayLayoutCheck {
         expect(OverlaySpring.settled(value: value, velocity: velocity, target: 100), "spring settles within two seconds at 120Hz")
         expect(abs(value - 100) < 0.5, "settled value is on the target")
 
-        let sweepStart = RunningSweepPolicy.progress(at: 0)
-        let sweepQuarter = RunningSweepPolicy.progress(at: RunningSweepPolicy.cycleDuration / 4)
-        let sweepHalf = RunningSweepPolicy.progress(at: RunningSweepPolicy.cycleDuration / 2)
-        expect(sweepStart == 0, "running highlight starts at the leading edge")
-        expect(sweepQuarter > sweepStart && sweepHalf > sweepQuarter,
-               "running highlight advances continuously from left to right")
         expect(
-            RunningSweepPolicy.progress(at: RunningSweepPolicy.cycleDuration) == 0,
-            "running highlight loops without accumulating animation state"
+            OrbLoadingPolicy.planes == [
+                OrbLoadingPlane(
+                    tiltDegrees: -26,
+                    verticalScale: 0.3,
+                    duration: 2.6,
+                    direction: 1,
+                    restDegrees: 34,
+                    radius: 20
+                ),
+                OrbLoadingPlane(
+                    tiltDegrees: 34,
+                    verticalScale: 0.38,
+                    duration: 3.4,
+                    direction: -1,
+                    restDegrees: 158,
+                    radius: 16
+                ),
+                OrbLoadingPlane(
+                    tiltDegrees: 86,
+                    verticalScale: 0.26,
+                    duration: 4.2,
+                    direction: 1,
+                    restDegrees: 262,
+                    radius: 22
+                ),
+            ],
+            "the shared loading orb keeps all supplied plane geometry and timing"
+        )
+        let firstOrbPlane = OrbLoadingPolicy.planes[0]
+        expect(
+            OrbLoadingPolicy.angleDegrees(at: firstOrbPlane.duration / 4, plane: firstOrbPlane) == 90,
+            "the shared loading orb advances one quarter turn"
         )
         expect(
-            RunningSweepPolicy.minimumFrameInterval <= 1.0 / 120.0,
-            "running highlight is eligible to follow a 120 Hz display"
+            OrbLoadingPolicy.angleDegrees(
+                at: 42,
+                plane: firstOrbPlane,
+                reduceMotion: true
+            ) == firstOrbPlane.restDegrees,
+            "reduced motion holds each bead at its supplied resting angle"
         )
-
         expect(
             !OverlayPalettePolicy.needsScroll(items: 1, isMount: false),
             "a single command does not scroll"
