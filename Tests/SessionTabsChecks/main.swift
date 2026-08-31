@@ -111,9 +111,13 @@ do {
         trailingX: 36
     )
     expect(hitRegions == [
-        CGRect(x: 4, y: 60, width: 32, height: 32),
-        CGRect(x: 4, y: 100, width: 32, height: 32),
-    ], "physical hit regions must match the rendered tab strip")
+        CGRect(x: 0, y: 56, width: 36, height: 40),
+        CGRect(x: 0, y: 96, width: 36, height: 40),
+    ], "physical hit regions must match the connected vertical folder tabs")
+    expect(
+        hitRegions[0].maxY == hitRegions[1].minY,
+        "folder tabs must meet edge-to-edge without isolated button gaps"
+    )
     expect(
         SessionTabLayout.index(
             at: CGPoint(x: 29, y: 76),

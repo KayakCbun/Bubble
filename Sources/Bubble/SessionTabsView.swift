@@ -52,56 +52,86 @@ private struct SessionTabButton: View {
     let preview: String
     let select: () -> Void
     @State private var hovering = false
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var fill: Color {
+        if selected {
+            return colorScheme == .dark
+                ? Color(red: 0.16, green: 0.16, blue: 0.17)
+                : .white
+        }
+        if colorScheme == .dark {
+            return Color(white: hovering ? 0.22 : 0.19)
+        }
+        return Color(white: hovering ? 0.94 : 0.89)
+    }
+
+    private var tabShape: UnevenRoundedRectangle {
+        UnevenRoundedRectangle(
+            topLeadingRadius: SessionTabLayoutMetrics.bubble.cornerRadius,
+            bottomLeadingRadius: SessionTabLayoutMetrics.bubble.cornerRadius,
+            bottomTrailingRadius: 0,
+            topTrailingRadius: 0,
+            style: .continuous
+        )
+    }
+
+    private var backingFill: Color {
+        colorScheme == .dark ? Color(white: 0.12) : Color(white: 0.80)
+    }
 
     var body: some View {
-        HStack(spacing: 3) {
-            Button(action: select) {
-                Text("\(tab.ordinal)")
-                    .font(.system(size: 11, weight: selected ? .bold : .semibold, design: .rounded))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
+        Button(action: select) {
+            Text("\(tab.ordinal)")
+                .font(.system(size: 12, weight: selected ? .bold : .semibold, design: .rounded))
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .contentShape(Rectangle())
         }
-            .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+        .buttonStyle(.plain)
+            .foregroundStyle(selected ? Color.primary : Color.secondary)
             .frame(
-                width: SessionTabLayoutMetrics.bubble.collapsedWidth,
+                width: selected
+                    ? SessionTabLayoutMetrics.bubble.expandedWidth
+                    : SessionTabLayoutMetrics.bubble.collapsedWidth,
                 height: SessionTabLayoutMetrics.bubble.height
             )
             .background {
-                UnevenRoundedRectangle(
-                    topLeadingRadius: SessionTabLayoutMetrics.bubble.cornerRadius,
-                    bottomLeadingRadius: SessionTabLayoutMetrics.bubble.cornerRadius,
-                    bottomTrailingRadius: 3,
-                    topTrailingRadius: 3,
-                    style: .continuous
-                )
-                .fill(
-                    selected
-                        ? Color(nsColor: .controlBackgroundColor)
-                        : Color(nsColor: hovering ? .controlBackgroundColor : .windowBackgroundColor)
-                )
-                .overlay {
-                    UnevenRoundedRectangle(
-                        topLeadingRadius: SessionTabLayoutMetrics.bubble.cornerRadius,
-                        bottomLeadingRadius: SessionTabLayoutMetrics.bubble.cornerRadius,
-                        bottomTrailingRadius: 3,
-                        topTrailingRadius: 3,
-                        style: .continuous
-                    )
-                    .strokeBorder(
-                        selected ? Color.accentColor.opacity(0.58) : Color.primary.opacity(0.09),
-                        lineWidth: selected ? 1.5 : 1
-                    )
+                ZStack {
+                    // A slightly displaced sheet edge remains visible below
+                    // each tab. With zero strip spacing these edges overlap
+                    // into one vertical stack instead of separate buttons.
+                    tabShape
+                        .fill(backingFill)
+                        .offset(x: 2, y: 3)
+
+                    tabShape
+                        .fill(fill)
+                        .overlay {
+                            tabShape
+                                .strokeBorder(
+                                    selected
+                                        ? Color.primary.opacity(0.24)
+                                        : Color.primary.opacity(0.10),
+                                    lineWidth: selected ? 1.25 : 0.75
+                                )
+                        }
                 }
-                .shadow(color: .black.opacity(selected ? 0.13 : 0.08), radius: 4, y: 1)
+                .shadow(
+                    color: .black.opacity(selected ? 0.14 : 0.09),
+                    radius: selected ? 5 : 2,
+                    x: -1,
+                    y: 2
+                )
             }
             .overlay(alignment: .trailing) {
                 if selected {
-                    Capsule(style: .continuous)
-                        .fill(Color.accentColor)
-                        .frame(width: 3, height: 16)
-                        .offset(x: 1)
+                    // Cover both the tab's trailing stroke and the transcript
+                    // card's leading hairline so the selected tab reads as
+                    // one continuous folder surface with the conversation.
+                    Rectangle()
+                        .fill(fill)
+                        .frame(width: 7, height: SessionTabLayoutMetrics.bubble.height - 2)
+                        .offset(x: 3)
                 }
             }
             .overlay(alignment: .topLeading) {
@@ -129,7 +159,6 @@ private struct SessionTabButton: View {
                     NSCursor.arrow.set()
                 }
             }
-
         .frame(
             width: SessionTabLayoutMetrics.bubble.expandedWidth,
             height: SessionTabLayoutMetrics.bubble.height,

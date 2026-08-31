@@ -384,12 +384,12 @@ public struct SessionTabLayoutMetrics: Equatable, Sendable {
     }
 
     public static let bubble = SessionTabLayoutMetrics(
-        collapsedWidth: 20,
-        expandedWidth: 32,
-        height: 32,
-        spacing: 8,
-        topOffset: 24,
-        cornerRadius: 8
+        collapsedWidth: 32,
+        expandedWidth: 36,
+        height: 40,
+        spacing: 0,
+        topOffset: 20,
+        cornerRadius: 10
     )
 }
 
