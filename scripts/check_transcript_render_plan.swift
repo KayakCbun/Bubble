@@ -92,6 +92,28 @@ private enum TranscriptRenderPlanCheck {
             "only the terminal chunk invalidates for streaming presentation"
         )
         let streamingIDs = streaming.units.map(\.id)
+
+        // Mirrors the restored 2.3 KB usage/benchmark answer that previously
+        // became four separately clipped NSHostingView rows. Ordinary
+        // completed prose should stay one semantic row; chunking is reserved
+        // for genuinely large completed output and active streaming tails.
+        let ordinaryCompletedText = Array(
+            repeating: String(repeating: "usage benchmark tool context ", count: 12),
+            count: 8
+        ).joined(separator: "\n\n")
+        let ordinaryCompleted = TranscriptRenderPlan.build(
+            seeds: [TranscriptRenderSeed(
+                id: "ordinary-completed",
+                kind: .assistant,
+                text: ordinaryCompletedText
+            )],
+            branchSourceID: nil,
+            streamingSeedIDs: []
+        )
+        expect(
+            ordinaryCompleted.units.count == 1,
+            "ordinary completed prose stays one host instead of creating visible chunk seams"
+        )
         var grownSeeds = Array(seeds.suffix(2))
         grownSeeds[grownSeeds.count - 1].text += "\n\nA newly streamed tail paragraph."
         let grownStreaming = TranscriptRenderPlan.build(
@@ -152,6 +174,145 @@ private enum TranscriptRenderPlanCheck {
             + Double(incrementalElapsed.components.attoseconds) / 1_000_000_000_000_000
         expect(incremental.units.last?.text.hasSuffix("A newly streamed tail paragraph.") == true, "streaming updates only replace the live tail unit")
         expect(incrementalMilliseconds < 20, "a streaming tail update must stay near one frame, got \(incrementalMilliseconds)ms")
+        expect(planner.lastWork.mode == .incremental, "streaming tail uses the incremental planner path")
+        expect(planner.lastWork.rebuiltSeedCount == 1, "streaming tail rebuilds one source seed")
+        expect(planner.lastWork.rebuiltUnitCount < planner.lastWork.planUnitCount / 4, "streaming tail rebuilds only a small unit suffix")
+        expect(planner.lastWork.reusedUnitCount > planner.lastWork.rebuiltUnitCount, "streaming tail reuses the immutable unit prefix")
+
+        let directPlanner = TranscriptRenderPlanner()
+        let retainedDirectPlan = directPlanner.plan(seeds: seeds, branchSourceID: nil, streamingSeedIDs: [])
+        let detachedCopiesBeforeDirect = directPlanner.detachedPlanCopyCount
+        var directSeeds = seeds
+        directSeeds[directSeeds.count - 1].text += "\n\nDirect index-addressed tail."
+        directSeeds[directSeeds.count - 1].contentVersion &+= 1
+        directSeeds[directSeeds.count - 1].appendedText = "\n\nDirect index-addressed tail."
+        let directStart = ContinuousClock.now
+        let directDelta = directPlanner.applyStreamingUpdate(
+            seedIndex: directSeeds.count - 1,
+            seed: directSeeds[directSeeds.count - 1],
+            streaming: true,
+            branchSourceID: nil
+        )
+        let directElapsed = directStart.duration(to: .now)
+        let directMilliseconds = Double(directElapsed.components.seconds) * 1_000
+            + Double(directElapsed.components.attoseconds) / 1_000_000_000_000_000
+        expect(directDelta != nil, "index-addressed streaming update is accepted for the live tail")
+        expect(directPlanner.lastWork.inspectedSeedCount == 1, "index-addressed streaming update inspects one seed")
+        expect(directPlanner.lastWork.changedSeedIndices == [directSeeds.count - 1], "index-addressed update reports one changed seed")
+        expect(directPlanner.detachedPlanCopyCount == detachedCopiesBeforeDirect, "direct update does not copy a retained public plan")
+        expect(directPlanner.lastWork.detachedUnitCopyCount == 0, "direct update reports zero full-plan copies")
+        expect(retainedDirectPlan.units.last?.text != directSeeds.last?.text, "retained public plan remains immutable after direct update")
+        expect(directMilliseconds < 20, "index-addressed streaming update stays near one frame, got \(directMilliseconds)ms")
+        if let directDelta {
+            expect(directDelta.changedUnits.count < directDelta.fullUnitCount / 4, "index-addressed update materializes only the changed unit suffix")
+        }
+        directSeeds[directSeeds.count - 1].text += " token"
+        directSeeds[directSeeds.count - 1].contentVersion &+= 1
+        directSeeds[directSeeds.count - 1].appendedText = " token"
+        let steadyStreamingDelta = directPlanner.applyStreamingUpdate(
+            seedIndex: directSeeds.count - 1,
+            seed: directSeeds[directSeeds.count - 1],
+            streaming: true,
+            branchSourceID: nil
+        )
+        expect(
+            steadyStreamingDelta?.changedUnits.count == 1,
+            "steady streaming updates only the live render unit, not completed chunks"
+        )
+        directSeeds[directSeeds.count - 1].contentVersion &+= 1
+        directSeeds[directSeeds.count - 1].appendedText = nil
+        let metadataOnlyDelta = directPlanner.applyStreamingUpdate(
+            seedIndex: directSeeds.count - 1,
+            seed: directSeeds[directSeeds.count - 1],
+            streaming: true,
+            branchSourceID: nil
+        )
+        expect(
+            metadataOnlyDelta?.changedUnits.count == 1,
+            "metadata-only tool/image mutations still refresh their mounted row"
+        )
+        expect(
+            !WorkspaceTranscriptChunker.canIncrementallyAppend("\n```swift\n"),
+            "a newly opened fenced block leaves the paragraph-tail fast path"
+        )
+
+        let thoughtPlanner = TranscriptRenderPlanner()
+        var thoughtSeeds = [
+            TranscriptRenderSeed(id: "user-thought", kind: .user, text: "Question"),
+            TranscriptRenderSeed(id: "thought-tail", kind: .other, text: "Thinking")
+        ]
+        _ = thoughtPlanner.plan(seeds: thoughtSeeds, branchSourceID: nil, streamingSeedIDs: [])
+        thoughtSeeds[1].text += " one more step"
+        thoughtSeeds[1].contentVersion &+= 1
+        thoughtSeeds[1].appendedText = " one more step"
+        let thoughtDelta = thoughtPlanner.applyStreamingUpdate(
+            seedIndex: 1,
+            seed: thoughtSeeds[1],
+            streaming: false,
+            branchSourceID: nil
+        )
+        expect(
+            thoughtDelta?.changedUnits.count == 1,
+            "thought/COT text uses the same single-row delta path"
+        )
+        let coalescedPlanner = TranscriptRenderPlanner()
+        var coalescedSeeds = [
+            TranscriptRenderSeed(id: "coalesced-user", kind: .user, text: "Question"),
+            TranscriptRenderSeed(id: "coalesced-thought", kind: .other, text: "Thought"),
+            TranscriptRenderSeed(id: "coalesced-answer", kind: .assistant, text: "Answer")
+        ]
+        _ = coalescedPlanner.plan(
+            seeds: coalescedSeeds,
+            branchSourceID: nil,
+            streamingSeedIDs: ["coalesced-thought", "coalesced-answer"]
+        )
+        coalescedSeeds[1].text += " step"
+        coalescedSeeds[2].text += " token"
+        coalescedSeeds[1].contentVersion &+= 1
+        coalescedSeeds[1].appendedText = " step"
+        coalescedSeeds[2].contentVersion &+= 1
+        coalescedSeeds[2].appendedText = " token"
+        let coalescedThought = coalescedPlanner.applyStreamingUpdate(
+            seedIndex: 1,
+            seed: coalescedSeeds[1],
+            streaming: true,
+            branchSourceID: nil
+        )
+        let coalescedAnswer = coalescedPlanner.applyStreamingUpdate(
+            seedIndex: 2,
+            seed: coalescedSeeds[2],
+            streaming: true,
+            branchSourceID: nil
+        )
+        expect(
+            coalescedThought?.changedUnits.count == 1
+                && coalescedAnswer?.changedUnits.count == 1,
+            "same-frame thought and answer updates stay row-local"
+        )
+
+        let unchangedStreaming = planner.plan(
+            seeds: streamingSeeds,
+            branchSourceID: nil,
+            streamingSeedIDs: ["assistant-599"]
+        )
+        expect(unchangedStreaming == incremental, "unchanged stream input returns the cached plan")
+        expect(planner.lastWork.mode == .cached, "unchanged stream input takes the cached path")
+
+        var concurrentlyPatched = streamingSeeds
+        concurrentlyPatched[0].text = "A late completed-prefix correction"
+        let corrected = planner.plan(
+            seeds: concurrentlyPatched,
+            branchSourceID: nil,
+            streamingSeedIDs: ["assistant-599"]
+        )
+        expect(
+            corrected.units.first?.text == "A late completed-prefix correction",
+            "an active stream never hides a simultaneous completed-prefix correction"
+        )
+        expect(
+            planner.lastWork.mode == .rebuilt,
+            "a completed-prefix correction safely leaves the tail-only fast path"
+        )
 
         let structuredSource = "```swift\n" + Array(repeating: "let stableStructuredRow = true", count: 5_000).joined(separator: "\n")
         let structuredPlanner = TranscriptRenderPlanner()
@@ -178,6 +339,45 @@ private enum TranscriptRenderPlanCheck {
             "structured stream growth preserves the transcript row identity"
         )
         expect(structuredMilliseconds < 20, "100k+ structured stream planning must stay near one frame, got \(structuredMilliseconds)ms")
+        var directStructuredSeed = structuredSeed
+        let directStructuredPlanner = TranscriptRenderPlanner()
+        _ = directStructuredPlanner.plan(
+            seeds: [directStructuredSeed],
+            branchSourceID: nil,
+            streamingSeedIDs: ["structured"]
+        )
+        var directStructuredDurations: [Double] = []
+        for version in 1...20 {
+            let token = "\nlet directToken\(version) = true"
+            directStructuredSeed.text += token
+            directStructuredSeed.contentVersion = UInt64(version)
+            directStructuredSeed.appendedText = token
+            let started = ContinuousClock.now
+            let delta = directStructuredPlanner.applyStreamingUpdate(
+                seedIndex: 0,
+                seed: directStructuredSeed,
+                streaming: true,
+                branchSourceID: nil
+            )
+            let elapsed = started.duration(to: .now)
+            directStructuredDurations.append(
+                Double(elapsed.components.seconds) * 1_000
+                    + Double(elapsed.components.attoseconds) / 1_000_000_000_000_000
+            )
+            expect(delta?.changedUnits.count == 1, "structured direct stream updates one semantic unit")
+        }
+        expect(
+            directStructuredDurations.sorted()[18] < 17,
+            "100k+ structured direct updates stay inside one frame"
+        )
+        expect(
+            !WorkspaceTranscriptChunker.canIncrementallyAppend("\n| A | B |\n"),
+            "GFM table append leaves the paragraph-local fast path"
+        )
+        expect(
+            !WorkspaceTranscriptChunker.canIncrementallyAppend("\ngraph TD"),
+            "diagram append leaves the paragraph-local fast path"
+        )
         let tablePlanner = TranscriptRenderPlanner()
         let tableSeed = TranscriptRenderSeed(id: "table", kind: .assistant, text: giantTable)
         let tableBefore = tablePlanner.plan(seeds: [tableSeed], branchSourceID: nil, streamingSeedIDs: ["table"])
@@ -194,6 +394,40 @@ private enum TranscriptRenderPlanCheck {
             "table stream growth preserves every existing row identity"
         )
         expect(tableMilliseconds < 20, "100k+ table stream planning must stay near one frame, got \(tableMilliseconds)ms")
+        let longProsePlanner = TranscriptRenderPlanner()
+        var longProseSeed = TranscriptRenderSeed(
+            id: "long-prose",
+            kind: .assistant,
+            text: Array(repeating: String(repeating: "paragraph text ", count: 35), count: 400)
+                .joined(separator: "\n\n")
+        )
+        _ = longProsePlanner.plan(
+            seeds: [longProseSeed],
+            branchSourceID: nil,
+            streamingSeedIDs: ["long-prose"]
+        )
+        var longProseDurations: [Double] = []
+        for version in 0..<20 {
+            let token = " token-\(version)"
+            longProseSeed.text += token
+            longProseSeed.contentVersion &+= 1
+            longProseSeed.appendedText = token
+            let started = ContinuousClock.now
+            let delta = longProsePlanner.applyStreamingUpdate(
+                seedIndex: 0,
+                seed: longProseSeed,
+                streaming: true,
+                branchSourceID: nil
+            )
+            let elapsed = started.duration(to: .now)
+            longProseDurations.append(
+                Double(elapsed.components.seconds) * 1_000
+                    + Double(elapsed.components.attoseconds) / 1_000_000_000_000_000
+            )
+            expect(delta?.changedUnits.count == 1, "long prose token updates only its live tail unit")
+        }
+        let longProseP95 = longProseDurations.sorted()[18]
+        expect(longProseP95 < 17, "long prose token planning p95 stays inside one frame, got \(longProseP95)ms")
         let mixedTablePlanner = TranscriptRenderPlanner()
         let mixedTableSeed = TranscriptRenderSeed(id: "mixed-table", kind: .assistant, text: mixedTable)
         let mixedTableBefore = mixedTablePlanner.plan(

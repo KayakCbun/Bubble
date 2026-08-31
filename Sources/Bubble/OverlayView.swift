@@ -3,6 +3,15 @@ import BubbleMounts
 import BubbleSessions
 import SwiftUI
 
+private func requestTranscriptRowMeasurement(_ sourceID: String) {
+    DispatchQueue.main.async {
+        NotificationCenter.default.post(
+            name: .transcriptRowIntrinsicSizeChanged,
+            object: sourceID
+        )
+    }
+}
+
 enum OverlayMetrics {
     static let inputWidth: CGFloat = 520
     static let transcriptWidthDefault: CGFloat = 760
@@ -70,12 +79,23 @@ struct OverlayView: View {
     var sessionSwitchLoading = false
 
     @FocusState private var focused: Bool
-    @State private var expandedThoughts: Set<UUID> = []
-    @State private var expandedToolGroups: Set<String> = []
-    @State private var expandedTools: Set<UUID> = []
-    @State private var expandedFileChanges: Set<String> = []
     @State private var followState = TranscriptFollowState()
     @State private var followQueued = false
+    @State private var transcriptSurfaceCommand: AppKitTranscriptSurfaceOperation?
+    @State private var transcriptSurfaceCommandToken: UInt64 = 0
+    @State private var transcriptSurfaceGeneration: UInt64 = 0
+    @State private var historyTicksCache = TranscriptProjectionCache<
+        OverlayHistoryTicksKey,
+        [HistoryTick]
+    >()
+    /// Source rows live in a segmented projection store. A streaming token
+    /// updates one record by id; only explicit structural deltas rebuild
+    /// `displayRows` and its grouping.
+    @State private var transcriptProjectionStore = TranscriptProjectionStore<TranscriptRow>()
+    @State private var transcriptRenderRowStore = TranscriptProjectionStore<MainTranscriptRenderRow>()
+    @State private var transcriptSurfaceEntryStore = TranscriptProjectionStore<OverlayTranscriptSurfaceEntry>()
+    @State private var transcriptProjectionSync = TranscriptProjectionSyncState()
+    @State private var workspaceRowsCache = WorkspaceRowsProjectionStore()
     private var inputShape: RoundedRectangle {
         RoundedRectangle(cornerRadius: OverlayMetrics.cornerRadius, style: .continuous)
     }
@@ -106,7 +126,7 @@ struct OverlayView: View {
 
     private var isTranscriptPresented: Bool {
         OverlayLayoutPolicy.isTranscriptPresented(
-            itemCount: store.visibleItems.count,
+            itemCount: store.hasTranscriptItems ? 1 : 0,
             isStartingSession: store.isStartingSession,
             sessionTabCount: sessionTabCount
         ) || store.sideStagePresented
@@ -148,6 +168,17 @@ struct OverlayView: View {
             sideStageWidth: previewWidth,
             visibleWidth: store.visibleScreenWidth
         )
+    }
+
+    /// `runtimeID` identifies the tab process, not the Pi conversation.  A
+    /// `/resume` replace keeps the same runtime while switching the underlying
+    /// session, so the transcript surface must use the current Pi id as its
+    /// identity and fall back only while the client is connecting.
+    private var transcriptSessionIdentity: String {
+        if let sessionID = store.currentSessionID, !sessionID.isEmpty {
+            return sessionID
+        }
+        return "runtime-\(store.runtimeID.uuidString)"
     }
 
     private var layout: OverlayLayout {
@@ -208,17 +239,16 @@ struct OverlayView: View {
                             insertion: .move(edge: .bottom).combined(with: .opacity),
                             removal: .opacity.combined(with: .offset(y: 8))
                         ))
-                } else if store.slashMenuPresented {
+                } else {
                     slashPalette
                         .offset(y: -(composerHeight + OverlayMetrics.stackSpacing))
-                        .transition(.asymmetric(
-                            insertion: .move(edge: .bottom).combined(with: .opacity),
-                            removal: .opacity.combined(with: .offset(y: 6))
-                        ))
+                        .opacity(store.slashMenuPresented ? 1 : 0)
+                        .offset(y: store.slashMenuPresented ? 0 : 6)
+                        .allowsHitTesting(store.slashMenuPresented)
+                        .accessibilityHidden(!store.slashMenuPresented)
                 }
             }
             .animation(OverlayMotion.snappy, value: store.showAvatarPicker)
-            .animation(OverlayMotion.quick, value: store.slashMenuPresented)
         }
         .frame(
             maxWidth: .infinity,
@@ -246,7 +276,6 @@ struct OverlayView: View {
                     .allowsHitTesting(store.sideStageChromeVisible)
             }
         }
-        .animation(OverlayMotion.composer, value: composerHeight)
         .padding(OverlayMetrics.shadowInset)
         .overlay {
             QuoteChipLayer(store: store)
@@ -276,12 +305,18 @@ struct OverlayView: View {
     }
 
     private func resetSessionPresentationState() {
-        expandedThoughts.removeAll(keepingCapacity: true)
-        expandedToolGroups.removeAll(keepingCapacity: true)
-        expandedTools.removeAll(keepingCapacity: true)
-        expandedFileChanges.removeAll(keepingCapacity: true)
         followState = TranscriptFollowState()
         followQueued = false
+        transcriptSurfaceCommand = nil
+        transcriptSurfaceCommandToken &+= 1
+        transcriptSurfaceGeneration &+= 1
+        historyTicksCache.reset()
+        transcriptProjectionStore.reset()
+        transcriptRenderRowStore.reset()
+        transcriptSurfaceEntryStore.reset()
+        transcriptProjectionSync.sessionID = nil
+        transcriptProjectionSync.revision = .max
+        transcriptProjectionSync.structureKey = nil
         QuoteSelectionMonitor.shared.dismiss()
     }
 
@@ -357,7 +392,7 @@ struct OverlayView: View {
                 Text(stage.name)
                     .font(.system(size: 13, weight: .medium))
                     .lineLimit(1)
-                if let item = store.items.first(where: { $0.id == stage.cardId }),
+                if let item = store.transcriptItem(stage.cardId),
                    let status = item.workspaceStatus {
                     if status == "running" {
                         RunningSweepLabel()
@@ -388,12 +423,23 @@ struct OverlayView: View {
     }
 
     private var workspaceTranscriptList: some View {
-        let rows = workspaceRows(from: store.visibleWorkspacePaneItems)
-        let live = store.childBusy && store.workspaceStage?.path == store.activeWorkspaceBrief?.path
+        let mutationHistory = store.workspacePaneMutationHistory(after: workspaceRowsCache.revision)
+        let rowBoxes = workspaceRowsCache.value(for: WorkspaceRowsProjectionKey(
+            revision: store.workspacePaneRevision,
+            workspaceRoot: store.workspaceStage?.path,
+            childBusy: store.childBusy,
+            streamingAssistantID: store.workspacePaneStreamingAssistantId,
+            streamingThoughtID: store.workspacePaneStreamingThoughtId
+        ), items: store.workspacePaneItems,
+           changedItems: Array(store.workspacePaneChangedItems.values),
+           mutationHistory: mutationHistory) {
+            workspaceRows(from: store.visibleWorkspacePaneItems)
+        }
         return ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: OverlaySurface.rowSpacing) {
-                    ForEach(rows) { row in
+                    ForEach(rowBoxes) { box in
+                        let row = box.row
                         Group {
                             switch row {
                             case .transcript(let transcript):
@@ -420,10 +466,6 @@ struct OverlayView: View {
                         }
                         .padding(.top, row.isContinuation ? -10 : 0)
                         .id(workspaceRowScrollId(row))
-                    }
-                    if live, let started = store.items.first(where: { $0.id == store.workspaceStage?.cardId })?.workspaceStartedAt {
-                        WorkingRow(startedAt: Date(timeIntervalSince1970: started))
-                            .id("ws-workspace-working")
                     }
                     Color.clear
                         .frame(height: OverlayMetrics.transcriptCornerRadius)
@@ -452,13 +494,10 @@ struct OverlayView: View {
                     scrollWorkspacePane(proxy)
                 }
             }
-            .onChange(of: store.workspacePaneItems.count) { _, _ in
-                followWorkspacePane(proxy)
-            }
-            .onChange(of: store.workspacePaneItems.last?.text) { _, _ in
-                followWorkspacePane(proxy)
-            }
-            .onChange(of: store.workspacePaneItems.last?.toolStatus) { _, _ in
+            // Follow the constant-size mutation revision rather than asking
+            // SwiftUI to retain and compare a growing assistant string on
+            // every streamed token.
+            .onChange(of: store.workspacePaneRevision) { _, _ in
                 followWorkspacePane(proxy)
             }
             .onChange(of: store.childBusy) { _, _ in
@@ -615,6 +654,17 @@ struct OverlayView: View {
     }
 
     private var historyTicks: [HistoryTick] {
+        let tree = store.conversationTree
+        let key = OverlayHistoryTicksKey(
+            projection: transcriptProjectionStructureKeyValue,
+            treeLeafID: tree?.leafID,
+            treeEntryCount: tree?.entries.count ?? 0,
+            treeLastEntryID: tree?.entries.last?.id
+        )
+        return historyTicksCache.value(for: key) { buildHistoryTicks() }
+    }
+
+    private func buildHistoryTicks() -> [HistoryTick] {
         let entryIDByItemID = Dictionary(uniqueKeysWithValues: store.items.compactMap { item in
             item.sourceEntryId.map { (item.id, $0) }
         })
@@ -628,287 +678,925 @@ struct OverlayView: View {
         }
     }
 
-    private var mainTranscriptRows: [MainTranscriptRenderRow] {
-        let baseRows = displayRows
-        let seeds = baseRows.map { row -> TranscriptRenderSeed in
-            let kind: TranscriptRenderSeed.Kind
-            let text: String
-            switch row {
-            case .message(let item) where item.kind == .assistant:
-                kind = .assistant
-                text = item.text
-            case .message(let item) where item.kind == .user:
-                kind = .user
-                text = item.text
-            default:
-                kind = .other
-                text = ""
-            }
-            return TranscriptRenderSeed(
-                id: row.id,
-                kind: kind,
-                text: text,
-                sourceIDs: row.sourceItemIDs,
-                hasMedia: {
-                    if case .message(let item) = row { return !(item.imageNames ?? []).isEmpty }
-                    return false
-                }()
+    private struct TranscriptProjectionUpdateResult {
+        let changedRows: [MainTranscriptRenderRow]
+        let requiresSurfaceReplace: Bool
+    }
+
+    /// Synchronizes the segmented source projection with ChatStore's explicit
+    /// transcript delta. Token updates never call `visibleItems` or
+    /// `groupedRows`; they replace one record by id and hand the planner a
+    /// shared seed buffer. Restore, branch, history-window and unknown
+    /// mutations intentionally fall back to one authoritative rebuild.
+    private func synchronizeTranscriptProjection() -> TranscriptProjectionUpdateResult {
+        let sessionID = transcriptSessionIdentity
+        let structureKey = transcriptProjectionStructureKeyValue
+        let needsStructureReplace = transcriptProjectionSync.sessionID != sessionID
+            || transcriptProjectionSync.structureKey != structureKey
+        let didStructureReplace = needsStructureReplace
+        if needsStructureReplace {
+            transcriptProjectionStore.reset()
+            transcriptRenderRowStore.reset()
+            transcriptSurfaceEntryStore.reset()
+            transcriptProjectionSync.sessionID = sessionID
+            transcriptProjectionSync.structureKey = structureKey
+            // The structural rebuild already reflects the current source
+            // revision. Mark it consumed so the subsequent planner call does
+            // not repeat the same full grouping pass with a stale `.rebuild`
+            // delta.
+            transcriptProjectionSync.revision = store.transcriptRevision
+            rebuildTranscriptProjection()
+        }
+
+        let revision = store.transcriptRevision
+        // Composer focus, hover, palette, and other parent-state updates can
+        // reevaluate this body while the transcript itself is unchanged. Do
+        // not re-enter the planner (whose cold correctness path may inspect
+        // the complete seed sequence) unless either structure or revision
+        // actually changed.
+        if !didStructureReplace, transcriptProjectionSync.revision == revision {
+            return TranscriptProjectionUpdateResult(
+                changedRows: [],
+                requiresSurfaceReplace: false
             )
         }
+        var sourceUpdates: [ChatItem] = []
+        let delta = store.transcriptDelta
+        if !didStructureReplace && transcriptProjectionSync.revision != revision {
+            let consumed = transcriptProjectionSync.revision
+            let skippedRevision = consumed != .max
+                && revision > consumed
+                && revision - consumed > 1
+            if !skippedRevision, let updates = applyTranscriptDelta(delta) {
+                sourceUpdates = updates
+            } else {
+                // Observation may coalesce multiple producer commits into one
+                // body pass. The latest delta cannot describe an earlier
+                // source mutation, so a revision gap is an explicit cold
+                // correctness boundary rather than silently dropping a row.
+                rebuildTranscriptProjection()
+            }
+            transcriptProjectionSync.revision = revision
+        }
+
         var streamingSeedIDs: Set<String> = []
         if store.isBusy, let id = store.streamingAssistantId {
             streamingSeedIDs.insert(id.uuidString)
         }
-        let plan = store.transcriptPlanner.plan(
-            seeds: seeds,
+        if store.isBusy, let id = store.streamingThoughtId {
+            streamingSeedIDs.insert(id.uuidString)
+        }
+        var plannerDeltas: [TranscriptRenderPlannerDelta] = []
+        var directUpdatesAccepted = !sourceUpdates.isEmpty
+        for item in sourceUpdates {
+            guard let record = transcriptProjectionStore.record(id: item.id.uuidString)
+                    ?? transcriptProjectionStore.record(sourceID: item.id.uuidString),
+                  let seedIndex = transcriptProjectionStore.index(of: record.id),
+                  let plannerDelta = store.transcriptPlanner.applyStreamingUpdate(
+                    seedIndex: seedIndex,
+                    seed: record.seed,
+                    streaming: streamingSeedIDs.contains(record.seed.id),
+                    branchSourceID: store.branchDraft?.sourceItemID.uuidString
+                  ) else {
+                directUpdatesAccepted = false
+                break
+            }
+            plannerDeltas.append(plannerDelta)
+        }
+        var directChangedRows: [MainTranscriptRenderRow] = []
+        if directUpdatesAccepted {
+            for plannerDelta in plannerDeltas {
+                guard let rows = applyTranscriptRenderPlanDelta(plannerDelta) else {
+                    directUpdatesAccepted = false
+                    break
+                }
+                directChangedRows.append(contentsOf: rows)
+            }
+        }
+        if directUpdatesAccepted {
+            let changedRows = directChangedRows
+            let needsSurfaceReplace = changedRows.contains {
+                transcriptSurfaceEntryStore.record(id: $0.id) == nil
+            }
+            return TranscriptProjectionUpdateResult(
+                changedRows: needsSurfaceReplace ? [] : changedRows,
+                requiresSurfaceReplace: needsSurfaceReplace
+            )
+        }
+
+        let planUpdate = store.transcriptPlanner.planUpdate(
+            seeds: transcriptProjectionStore.seeds,
             branchSourceID: store.branchDraft?.sourceItemID.uuidString,
             streamingSeedIDs: streamingSeedIDs
         )
-        var activeHistoryTickID: String?
-        return plan.units.map { unit in
-            if unit.kind == .user {
-                activeHistoryTickID = unit.id
+        if sourceUpdates.count > 1 {
+            // A failed multi-row direct update may already have advanced one
+            // planner cache entry. Rebuild the authoritative render rows so
+            // no coalesced thought/assistant update can be omitted.
+            rebuildTranscriptRenderRows(planUpdate.plan)
+            return TranscriptProjectionUpdateResult(
+                changedRows: [],
+                requiresSurfaceReplace: true
+            )
+        }
+        if planUpdate.isIncremental,
+           let changedRows = applyTranscriptRenderPlanUpdate(planUpdate) {
+            let needsSurfaceReplace = changedRows.contains {
+                transcriptSurfaceEntryStore.record(id: $0.id) == nil
             }
+            return TranscriptProjectionUpdateResult(
+                changedRows: needsSurfaceReplace ? [] : changedRows,
+                requiresSurfaceReplace: needsSurfaceReplace
+            )
+        } else {
+            rebuildTranscriptRenderRows(planUpdate.plan)
+            return TranscriptProjectionUpdateResult(
+                changedRows: [],
+                requiresSurfaceReplace: true
+            )
+        }
+    }
+
+    private func applyTranscriptDelta(_ delta: ChatStoreTranscriptDelta) -> [ChatItem]? {
+        let items: [ChatItem]
+        switch delta {
+        case .update(let item):
+            items = [item]
+        case .updates(let updates):
+            items = updates
+        case .append, .remove, .rebuild:
+            // New user/tool rows can change collapsed-tool and file-change
+            // grouping, so append/remove deltas deliberately rebuild.
+            return nil
+        }
+        for item in items {
+            let sourceID = item.id.uuidString
+            guard let existing = transcriptProjectionStore.record(id: sourceID)
+                    ?? transcriptProjectionStore.record(sourceID: sourceID),
+                  let source = updatedTranscriptRow(existing.source, with: item) else {
+                return nil
+            }
+            let work = transcriptProjectionStore.apply(.update(record: TranscriptProjectionRecord(
+                id: existing.id,
+                seed: transcriptRenderSeed(for: source),
+                source: source
+            )))
+            guard work.mode == .incremental else { return nil }
+        }
+        return items
+    }
+
+    private func rebuildTranscriptProjection() {
+        let baseRows = displayRows
+        let records = baseRows.map { row in
+            TranscriptProjectionRecord(
+                id: row.id,
+                seed: transcriptRenderSeed(for: row),
+                source: row
+            )
+        }
+        _ = transcriptProjectionStore.apply(.replace(records: records))
+    }
+
+    private func rebuildTranscriptRenderRows(_ plan: TranscriptRenderPlan) {
+        let rows = plan.units.compactMap { unit -> MainTranscriptRenderRow? in
+            guard let record = transcriptProjectionStore.record(at: unit.seedIndex) else { return nil }
             return MainTranscriptRenderRow(
                 unit: unit,
-                source: baseRows[unit.seedIndex],
-                historyTickID: activeHistoryTickID
+                source: record.source,
+                historyTickID: transcriptProjectionStore.historyTickID(at: unit.seedIndex)
             )
         }
-    }
-
-    @ViewBuilder
-    private var transcriptList: some View {
-        let rows = mainTranscriptRows
-        let ticks = historyTicks
-        if TranscriptStackPolicy.usesLazyStack(
-            rowCount: rows.count,
-            sourceItemCount: store.visibleItems.count
-        ) {
-            transcriptScroll(rows: rows, ticks: ticks) { proxy in
-                transcriptStackStyle(
-                    LazyVStack(alignment: .leading, spacing: OverlaySurface.rowSpacing) {
-                        transcriptStackContent(rows)
-                    },
-                    hasHistoryTicks: !ticks.isEmpty,
-                    proxy: proxy
-                )
-            }
-        } else {
-            transcriptScroll(rows: rows, ticks: ticks) { proxy in
-                transcriptStackStyle(
-                    VStack(alignment: .leading, spacing: OverlaySurface.rowSpacing) {
-                        transcriptStackContent(rows)
-                    },
-                    hasHistoryTicks: !ticks.isEmpty,
-                    proxy: proxy
-                )
-            }
+        let records = rows.map { row in
+            TranscriptProjectionRecord(
+                id: row.id,
+                seed: transcriptRenderSeed(for: row),
+                source: row
+            )
         }
+        _ = transcriptRenderRowStore.apply(.replace(records: records))
     }
 
-    private func transcriptScroll<Content: View>(
-        rows: [MainTranscriptRenderRow],
-        ticks: [HistoryTick],
-        @ViewBuilder content: @escaping (ScrollViewProxy) -> Content
-    ) -> some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                content(proxy)
-            }
-            .scrollIndicators(.never)
-            .scrollBounceBehavior(.basedOnSize)
-            .contentMargins(.bottom, 0, for: .scrollContent)
-            .transaction { transaction in
-                if store.isBusy, followState.followingTurnTargetID == nil {
-                    transaction.disablesAnimations = true
-                }
-            }
-            .overlay {
-                if store.isStartingSession {
-                    ProgressView()
-                        .controlSize(.small)
-                        .accessibilityLabel("Starting Bubble")
-                }
-            }
-            .overlay(alignment: .leading) {
-                if !ticks.isEmpty {
-                    HistoryTickRail(
-                        ticks: ticks,
-                        viewportHeight: transcriptHeight
-                    ) { id in
-                        navigateToHistory(id: id.uuidString, proxy: proxy)
-                    }
-                }
-            }
-            .overlay(alignment: .bottom) {
-                if followState.showsScrollToEnd {
-                    ScrollToEndChip {
-                        scrollToTranscriptEnd(proxy)
-                        restoreFocus()
-                    }
-                    .padding(.bottom, 10)
-                }
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .transcriptHistoryNavigationSettled)) { note in
-                guard let targetID = note.userInfo?[TranscriptViewportUserInfoKey.targetID] as? String,
-                      let atEnd = note.userInfo?[TranscriptViewportUserInfoKey.atEnd] as? Bool else { return }
-                var next = followState
-                if next.finishHistoryNavigation(targetID: targetID, atEnd: atEnd) {
-                    followState = next
-                }
-            }
-            .onAppear {
-                requestFollowLatest(proxy)
-                if let targetID = ProcessInfo.processInfo.environment[
-                    "BUBBLE_HISTORY_NAVIGATION_AUDIT_TARGET"
-                ], !targetID.isEmpty {
-                    OverlayPulse.shared.onNextFrame {
-                        navigateToHistory(id: targetID, proxy: proxy)
-                    }
-                }
-            }
-            .onChange(of: store.items.count) { _, _ in
-                if let item = store.items.last, item.kind == .user {
-                    followState.beginFollowingTurn(targetID: item.id.uuidString)
-                }
-                requestCurrentFollowTarget(proxy)
-            }
-            .onChange(of: store.transcriptRevision) { _, _ in
-                requestCurrentFollowTarget(
-                    proxy,
-                    allowsLatest: followState.shouldFollowRevision(isBusy: store.isBusy)
+    private func applyTranscriptRenderPlanUpdate(
+        _ update: TranscriptRenderPlannerUpdate
+    ) -> [MainTranscriptRenderRow]? {
+        guard !update.changedUnitRanges.isEmpty else { return [] }
+        var changedRows: [MainTranscriptRenderRow] = []
+        for range in update.changedUnitRanges {
+            for unitIndex in range {
+                guard update.plan.units.indices.contains(unitIndex) else { return nil }
+                let unit = update.plan.units[unitIndex]
+                guard let sourceRecord = transcriptProjectionStore.record(at: unit.seedIndex) else { return nil }
+                let row = MainTranscriptRenderRow(
+                    unit: unit,
+                    source: sourceRecord.source,
+                    historyTickID: transcriptProjectionStore.historyTickID(at: unit.seedIndex)
                 )
-            }
-            .onChange(of: store.resumeDestination.prompt?.sessionID) { _, sessionID in
-                guard sessionID != nil else { return }
-                OverlayPulse.shared.onNextFrame {
-                    withAnimation(OverlayMotion.scroll) {
-                        proxy.scrollTo("resume-destination", anchor: .bottom)
-                    }
-                }
-            }
-            .onChange(of: store.branchDraft?.sourceItemID) { _, sourceID in
-                guard let sourceID else { return }
-                followState.userNavigated(atEnd: false)
-                OverlayPulse.shared.onNextFrame {
-                    withAnimation(OverlayMotion.scroll) {
-                        proxy.scrollTo(sourceID.uuidString, anchor: .center)
-                    }
-                }
-            }
-            .onChange(of: store.isBusy) { wasBusy, isBusy in
-                if wasBusy, !isBusy, TranscriptFollowTriggerPolicy.shouldRequestLatest(
-                    trigger: .turnSettled,
-                    followsLatest: followState.followsLatest,
-                    isBusy: isBusy
-                ) {
-                    requestSettledFollowLatest(proxy)
+                let record = TranscriptProjectionRecord(
+                    id: row.id,
+                    seed: transcriptRenderSeed(for: row),
+                    source: row
+                )
+                let work: TranscriptProjectionWork
+                if transcriptRenderRowStore.record(id: row.id) != nil {
+                    work = transcriptRenderRowStore.apply(.update(record: record))
+                } else if unitIndex == transcriptRenderRowStore.count {
+                    work = transcriptRenderRowStore.apply(.append(records: [record]))
                 } else {
-                    requestCurrentFollowTarget(proxy)
+                    return nil
                 }
+                guard work.mode == .incremental else { return nil }
+                changedRows.append(row)
             }
-            .onChange(of: composerHeight) { _, _ in
-                if followState.followsLatest {
-                    requestFollowLatest(proxy)
+        }
+        guard transcriptRenderRowStore.count == update.plan.units.count else { return nil }
+        return changedRows
+    }
+
+    private func applyTranscriptRenderPlanDelta(
+        _ delta: TranscriptRenderPlannerDelta
+    ) -> [MainTranscriptRenderRow]? {
+        let oldRange = delta.previousUnitRange
+        guard oldRange.lowerBound >= 0,
+              oldRange.upperBound <= transcriptRenderRowStore.count,
+              delta.changedUnits.count >= oldRange.count,
+              oldRange.upperBound == transcriptRenderRowStore.count
+                || delta.changedUnits.count == oldRange.count else { return nil }
+        var changedRows: [MainTranscriptRenderRow] = []
+        changedRows.reserveCapacity(delta.changedUnits.count)
+        for (offset, unit) in delta.changedUnits.enumerated() {
+            guard let sourceRecord = transcriptProjectionStore.record(at: unit.seedIndex) else { return nil }
+            let row = MainTranscriptRenderRow(
+                unit: unit,
+                source: sourceRecord.source,
+                historyTickID: transcriptProjectionStore.historyTickID(at: unit.seedIndex)
+            )
+            let record = TranscriptProjectionRecord(
+                id: row.id,
+                seed: transcriptRenderSeed(for: row),
+                source: row
+            )
+            let unitIndex = delta.newUnitRange.lowerBound + offset
+            let work: TranscriptProjectionWork
+            if transcriptRenderRowStore.record(id: row.id) != nil {
+                work = transcriptRenderRowStore.apply(.update(record: record))
+            } else if unitIndex == transcriptRenderRowStore.count {
+                work = transcriptRenderRowStore.apply(.append(records: [record]))
+            } else {
+                return nil
+            }
+            guard work.mode == .incremental else { return nil }
+            changedRows.append(row)
+        }
+        guard transcriptRenderRowStore.count == delta.fullUnitCount else { return nil }
+        return changedRows
+    }
+
+    private func transcriptRenderSeed(for row: TranscriptRow) -> TranscriptRenderSeed {
+        let kind: TranscriptRenderSeed.Kind
+        let text: String
+        switch row {
+        case .message(let item) where item.kind == .assistant:
+            kind = .assistant
+            text = item.text
+        case .message(let item) where item.kind == .user:
+            kind = .user
+            text = item.text
+        case .message(let item) where item.kind == .thought:
+            // Thought/COT rows stream through the same single-row delta seam.
+            // Keeping their text in the seed lets the planner update the live
+            // row instead of falling back to a full surface replacement for
+            // every thought token.
+            kind = .thought
+            text = item.text
+        case .tool(let item):
+            // Tool rows have a presentation id (`tool-<item id>`) that is
+            // different from their ChatStore source id. A compact visible-
+            // content fingerprint lets source-indexed updates stay on the
+            // same single-row planner path without copying full output into
+            // the render seed.
+            kind = .other
+            text = transcriptToolSeedFingerprint(item)
+        default:
+            kind = .other
+            text = ""
+        }
+        return TranscriptRenderSeed(
+            id: row.id,
+            kind: kind,
+            text: text,
+            sourceIDs: row.sourceItemIDs,
+            hasMedia: {
+                if case .message(let item) = row { return !(item.imageNames ?? []).isEmpty }
+                return false
+            }(),
+            contentVersion: row.sourceItemIDs.compactMap(UUID.init(uuidString:))
+                .map(store.transcriptItemVersion).max() ?? 0,
+            appendedText: row.sourceItemIDs.compactMap(UUID.init(uuidString:))
+                .compactMap(store.transcriptItemAppend).last,
+            isChunkable: {
+                if case .message(let item) = row {
+                    return item.kind == .assistant || item.kind == .thought
                 }
-            }
-            .onChange(of: expandedThoughts) { _, _ in
-                requestExpansionFollow(proxy)
-            }
-            .onChange(of: expandedToolGroups) { _, _ in
-                requestExpansionFollow(proxy)
-            }
-            .onChange(of: expandedTools) { _, _ in
-                requestExpansionFollow(proxy)
-            }
-            .onChange(of: expandedFileChanges) { _, _ in
-                requestExpansionFollow(proxy)
-            }
+                return false
+            }()
+        )
+    }
+
+    private func transcriptToolSeedFingerprint(_ item: ChatItem) -> String {
+        // Actual tool content lives on the source row. The planner only needs
+        // a stable non-growing payload; `contentVersion` carries mutations.
+        "tool"
+    }
+
+    private func transcriptRenderSeed(for row: MainTranscriptRenderRow) -> TranscriptRenderSeed {
+        TranscriptRenderSeed(
+            id: row.id,
+            kind: row.unit.kind,
+            text: row.text,
+            sourceIDs: [],
+            hasMedia: false
+        )
+    }
+
+    private func updatedTranscriptRow(
+        _ existing: TranscriptRow,
+        with item: ChatItem
+    ) -> TranscriptRow? {
+        switch existing {
+        case .message(let old) where old.id == item.id:
+            return .message(item)
+        case .tool(let old) where old.id == item.id:
+            return .tool(item)
+        default:
+            // Collapsed tools and generated file-change cards contain more
+            // than one source item; a single-item update cannot safely patch
+            // them without re-running grouping, so the caller rebuilds.
+            return nil
         }
     }
 
-    private func transcriptStackStyle<Content: View>(
-        _ content: Content,
-        hasHistoryTicks: Bool,
-        proxy: ScrollViewProxy
+    /// Structural inputs that affect grouping/auxiliary rows. Token text and
+    /// `transcriptRevision` are intentionally excluded so a live update does
+    /// not invalidate history ticks or force a surface replacement.
+    private var transcriptProjectionStructureKeyValue: OverlayTranscriptStructureKey {
+        OverlayTranscriptStructureKey(
+            sessionID: transcriptSessionIdentity,
+            visibleWindowFirstID: store.items.first?.id.uuidString,
+            visibleWindowCount: store.items.count,
+            historyCapacity: store.transcriptHistoryTurnCapacity,
+            isBusy: store.isBusy,
+            streamingAssistantID: store.streamingAssistantId?.uuidString,
+            streamingThoughtID: store.streamingThoughtId?.uuidString,
+            childBusy: store.childBusy,
+            childStreamingAssistantID: store.workspacePaneStreamingAssistantId?.uuidString,
+            childStreamingThoughtID: store.workspacePaneStreamingThoughtId?.uuidString,
+            branchSourceID: store.branchDraft?.sourceItemID.uuidString,
+            branchSwitching: store.isSwitchingBranch,
+            selectedWorkspaceCardID: store.workspaceStage?.cardId.uuidString,
+            interactionDisabled: store.isBusy || store.childBusy || store.isSwitchingBranch,
+            lastTurnDurationBucket: Int(max(0, store.lastTurnDuration).rounded()),
+            resumeSessionID: store.resumeDestination.prompt?.sessionID,
+            queuedCount: store.queuedMessages.count,
+            queuedLastID: store.queuedMessages.last?.id.uuidString,
+            queuedLastText: store.queuedMessages.last?.text
+        )
+    }
+
+    private var transcriptList: some View {
+        let projection = synchronizeTranscriptProjection()
+        let ticks = historyTicks
+        return transcriptAppKitScroll(projection: projection, ticks: ticks)
+    }
+
+    /// AppKit owns the scroll viewport and the reusable row window.  SwiftUI
+    /// still owns each mounted row's rich content, so Markdown, media,
+    /// branches, tool/file cards, selection, and custom environment actions
+    /// remain exactly the same views users saw in the old stack.
+    private func transcriptAppKitScroll(
+        projection: TranscriptProjectionUpdateResult,
+        ticks: [HistoryTick]
     ) -> some View {
-        TranscriptSelectionScope {
-            content
-        }
-            .padding(
-                .leading,
-                hasHistoryTicks ? HistoryLimits.gutter + 16 : OverlayMetrics.transcriptInset
+        let session = TranscriptSessionHandle(
+            sessionID: transcriptSessionIdentity,
+            generation: transcriptSurfaceGeneration,
+            revision: store.transcriptRevision
+        )
+        let surfaceReplace = projection.requiresSurfaceReplace
+        let structuralEntries: [OverlayTranscriptSurfaceEntry]
+        let rowUpdates: [OverlayTranscriptSurfaceEntry]
+        let snapshot: TranscriptSurfaceSnapshot
+        let surfaceSignal: UInt64
+        if surfaceReplace {
+            let rows = transcriptRenderRowStore.materialize(0..<transcriptRenderRowStore.count).records.map(\.source)
+            structuralEntries = appKitTranscriptEntries(rows)
+            rowUpdates = []
+            replaceTranscriptSurfaceEntries(structuralEntries)
+            snapshot = TranscriptSurfaceSnapshot(
+                session: session,
+                rows: structuralEntries.map(\.snapshot),
+                followsLatest: followState.followsLatest
             )
-            .padding(.trailing, OverlayMetrics.transcriptInset)
-            .padding(.top, OverlayMetrics.transcriptInset)
-            .padding(.bottom, 0)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .foregroundStyle(OverlaySurface.conversationInk)
-            .background {
-                TranscriptScrollObserver(
-                    maintainsVisibleContent: followState.maintainsVisibleContent,
-                    onContentHeightChange: {
-                        if TranscriptFollowTriggerPolicy.shouldRequestLatest(
-                            trigger: .contentHeightChanged,
-                            followsLatest: followState.followsLatest,
-                            isBusy: store.isBusy
-                        ) {
-                            requestFollowLatest(proxy)
+            surfaceSignal = appKitTranscriptSurfaceSignal(snapshot)
+        } else {
+            structuralEntries = []
+            rowUpdates = projection.changedRows.map(appKitTranscriptEntry)
+            applyTranscriptSurfaceEntryUpdates(rowUpdates)
+            snapshot = TranscriptSurfaceSnapshot(
+                session: session,
+                rows: [],
+                followsLatest: followState.followsLatest
+            )
+            surfaceSignal = 0
+        }
+        return OverlayTranscriptSurfaceRepresentable(
+            snapshot: snapshot,
+            entries: structuralEntries,
+            rowUpdates: rowUpdates,
+            replaceSurface: surfaceReplace,
+            viewportSize: NSSize(width: chatWidth, height: transcriptHeight),
+            leadingInset: ticks.isEmpty ? OverlayMetrics.transcriptInset : HistoryLimits.gutter + 16,
+            surfaceSignal: surfaceSignal,
+            command: transcriptSurfaceCommand,
+            commandToken: transcriptSurfaceCommandToken,
+            onOpenFilePreview: { path in
+                store.openFilePreview(path)
+            },
+            onViewportChanged: { atEnd, userDriven in
+                if userDriven {
+                    // The adapter invokes this before AppKit applies the
+                    // wheel delta.  Detach immediately; the following neutral
+                    // bounds callback will not re-enter the policy.  A
+                    // post-wheel user callback carries the actual atEnd state
+                    // and can restore following when the wheel reaches tail.
+                    if followQueued {
+                        followQueued = false
+                    }
+                    var next = followState
+                    if next.viewportChanged(atEnd: atEnd, userDriven: true) {
+                        let wasFollowing = followState.followsLatest
+                        followState = next
+                        if atEnd, next.followsLatest, !wasFollowing {
+                            transcriptSurfaceCommand = .setFollowLatest(true)
+                            transcriptSurfaceCommandToken &+= 1
                         }
                     }
-                ) { atEnd, userDriven in
+                } else if followState.historyNavigationTargetID == nil {
+                    // Bounds changes are intentionally passive.  They keep the
+                    // end chip's state observable without interpreting window
+                    // resize or measurement clamps as user intent.
+                    _ = atEnd
+                }
+            },
+            onUserScrollSequenceStarted: {
+                NotificationCenter.default.post(
+                    name: .transcriptUserScrollStarted,
+                    object: nil
+                )
+            },
+            onCommandCompleted: { operation, atEnd in
+                switch operation {
+                case .scrollToEnd:
+                    followState.resumeAtEnd()
+                case let .reveal(rowID, _):
                     var next = followState
-                    if next.viewportChanged(atEnd: atEnd, userDriven: userDriven) {
+                    // A sent user turn uses the reveal operation only to
+                    // align the new row.  It is not a history navigation, so
+                    // settle that mode first; otherwise a matching reveal
+                    // completion can leave the state parked in
+                    // `followingTurn` forever and suppress live tail
+                    // following.  Finishing the turn explicitly restores
+                    // followingEnd and the queued end command makes the
+                    // hand-off deterministic even when the reveal was
+                    // already visible (atEnd == false).
+                    let finishedFollowingTurn = next.finishFollowingTurn(targetID: rowID)
+                    let finishedHistoryNavigation = next.finishHistoryNavigation(
+                        targetID: rowID,
+                        atEnd: atEnd
+                    )
+                    let changed = finishedFollowingTurn || finishedHistoryNavigation
+                    if finishedFollowingTurn {
+                        transcriptSurfaceCommand = .scrollToEnd(animated: false)
+                        transcriptSurfaceCommandToken &+= 1
+                    }
+                    if changed {
                         followState = next
                     }
+                    NotificationCenter.default.post(
+                        name: .transcriptHistoryNavigationSettled,
+                        object: nil,
+                        userInfo: [
+                            TranscriptViewportUserInfoKey.targetID: rowID,
+                            TranscriptViewportUserInfoKey.atEnd: atEnd
+                        ]
+                    )
+                case let .setFollowLatest(enabled):
+                    if enabled {
+                        followState.resumeAtEnd()
+                    } else {
+                        followState.userNavigated(atEnd: false)
+                    }
+                case .invalidate:
+                    break
                 }
             }
+        )
+        .id("transcript-surface-\(transcriptSessionIdentity)-g\(transcriptSurfaceGeneration)")
+        .overlay(alignment: .leading) {
+            if !ticks.isEmpty {
+                HistoryTickRail(ticks: ticks, viewportHeight: transcriptHeight) { id in
+                    followState.beginHistoryNavigation(targetID: id.uuidString)
+                    transcriptSurfaceCommand = .reveal(rowID: id.uuidString, animated: false)
+                    transcriptSurfaceCommandToken &+= 1
+                }
+            }
+        }
+        .overlay(alignment: .bottom) {
+            if followState.showsScrollToEnd {
+                ScrollToEndChip {
+                    followState.beginScrollToEnd()
+                    transcriptSurfaceCommand = .scrollToEnd(animated: false)
+                    transcriptSurfaceCommandToken &+= 1
+                    restoreFocus()
+                }
+                .padding(.bottom, 10)
+            }
+        }
+        .onAppear {
+            if followState.followsLatest {
+                transcriptSurfaceCommand = .scrollToEnd(animated: false)
+                transcriptSurfaceCommandToken &+= 1
+            }
+            if let targetID = ProcessInfo.processInfo.environment[
+                "BUBBLE_HISTORY_NAVIGATION_AUDIT_TARGET"
+            ], !targetID.isEmpty {
+                followState.beginHistoryNavigation(targetID: targetID)
+                transcriptSurfaceCommand = .reveal(rowID: targetID, animated: false)
+                transcriptSurfaceCommandToken &+= 1
+            }
+        }
+        .onChange(of: store.runtimeID) { _, _ in
+            transcriptSurfaceCommand = nil
+            transcriptSurfaceCommandToken &+= 1
+        }
+        .onChange(of: store.currentSessionID) { oldID, newID in
+            guard oldID != newID else { return }
+            // Session switches (including /resume replace-current) invalidate
+            // all pooled rich rows, anchors, disclosure state, and pending
+            // viewport commands before the new snapshot is mounted.
+            resetSessionPresentationState()
+        }
+        .onChange(of: store.transcriptRevision) { _, _ in
+            // The snapshot's revision drives row application.  Keep a
+            // following viewport at the tail after each streamed revision;
+            // detached users remain on their current anchor.
+            if followState.followsLatest {
+                transcriptSurfaceCommand = .scrollToEnd(animated: false)
+                transcriptSurfaceCommandToken &+= 1
+            }
+        }
+        .onChange(of: store.items.count) { _, _ in
+            guard let item = store.items.last, item.kind == .user else { return }
+            followState.beginFollowingTurn(targetID: item.id.uuidString)
+            transcriptSurfaceCommand = .reveal(rowID: item.id.uuidString, animated: false)
+            transcriptSurfaceCommandToken &+= 1
+        }
+        .onChange(of: store.isBusy) { wasBusy, isBusy in
+            guard wasBusy, !isBusy, followState.followsLatest else { return }
+            // A turn may settle after its final content revision.  If the
+            // user stayed at the tail, make the end position explicit; a
+            // detached viewport remains untouched.
+            if followState.followingTurnTargetID == nil {
+                transcriptSurfaceCommand = .scrollToEnd(animated: false)
+                transcriptSurfaceCommandToken &+= 1
+            }
+        }
+        .onChange(of: store.resumeDestination.prompt?.sessionID) { _, sessionID in
+            guard sessionID != nil else { return }
+            transcriptSurfaceCommand = .reveal(rowID: "resume-destination", animated: false)
+            transcriptSurfaceCommandToken &+= 1
+        }
+        .onChange(of: store.branchDraft?.sourceItemID) { _, sourceID in
+            guard let sourceID else { return }
+            followState.userNavigated(atEnd: false)
+            transcriptSurfaceCommand = .reveal(rowID: sourceID.uuidString, animated: false)
+            transcriptSurfaceCommandToken &+= 1
+        }
+        .onChange(of: composerHeight) { _, _ in
+            if followState.followsLatest {
+                transcriptSurfaceCommand = .scrollToEnd(animated: false)
+                transcriptSurfaceCommandToken &+= 1
+            }
+        }
     }
 
-    @ViewBuilder
-    private func transcriptStackContent(_ rows: [MainTranscriptRenderRow]) -> some View {
+    private func replaceTranscriptSurfaceEntries(
+        _ entries: [OverlayTranscriptSurfaceEntry]
+    ) {
+        let records = entries.map { entry in
+            TranscriptProjectionRecord(
+                id: entry.snapshot.id,
+                seed: TranscriptRenderSeed(
+                    id: entry.snapshot.id,
+                    kind: .other,
+                    text: entry.snapshot.text ?? ""
+                ),
+                source: entry
+            )
+        }
+        _ = transcriptSurfaceEntryStore.apply(.replace(records: records))
+    }
+
+    private func applyTranscriptSurfaceEntryUpdates(
+        _ entries: [OverlayTranscriptSurfaceEntry]
+    ) {
+        for entry in entries {
+            let record = TranscriptProjectionRecord(
+                id: entry.snapshot.id,
+                seed: TranscriptRenderSeed(
+                    id: entry.snapshot.id,
+                    kind: .other,
+                    text: entry.snapshot.text ?? ""
+                ),
+                source: entry
+            )
+            guard transcriptSurfaceEntryStore.record(id: entry.snapshot.id) != nil else {
+                // A changed unit that is not in the entry sequence means a
+                // chunk split or auxiliary-row change; the next body pass
+                // will take the structural replacement path.
+                continue
+            }
+            _ = transcriptSurfaceEntryStore.apply(.update(record: record))
+        }
+    }
+
+    private func appKitTranscriptEntry(
+        _ row: MainTranscriptRenderRow
+    ) -> OverlayTranscriptSurfaceEntry {
+        let mutableLiveRow = row.isStreaming || !appKitTranscriptRowIsCompleted(row)
+        // A live code block, thought, or tool output can be hundreds of KB.
+        // Its producer revision is already the invalidation authority, so do
+        // not stringify and hash the complete growing RowRenderKey per token.
+        // Completed rows still receive their stable content-derived identity.
+        let fingerprint = mutableLiveRow
+            ? "\(row.id)-live-r\(store.transcriptRevision)-branch\(row.isAfterBranchPoint)-start\(row.startsAfterBranchPoint)"
+            : "\(String(describing: mainRowRenderKey(row)))-branch\(row.isAfterBranchPoint)-start\(row.startsAfterBranchPoint)"
+        let estimatedHeight = mutableLiveRow
+            ? transcriptSurfaceEntryStore.record(id: row.id)?.source.snapshot.estimatedHeight
+                ?? appKitTranscriptEstimatedHeight(row.text)
+            : appKitTranscriptEstimatedHeight(row.text)
+        return OverlayTranscriptSurfaceEntry(
+            snapshot: appKitTranscriptSnapshot(
+                id: row.id,
+                kind: appKitTranscriptRowKind(row),
+                text: row.text,
+                estimatedHeight: estimatedHeight,
+                fingerprint: fingerprint,
+                isCompleted: appKitTranscriptRowIsCompleted(row),
+                historyTickID: row.historyTickID
+            ),
+            render: { [self] in
+                AnyView(
+                    TranscriptSelectionScope {
+                        // AppKit continuations are independent clipped hosts.
+                        // Spacing must stay inside each host; moving content
+                        // above its bounds cuts the first line after mounting.
+                        mainTranscriptRow(row)
+                            .padding(
+                                .top,
+                                TranscriptChunkBoundaryPolicy.topInset(
+                                    isContinuation: row.isContinuation
+                                )
+                            )
+                            .background {
+                                TranscriptRowAnchor(
+                                    id: row.id,
+                                    historyTickID: row.historyTickID
+                                )
+                            }
+                            .opacity(row.isAfterBranchPoint ? 0.34 : 1)
+                    }
+                    .environment(\.openFilePreview) { path in
+                        store.openFilePreview(path)
+                    }
+                    .foregroundStyle(OverlaySurface.conversationInk)
+                )
+            }
+        )
+    }
+
+    private func appKitTranscriptEntries(
+        _ rows: [MainTranscriptRenderRow]
+    ) -> [OverlayTranscriptSurfaceEntry] {
+        var entries: [OverlayTranscriptSurfaceEntry] = []
+        entries.reserveCapacity(rows.count + 6)
+
+        // The old SwiftUI stack applied a transcript-wide top inset.  Keep it
+        // as a real document row so AppKit's height index and history anchors
+        // see the same coordinate origin.
+        entries.append(OverlayTranscriptSurfaceEntry(
+            snapshot: appKitTranscriptSnapshot(
+                id: "transcript-top-spacer",
+                kind: .other,
+                text: nil,
+                estimatedHeight: OverlayMetrics.transcriptInset,
+                fingerprint: "transcript-top-spacer-v1"
+            ),
+            render: { AnyView(Color.clear.frame(height: OverlayMetrics.transcriptInset)) }
+        ))
+
         if store.hasEarlierTranscriptItems {
-            loadEarlierTranscriptButton
+            entries.append(OverlayTranscriptSurfaceEntry(
+                snapshot: appKitTranscriptSnapshot(
+                    id: "load-earlier-transcript",
+                    kind: .system,
+                    text: "Load earlier conversation turns",
+                    estimatedHeight: 44,
+                    fingerprint: "load-earlier-v1"
+                ),
+                render: { [self] in AnyView(loadEarlierTranscriptButton) }
+            ))
         }
         if store.lastTurnDuration >= 1, !store.isBusy {
-            workedHeader(store.lastTurnDuration)
+            let duration = store.lastTurnDuration
+            entries.append(OverlayTranscriptSurfaceEntry(
+                snapshot: appKitTranscriptSnapshot(
+                    id: "worked-header",
+                    kind: .system,
+                    text: "Worked for \(formatDuration(duration))",
+                    estimatedHeight: 40,
+                    fingerprint: "worked-\(duration)"
+                ),
+                render: { [self] in AnyView(workedHeader(duration)) }
+            ))
         }
-        ForEach(rows) { row in
+
+        for row in rows {
             if row.startsAfterBranchPoint {
-                branchCutoverDivider
+                let dividerID = "branch-divider-\(row.id)"
+                entries.append(OverlayTranscriptSurfaceEntry(
+                    snapshot: appKitTranscriptSnapshot(
+                        id: dividerID,
+                        kind: .system,
+                        text: "Later messages stay on the original path",
+                        estimatedHeight: 28,
+                        fingerprint: dividerID
+                    ),
+                    render: { [self] in AnyView(branchCutoverDivider) }
+                ))
             }
-            EquatableSection(value: mainRowRenderKey(row)) {
-                mainTranscriptRow(row)
-            }
-            .equatable()
-            .id(row.id)
-            .background {
-                if row.id == row.historyTickID {
-                    TranscriptRowAnchor(id: row.id, historyTickID: row.historyTickID)
-                }
-            }
-            .padding(.top, row.isContinuation ? -10 : 0)
-            .opacity(row.isAfterBranchPoint ? 0.34 : 1)
+            entries.append(appKitTranscriptEntry(row))
         }
+
         if let prompt = store.resumeDestination.prompt {
-            ResumeDestinationCard(
-                prompt: prompt,
-                choose: store.resolveResumeDestination
-            )
-            .id("resume-destination")
+            entries.append(OverlayTranscriptSurfaceEntry(
+                snapshot: appKitTranscriptSnapshot(
+                    id: "resume-destination",
+                    kind: .system,
+                    text: "Resume session \(prompt.sessionID)",
+                    estimatedHeight: 72,
+                    fingerprint: String(describing: prompt),
+                    isCompleted: false
+                ),
+                render: { [self] in
+                    AnyView(ResumeDestinationCard(
+                        prompt: prompt,
+                        choose: store.resolveResumeDestination
+                    ))
+                }
+            ))
         }
-        if store.isBusy {
-            WorkingRow(startedAt: store.turnStartedAt ?? Date())
-                .id("working")
+        for message in store.queuedMessages {
+            entries.append(OverlayTranscriptSurfaceEntry(
+                snapshot: appKitTranscriptSnapshot(
+                    id: "waiting-\(message.id.uuidString)",
+                    kind: .user,
+                    text: message.text,
+                    estimatedHeight: appKitTranscriptEstimatedHeight(message.text) + 34,
+                    fingerprint: String(describing: message),
+                    isCompleted: false
+                ),
+                render: { [self] in AnyView(queuedUserBubble(message)) }
+            ))
         }
-        ForEach(store.queuedMessages) { message in
-            queuedUserBubble(message)
-                .id("waiting-\(message.id.uuidString)")
+        entries.append(OverlayTranscriptSurfaceEntry(
+            snapshot: appKitTranscriptSnapshot(
+                id: "transcript-end",
+                kind: .other,
+                text: nil,
+                estimatedHeight: OverlayMetrics.transcriptCornerRadius,
+                fingerprint: "transcript-end-v1"
+            ),
+            render: { AnyView(Color.clear.frame(height: OverlayMetrics.transcriptCornerRadius)) }
+        ))
+        return entries
+    }
+
+    private func appKitTranscriptSnapshot(
+        id: String,
+        kind: TranscriptRowKind,
+        text: String?,
+        estimatedHeight: CGFloat,
+        fingerprint: String,
+        isCompleted: Bool = true,
+        historyTickID: String? = nil
+    ) -> TranscriptRowSnapshot {
+        let hash = TranscriptRowSnapshot.stableHash(fingerprint)
+        let typography: TranscriptTypographyKey = {
+            switch kind {
+            case .tool:
+                return TranscriptTypographyKey(
+                    fontFamily: ".AppleSystemUIFont",
+                    pointSize: 13,
+                    weight: 400,
+                    lineHeight: 1.5,
+                    styleID: "bubble-transcript-tool-v1"
+                )
+            case .system:
+                return TranscriptTypographyKey(
+                    fontFamily: ".AppleSystemUIFont",
+                    pointSize: 13,
+                    weight: 400,
+                    lineHeight: 1.5,
+                    styleID: "bubble-transcript-system-v1"
+                )
+            default:
+                return TranscriptTypographyKey.default
+            }
+        }()
+        return TranscriptRowSnapshot(
+            id: id,
+            contentVersion: UInt64(hash, radix: 16) ?? 0,
+            contentHash: hash,
+            estimatedHeight: estimatedHeight,
+            isCompleted: isCompleted,
+            kind: kind,
+            text: text,
+            historyTickID: historyTickID,
+            typography: typography,
+            layoutVersion: TranscriptTypographyKey.defaultLayoutVersion
+        )
+    }
+
+    private func appKitTranscriptSurfaceSignal(_ snapshot: TranscriptSurfaceSnapshot) -> UInt64 {
+        var value: UInt64 = 14_695_981_039_346_656_037
+        func mix(_ byte: UInt8) {
+            value ^= UInt64(byte)
+            value &*= 1_099_511_628_211
         }
-        Color.clear
-            .frame(height: OverlayMetrics.transcriptCornerRadius)
-            .id("transcript-end")
+        for byte in snapshot.session.revision.description.utf8 { mix(byte) }
+        mix(snapshot.followsLatest ? 1 : 0)
+        for row in snapshot.rows {
+            for byte in row.id.utf8 { mix(byte) }
+            for byte in row.contentVersion.description.utf8 { mix(byte) }
+            for byte in row.contentHash.utf8 { mix(byte) }
+            for byte in row.typography.fontFamily.utf8 { mix(byte) }
+            for byte in row.typography.pointSize.description.utf8 { mix(byte) }
+            for byte in row.typography.weight.description.utf8 { mix(byte) }
+            for byte in row.typography.lineHeight.description.utf8 { mix(byte) }
+            for byte in row.typography.styleID.utf8 { mix(byte) }
+            for byte in row.geometry.disclosure.description.utf8 { mix(byte) }
+            for byte in row.geometry.accessorySignature.utf8 { mix(byte) }
+            for byte in row.layoutVersion.description.utf8 { mix(byte) }
+            if let historyTickID = row.historyTickID {
+                for byte in historyTickID.utf8 { mix(byte) }
+            }
+            mix(0)
+        }
+        return value
+    }
+
+    private func appKitTranscriptRowKind(_ row: MainTranscriptRenderRow) -> TranscriptRowKind {
+        switch row.source {
+        case .message(let item):
+            switch item.kind {
+            case .user: return .user
+            case .assistant: return .assistant
+            case .thought, .system: return .system
+            case .workspaceRun: return .other
+            case .tool: return .tool
+            }
+        case .tool:
+            return .tool
+        case .collapsedTools:
+            return .tool
+        case .fileChanges:
+            return .system
+        }
+    }
+
+    private func appKitTranscriptRowIsCompleted(_ row: MainTranscriptRenderRow) -> Bool {
+        if case .tool(let item) = row.source {
+            return ["completed", "failed", "cancelled"].contains(item.toolStatus ?? "")
+        }
+        if case .message(let item) = row.source, item.kind == .tool {
+            return ["completed", "failed", "cancelled"].contains(item.toolStatus ?? "")
+        }
+        return row.isTerminal && !row.isStreaming
+    }
+
+    private func appKitTranscriptEstimatedHeight(_ text: String) -> CGFloat {
+        TranscriptEstimatedHeightPolicy.height(for: text)
     }
 
     private var loadEarlierTranscriptButton: some View {
@@ -1026,17 +1714,12 @@ struct OverlayView: View {
         let isMount = store.isMountPalette
         let needsScroll = OverlayPalettePolicy.needsScroll(items: items.count, isMount: isMount)
         let listHeight = OverlayPalettePolicy.listHeight(items: items.count, isMount: isMount)
-        let rows = VStack(alignment: .leading, spacing: OverlayPalettePolicy.rowSpacing) {
-            ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
-                paletteRow(item, highlighted: index == store.slashHighlight)
-                    .id(index)
-                    .animation(OverlayMotion.quick, value: store.slashHighlight)
-            }
-        }
         if needsScroll {
             ScrollViewReader { proxy in
                 ScrollView {
-                    rows
+                    LazyVStack(alignment: .leading, spacing: OverlayPalettePolicy.rowSpacing) {
+                        paletteRowContent(items)
+                    }
                 }
                 .scrollIndicators(.visible)
                 .frame(height: listHeight)
@@ -1054,7 +1737,18 @@ struct OverlayView: View {
                 }
             }
         } else {
-            rows
+            VStack(alignment: .leading, spacing: OverlayPalettePolicy.rowSpacing) {
+                paletteRowContent(items)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func paletteRowContent(_ items: [PaletteItem]) -> some View {
+        ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+            paletteRow(item, highlighted: index == store.slashHighlight)
+                .id(index)
+                .animation(OverlayMotion.quick, value: store.slashHighlight)
         }
     }
 
@@ -1106,37 +1800,6 @@ struct OverlayView: View {
         .buttonStyle(.plain)
         .help("Show workspace session")
         .accessibilityLabel("Show workspace session")
-    }
-
-    private struct RunningSweepLabel: View {
-        var body: some View {
-            TimelineView(
-                .animation(minimumInterval: RunningSweepPolicy.minimumFrameInterval)
-            ) { context in
-                let center = RunningSweepPolicy.highlightCenter(
-                    at: context.date.timeIntervalSinceReferenceDate
-                )
-                Text("running")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(
-                        LinearGradient(
-                            colors: [
-                                Color.secondary.opacity(0.34),
-                                Color.primary.opacity(0.84),
-                                Color.secondary.opacity(0.34),
-                            ],
-                            startPoint: UnitPoint(
-                                x: center - RunningSweepPolicy.highlightRadius,
-                                y: 0.5
-                            ),
-                            endPoint: UnitPoint(
-                                x: center + RunningSweepPolicy.highlightRadius,
-                                y: 0.5
-                            )
-                        )
-                    )
-            }
-        }
     }
 
     private func paletteRow(_ item: PaletteItem, highlighted: Bool) -> some View {
@@ -1399,7 +2062,7 @@ struct OverlayView: View {
         return HStack(alignment: .center, spacing: 8) {
             FxAvatarView(
                 file: store.selectedAvatarFile,
-                animation: store.isBusy ? "working" : "idle",
+                animation: "idle",
                 onTap: { store.toggleAvatarPicker() }
             )
             .frame(width: OverlayMetrics.avatarSize, height: OverlayMetrics.avatarSize)
@@ -1621,32 +2284,6 @@ struct OverlayView: View {
     }
 
     private func rowRenderKey(_ row: TranscriptRow) -> RowRenderKey {
-        let expansionKey: String
-        switch row {
-        case .message(let item):
-            expansionKey = TranscriptExpansionPolicy.renderKey(
-                containerExpanded: item.kind == .thought && expandedThoughts.contains(item.id),
-                expandedChildIDs: []
-            )
-        case .tool(let item):
-            expansionKey = TranscriptExpansionPolicy.renderKey(
-                containerExpanded: expandedTools.contains(item.id),
-                expandedChildIDs: []
-            )
-        case .collapsedTools(let id, let items):
-            expansionKey = TranscriptExpansionPolicy.renderKey(
-                containerExpanded: expandedToolGroups.contains(id),
-                expandedChildIDs: items.filter { expandedTools.contains($0.id) }.map { $0.id.uuidString }
-            )
-        case .fileChanges(let summary):
-            expansionKey = TranscriptExpansionPolicy.renderKey(
-                containerExpanded: FileChangeCardPolicy.isExpanded(
-                    id: summary.id,
-                    expandedIDs: expandedFileChanges
-                ),
-                expandedChildIDs: []
-            )
-        }
         switch row {
         case .message(let item), .tool(let item):
             return RowRenderKey(
@@ -1666,7 +2303,7 @@ struct OverlayView: View {
                     || store.workspacePaneStreamingAssistantId == item.id
                     || store.workspacePaneStreamingThoughtId == item.id,
                 selected: store.workspaceStage?.cardId == item.id,
-                expansionKey: expansionKey
+                interactionDisabled: store.isBusy || store.childBusy || store.isSwitchingBranch
             )
         case .collapsedTools(let id, let items):
             return RowRenderKey(
@@ -1683,7 +2320,7 @@ struct OverlayView: View {
                 workspaceSummary: nil,
                 live: false,
                 selected: false,
-                expansionKey: expansionKey
+                interactionDisabled: store.isBusy || store.childBusy || store.isSwitchingBranch
             )
         case .fileChanges(let summary):
             return RowRenderKey(
@@ -1700,7 +2337,7 @@ struct OverlayView: View {
                 workspaceSummary: nil,
                 live: false,
                 selected: false,
-                expansionKey: expansionKey
+                interactionDisabled: store.isBusy || store.childBusy || store.isSwitchingBranch
             )
         }
     }
@@ -1711,11 +2348,11 @@ struct OverlayView: View {
         // every chunk key would invalidate all stable prefix rows per token.
         source.text = TranscriptChunkRenderPolicy.sourceText(
             source.text,
-            isChunked: row.isAssistantChunk
+            isChunked: row.isTextChunk
         )
         source.live = TranscriptChunkRenderPolicy.sourceIsLive(
             sourceIsLive: source.live,
-            isChunked: row.isAssistantChunk,
+            isChunked: row.isTextChunk,
             isStreaming: row.isStreaming,
             isTerminal: row.isTerminal
         )
@@ -1783,126 +2420,6 @@ struct OverlayView: View {
         }
     }
 
-    private func requestFollowLatest(_ proxy: ScrollViewProxy) {
-        guard followState.followsLatest, !followQueued else { return }
-        followQueued = true
-        OverlayPulse.shared.onNextFrame {
-            followQueued = false
-            guard followState.followsLatest else { return }
-            var transaction = Transaction()
-            transaction.disablesAnimations = true
-            withTransaction(transaction) {
-                proxy.scrollTo("transcript-end", anchor: .bottom)
-            }
-        }
-    }
-
-    private func requestFollowTurn(_ proxy: ScrollViewProxy) {
-        guard let targetID = followState.followingTurnTargetID, !followQueued else { return }
-        followQueued = true
-        NotificationCenter.default.post(name: .transcriptProgrammaticScrollStarted, object: nil)
-        OverlayPulse.shared.onNextFrame {
-            followQueued = false
-            guard followState.followingTurnTargetID == targetID else { return }
-            performTranscriptScroll(.navigateToTurn) {
-                proxy.scrollTo(
-                    targetID,
-                    anchor: UnitPoint(x: 0.5, y: TranscriptTurnAlignmentPolicy.viewportAnchorY)
-                )
-            }
-            var next = followState
-            if next.finishFollowingTurn(targetID: targetID) {
-                followState = next
-                requestFollowLatest(proxy)
-            }
-        }
-    }
-
-    private func requestSettledFollowLatest(_ proxy: ScrollViewProxy) {
-        requestFollowLatest(proxy)
-        DispatchQueue.main.asyncAfter(deadline: .now() + TranscriptFollowPolicy.layoutSettleDelay) {
-            requestFollowLatest(proxy)
-        }
-    }
-
-    private func requestExpansionFollow(_ proxy: ScrollViewProxy) {
-        guard TranscriptFollowTriggerPolicy.shouldRequestLatest(
-            trigger: .expansionSettled,
-            followsLatest: followState.followsLatest,
-            isBusy: store.isBusy
-        ) else { return }
-        requestSettledFollowLatest(proxy)
-    }
-
-    private func requestCurrentFollowTarget(
-        _ proxy: ScrollViewProxy,
-        allowsLatest: Bool = true
-    ) {
-        if followState.followingTurnTargetID != nil {
-            requestFollowTurn(proxy)
-        } else if allowsLatest {
-            requestFollowLatest(proxy)
-        }
-    }
-
-    private func scrollToTranscriptEnd(_ proxy: ScrollViewProxy) {
-        followState.beginScrollToEnd()
-        NotificationCenter.default.post(name: .transcriptProgrammaticScrollStarted, object: nil)
-        OverlayPulse.shared.onNextFrame {
-            performTranscriptScroll(.returnToEnd) {
-                proxy.scrollTo("transcript-end", anchor: .bottom)
-            }
-        }
-    }
-
-    private func performTranscriptScroll(
-        _ request: TranscriptScrollRequest,
-        action: () -> Void
-    ) {
-        if TranscriptScrollAnimationPolicy.shouldAnimate(request) {
-            withAnimation(OverlayMotion.scroll, action)
-        } else {
-            var transaction = Transaction()
-            transaction.disablesAnimations = true
-            withTransaction(transaction, action)
-        }
-    }
-
-    private func navigateToHistory(id targetID: String, proxy: ScrollViewProxy) {
-        followState.beginHistoryNavigation(targetID: targetID)
-        NotificationCenter.default.post(
-            name: .transcriptHistoryNavigationRequested,
-            object: nil,
-            userInfo: [TranscriptViewportUserInfoKey.targetID: targetID]
-        )
-        realizeHistoryTarget(targetID, proxy: proxy, attempt: 0)
-    }
-
-    private func realizeHistoryTarget(
-        _ targetID: String,
-        proxy: ScrollViewProxy,
-        attempt: Int
-    ) {
-        guard followState.historyNavigationTargetID == targetID else { return }
-        guard attempt < 240 else {
-            var next = followState
-            if next.finishHistoryNavigation(targetID: targetID, atEnd: false) {
-                followState = next
-            }
-            OverlayLog.write("history navigation target did not mount: \(targetID)")
-            return
-        }
-        OverlayPulse.shared.onNextFrame {
-            guard followState.historyNavigationTargetID == targetID else { return }
-            var transaction = Transaction()
-            transaction.disablesAnimations = true
-            withTransaction(transaction) {
-                proxy.scrollTo(targetID, anchor: .top)
-            }
-            realizeHistoryTarget(targetID, proxy: proxy, attempt: attempt + 1)
-        }
-    }
-
     @ViewBuilder
     private func transcriptRow(_ row: TranscriptRow, interactive: Bool = true) -> some View {
         switch row {
@@ -1938,6 +2455,13 @@ struct OverlayView: View {
                 text: row.text,
                 copyText: row.copyText,
                 live: row.isStreaming && row.isTerminal
+            )
+        } else if row.isThoughtChunk, case .message(let item) = row.source {
+            ThoughtChunkBlockHost(
+                itemID: item.id,
+                text: row.text,
+                isContinuation: row.isContinuation,
+                live: row.isStreaming
             )
         } else {
             transcriptRow(row.source)
@@ -2083,38 +2607,7 @@ struct OverlayView: View {
     }
 
     private func transcriptImageThumb(_ name: String) -> some View {
-        let image = BubbleImages.load(name)
-        return Button {
-            if let image {
-                ImageZoomController.shared.show(image)
-            }
-        } label: {
-            Group {
-                if let image {
-                    Image(nsImage: image)
-                        .resizable()
-                        .interpolation(.high)
-                        .aspectRatio(contentMode: .fit)
-                } else {
-                    Image(systemName: "photo")
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 120, height: 80)
-                }
-            }
-            .frame(maxWidth: 260, maxHeight: 180)
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        }
-        .buttonStyle(.plain)
-        .help("View image")
-        .onHover { hovering in
-            if hovering {
-                NSCursor.pointingHand.set()
-            } else {
-                NSCursor.arrow.set()
-            }
-        }
+        TranscriptImageThumb(name: name)
     }
 
     private func assistantBubble(_ item: ChatItem, interactive: Bool = true) -> some View {
@@ -2129,7 +2622,7 @@ struct OverlayView: View {
         return VStack(alignment: .leading, spacing: 8) {
             assistantOrderedContent(item, live: live)
             if live {
-                StreamingCaret()
+                RunningSweepLabel()
             }
             if !live, !text.isEmpty {
                 HStack(alignment: .center, spacing: 0) {
@@ -2189,17 +2682,15 @@ struct OverlayView: View {
             && ConversationBranchControlsPolicy.showsAssistantBranchAction(
                 hasSourceEntry: item.sourceEntryId != nil,
                 isStreaming: false
-            )
+        )
         return VStack(alignment: .leading, spacing: 8) {
             if isTerminalChunk, let names = item.imageNames, !names.isEmpty {
                 assistantImageGrid(names)
             }
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                MessageBody(text: text, streaming: live, virtualizedChunk: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                if live {
-                    StreamingCaret()
-                }
+            MessageBody(text: text, streaming: live, virtualizedChunk: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if live {
+                RunningSweepLabel()
             }
             if let completeText, !completeText.isEmpty {
                 HStack(alignment: .center, spacing: 0) {
@@ -2284,66 +2775,8 @@ struct OverlayView: View {
     private func thoughtBlock(_ item: ChatItem) -> some View {
         let live = (store.isBusy && store.streamingThoughtId == item.id)
             || (store.childBusy && store.workspacePaneStreamingThoughtId == item.id)
-        let open = live || expandedThoughts.contains(item.id)
-        return VStack(alignment: .leading, spacing: 6) {
-            Button {
-                if live { return }
-                withAnimation(OverlayMotion.snappy) {
-                    if open {
-                        expandedThoughts.remove(item.id)
-                    } else {
-                        expandedThoughts.insert(item.id)
-                    }
-                }
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: open ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 9, weight: .bold))
-                        .frame(width: 8)
-                    Image(systemName: "quote.opening")
-                        .font(.system(size: 10, weight: .semibold))
-                    Text(live ? "Thinking" : "Thoughts")
-                    Spacer(minLength: 0)
-                }
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.tertiary)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            if open {
-                HStack(alignment: .top, spacing: 10) {
-                    Capsule()
-                        .fill(Color.primary.opacity(0.16))
-                        .frame(width: 2)
-                    thoughtText(item.text, live: live)
-                }
-                .padding(.leading, 14)
-            }
-        }
-        .padding(.vertical, 2)
-        .opacity(0.92)
-    }
-
-    @ViewBuilder
-    private func thoughtText(_ text: String, live: Bool) -> some View {
-        let displayChunks = ThoughtDisplayPolicy.chunks(text, streaming: live)
-        LazyVStack(alignment: .leading, spacing: 0) {
-            if live, ThoughtDisplayPolicy.isTailTruncated(text) {
-                Text("Earlier reasoning stays virtualized while thinking…")
-                    .font(.system(size: 10.5, weight: .regular))
-                    .foregroundStyle(.tertiary)
-                    .padding(.bottom, 4)
-            }
-            ForEach(Array(displayChunks.enumerated()), id: \.offset) { _, chunk in
-                Text(chunk.isEmpty && live ? "…" : chunk)
-                    .font(.system(size: 12.5, weight: .regular))
-                    .italic()
-                    .lineSpacing(OverlaySurface.proseLineSpacing)
-                    .foregroundStyle(.secondary.opacity(0.88))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .bubbleTextSelection()
-            }
-        }
+        return ThoughtBlockHost(item: item, live: live)
+            .id("thought-\(item.id.uuidString)")
     }
 
     private func workspaceRunCard(_ item: ChatItem) -> some View {
@@ -2440,151 +2873,31 @@ struct OverlayView: View {
     }
 
     private func toolRow(_ item: ChatItem) -> some View {
-        let status = item.toolStatus ?? "pending"
-        let open = expandedTools.contains(item.id)
-        return VStack(alignment: .leading, spacing: 6) {
-            Button {
-                withAnimation(OverlayMotion.snappy) {
-                    if open {
-                        expandedTools.remove(item.id)
-                    } else {
-                        expandedTools.insert(item.id)
-                    }
-                }
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: open ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 9, weight: .bold))
-                        .frame(width: 8)
-                    Image(systemName: "chevron.left.forwardslash.chevron.right")
-                        .font(.system(size: 10, weight: .semibold))
-                    Text("Tool")
-                    Text(item.text)
-                        .lineLimit(1)
-                    Spacer(minLength: 0)
-                    if status == "completed" {
-                        Image(systemName: "checkmark")
-                            .font(.system(size: 10, weight: .semibold))
-                    } else if status == "failed" {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(.red.opacity(0.7))
-                    } else {
-                        ProgressView()
-                            .controlSize(.mini)
-                    }
-                }
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.tertiary)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-
-            if let names = item.imageNames, !names.isEmpty {
-                assistantImageGrid(names)
-                    .padding(.leading, 14)
-            }
-
-            if open {
-                HStack(alignment: .top, spacing: 10) {
-                    Capsule()
-                        .fill(Color.primary.opacity(0.16))
-                        .frame(width: 2)
-                    toolDetails(item)
-                }
-                .padding(.leading, 14)
-            }
-        }
-        .padding(.vertical, 2)
-        .opacity(0.92)
-    }
-
-    @ViewBuilder
-    private func toolDetails(_ item: ChatItem) -> some View {
-        let input = item.toolInput?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let output = item.toolOutput?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        VStack(alignment: .leading, spacing: 8) {
-            if !input.isEmpty {
-                Text("Input")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.tertiary)
-                Text(input)
-                    .font(.system(size: 12, weight: .regular, design: .monospaced))
-                    .bubbleTextSelection()
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            if !output.isEmpty {
-                Text("Output")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.tertiary)
-                Text(output)
-                    .font(.system(size: 12, weight: .regular, design: .monospaced))
-                    .bubbleTextSelection()
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            if input.isEmpty && output.isEmpty && (item.imageNames ?? []).isEmpty {
-                Text("No input/output captured for this tool call.")
-                    .font(.system(size: 12, weight: .regular))
-                    .foregroundStyle(.tertiary)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        ToolRowHost(item: item)
+            .id("tool-\(item.id.uuidString)")
     }
 
     private func collapsedTools(id: String, items: [ChatItem]) -> some View {
-        let open = expandedToolGroups.contains(id)
-        return VStack(alignment: .leading, spacing: 6) {
-            Button {
-                withAnimation(OverlayMotion.snappy) {
-                    if open {
-                        expandedToolGroups.remove(id)
-                    } else {
-                        expandedToolGroups.insert(id)
-                    }
-                }
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: open ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 9, weight: .bold))
-                        .frame(width: 8)
-                    Image(systemName: "chevron.left.forwardslash.chevron.right")
-                        .font(.system(size: 10, weight: .semibold))
-                    Text("+\(items.count) previous tool call\(items.count == 1 ? "" : "s")")
-                    Spacer(minLength: 0)
-                }
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.tertiary)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            if open {
-                ForEach(items) { item in
-                    toolRow(item)
-                }
-            }
-        }
-        .padding(.vertical, 2)
-        .opacity(0.92)
+        CollapsedToolsHost(id: id, items: items)
+            .id(id)
     }
 
     private func fileChangesCard(_ summary: FileChangeSummary) -> some View {
-        let expanded = FileChangeCardPolicy.isExpanded(
-            id: summary.id,
-            expandedIDs: expandedFileChanges
-        )
+        FileChangeCardExpansionHost(id: summary.id) { expanded, toggle in
+            fileChangesCardContent(summary, expanded: expanded, toggle: toggle)
+        }
+    }
+
+    private func fileChangesCardContent(
+        _ summary: FileChangeSummary,
+        expanded: Bool,
+        toggle: FileChangeCardToggleAction
+    ) -> some View {
         let plus = Color(red: 0.18, green: 0.62, blue: 0.32)
         let minus = Color(red: 0.82, green: 0.22, blue: 0.25)
         return VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
-                Button {
-                    withAnimation(OverlayMotion.snappy) {
-                        if expandedFileChanges.contains(summary.id) {
-                            expandedFileChanges.remove(summary.id)
-                        } else {
-                            expandedFileChanges.insert(summary.id)
-                        }
-                    }
-                } label: {
+                Button(action: toggle.callAsFunction) {
                     HStack(spacing: 8) {
                         Image(systemName: expanded ? "chevron.down" : "chevron.right")
                             .font(.system(size: 10, weight: .semibold))
@@ -2599,15 +2912,7 @@ struct OverlayView: View {
                 }
                 .buttonStyle(.plain)
                 Spacer(minLength: 8)
-                Button {
-                    withAnimation(OverlayMotion.snappy) {
-                        if expandedFileChanges.contains(summary.id) {
-                            expandedFileChanges.remove(summary.id)
-                        } else {
-                            expandedFileChanges.insert(summary.id)
-                        }
-                    }
-                } label: {
+                Button(action: toggle.callAsFunction) {
                     Text(expanded ? "Hide files" : "Show files")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(.secondary)
@@ -2634,19 +2939,19 @@ struct OverlayView: View {
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
 
-            if expanded {
+            FileChangeTreeReveal(expanded: expanded) {
                 Rectangle()
                     .fill(OverlaySurface.hairline)
                     .frame(height: 0.5)
-                VStack(alignment: .leading, spacing: 8) {
-                    ForEach(summary.groups) { group in
-                        FileChangeFolderBlock(group: group, plus: plus, minus: minus) { file in
-                            openChangedFile(file, workspaceRoot: summary.workspaceRoot)
-                        }
+                if summary.files.count > 20 {
+                    ScrollView {
+                        fileChangeGroups(summary, plus: plus, minus: minus)
                     }
+                    .scrollIndicators(.never)
+                    .frame(height: 360)
+                } else {
+                    fileChangeGroups(summary, plus: plus, minus: minus)
                 }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
             }
         }
         .background(
@@ -2673,6 +2978,22 @@ struct OverlayView: View {
         }
     }
 
+    private func fileChangeGroups(
+        _ summary: FileChangeSummary,
+        plus: Color,
+        minus: Color
+    ) -> some View {
+        LazyVStack(alignment: .leading, spacing: 8) {
+            ForEach(summary.groups) { group in
+                FileChangeFolderBlock(rowID: summary.id, group: group, plus: plus, minus: minus) { file in
+                    openChangedFile(file, workspaceRoot: summary.workspaceRoot)
+                }
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+    }
+
     private func openChangedFile(_ file: FileChange, workspaceRoot: String? = nil) {
         let url = URL(
             fileURLWithPath: FileChangeSummaryPolicy.resolvedPath(
@@ -2696,6 +3017,364 @@ struct OverlayView: View {
             return "\(remain)s"
         }
         return "\(minutes)m \(remain)s"
+    }
+}
+
+private struct TranscriptImageThumb: View {
+    let name: String
+
+    var body: some View {
+        let image = BubbleImages.load(name)
+        return Button {
+            if let image {
+                ImageZoomController.shared.show(image)
+            }
+        } label: {
+            Group {
+                if let image {
+                    Image(nsImage: image)
+                        .resizable()
+                        .interpolation(.high)
+                        .aspectRatio(contentMode: .fit)
+                } else {
+                    Image(systemName: "photo")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 120, height: 80)
+                }
+            }
+            .frame(maxWidth: 260, maxHeight: 180)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .help("View image")
+        .onHover { hovering in
+            if hovering {
+                NSCursor.pointingHand.set()
+            } else {
+                NSCursor.arrow.set()
+            }
+        }
+    }
+}
+
+private struct ThoughtBlockHost: View {
+    let item: ChatItem
+    let live: Bool
+    @State private var expanded = false
+
+    var body: some View {
+        let open = TranscriptRowInteractionPolicy.isOpen(
+            isLive: live,
+            isExpanded: expanded
+        )
+        return VStack(alignment: .leading, spacing: 6) {
+            Button {
+                guard TranscriptRowInteractionPolicy.canToggle(isLive: live) else { return }
+                commitDisclosure {
+                    expanded.toggle()
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: open ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9, weight: .bold))
+                        .frame(width: 8)
+                    Image(systemName: "quote.opening")
+                        .font(.system(size: 10, weight: .semibold))
+                    Text(live ? "Thinking" : "Thoughts")
+                    Spacer(minLength: 0)
+                }
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.tertiary)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            if open {
+                HStack(alignment: .top, spacing: 10) {
+                    Capsule()
+                        .fill(Color.primary.opacity(0.16))
+                        .frame(width: 2)
+                    ThoughtTextView(text: item.text, live: live)
+                }
+                .padding(.leading, 14)
+            }
+        }
+        .padding(.vertical, 2)
+        .opacity(0.92)
+    }
+
+    private func commitDisclosure(_ mutation: () -> Void) {
+        var transaction = Transaction()
+        transaction.disablesAnimations = !TranscriptRowInteractionPolicy.animatesTranscriptLayout
+        withTransaction(transaction, mutation)
+        requestTranscriptRowMeasurement(item.id.uuidString)
+    }
+}
+
+@MainActor
+private final class ThoughtDisclosureState: ObservableObject {
+    @Published var expanded = false
+}
+
+@MainActor
+private enum ThoughtDisclosureRegistry {
+    private static var states: [UUID: ThoughtDisclosureState] = [:]
+    private static var order: [UUID] = []
+    private static let limit = TranscriptVirtualizationLimits.retainedItems
+
+    static func state(for id: UUID) -> ThoughtDisclosureState {
+        if let state = states[id] {
+            order.removeAll { $0 == id }
+            order.append(id)
+            return state
+        }
+        let state = ThoughtDisclosureState()
+        states[id] = state
+        order.append(id)
+        while order.count > limit {
+            states[order.removeFirst()] = nil
+        }
+        return state
+    }
+}
+
+/// Virtualized counterpart of `ThoughtBlockHost`. Every paragraph chunk is a
+/// separate AppKit-hosted row, while a shared disclosure model keeps the
+/// header and continuation rows behaving as one logical COT block.
+private struct ThoughtChunkBlockHost: View {
+    let itemID: UUID
+    let text: String
+    let isContinuation: Bool
+    let live: Bool
+    @StateObject private var disclosure: ThoughtDisclosureState
+
+    init(itemID: UUID, text: String, isContinuation: Bool, live: Bool) {
+        self.itemID = itemID
+        self.text = text
+        self.isContinuation = isContinuation
+        self.live = live
+        _disclosure = StateObject(wrappedValue: ThoughtDisclosureRegistry.state(for: itemID))
+    }
+
+    var body: some View {
+        let open = TranscriptRowInteractionPolicy.isOpen(
+            isLive: live,
+            isExpanded: disclosure.expanded
+        )
+        VStack(alignment: .leading, spacing: 6) {
+            if !isContinuation {
+                Button {
+                    guard TranscriptRowInteractionPolicy.canToggle(isLive: live) else { return }
+                    var transaction = Transaction()
+                    transaction.disablesAnimations = !TranscriptRowInteractionPolicy.animatesTranscriptLayout
+                    withTransaction(transaction) { disclosure.expanded.toggle() }
+                    requestTranscriptRowMeasurement(itemID.uuidString)
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: open ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 9, weight: .bold))
+                            .frame(width: 8)
+                        Image(systemName: "quote.opening")
+                            .font(.system(size: 10, weight: .semibold))
+                        Text(live ? "Thinking" : "Thoughts")
+                        Spacer(minLength: 0)
+                    }
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.tertiary)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            if open {
+                HStack(alignment: .top, spacing: 10) {
+                    Capsule()
+                        .fill(Color.primary.opacity(0.16))
+                        .frame(width: 2)
+                    ThoughtTextView(text: text, live: live)
+                }
+                .padding(.leading, 14)
+            }
+        }
+        .padding(.vertical, isContinuation ? 0 : 2)
+        .opacity(0.92)
+    }
+}
+
+private struct ThoughtTextView: View {
+    let text: String
+    let live: Bool
+
+    var body: some View {
+        let displayChunks = ThoughtDisplayPolicy.chunks(text, streaming: live)
+        return LazyVStack(alignment: .leading, spacing: 0) {
+            if live, ThoughtDisplayPolicy.isTailTruncated(text) {
+                Text("Earlier reasoning stays virtualized while thinking…")
+                    .font(.system(size: 10.5, weight: .regular))
+                    .foregroundStyle(.tertiary)
+                    .padding(.bottom, 4)
+            }
+            ForEach(Array(displayChunks.enumerated()), id: \.offset) { _, chunk in
+                Text(chunk.isEmpty && live ? "…" : chunk)
+                    .font(.system(size: 12.5, weight: .regular))
+                    .italic()
+                    .lineSpacing(OverlaySurface.proseLineSpacing)
+                    .foregroundStyle(.secondary.opacity(0.88))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .bubbleTextSelection()
+            }
+        }
+    }
+}
+
+private struct ToolRowHost: View {
+    let item: ChatItem
+    @State private var expanded = false
+
+    var body: some View {
+        let status = item.toolStatus ?? "pending"
+        return VStack(alignment: .leading, spacing: 6) {
+            Button {
+                commitDisclosure {
+                    expanded.toggle()
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9, weight: .bold))
+                        .frame(width: 8)
+                    Image(systemName: "chevron.left.forwardslash.chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                    Text("Tool")
+                    Text(item.text)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                    if status == "completed" {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 10, weight: .semibold))
+                    } else if status == "failed" {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.red.opacity(0.7))
+                    } else {
+                        RunningSweepLabel()
+                    }
+                }
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.tertiary)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if let names = item.imageNames, !names.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(names, id: \.self) { name in
+                        TranscriptImageThumb(name: name)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.leading, 14)
+            }
+
+            if expanded {
+                HStack(alignment: .top, spacing: 10) {
+                    Capsule()
+                        .fill(Color.primary.opacity(0.16))
+                        .frame(width: 2)
+                    ToolDetailsView(item: item)
+                }
+                .padding(.leading, 14)
+            }
+        }
+        .padding(.vertical, 2)
+        .opacity(0.92)
+    }
+
+    private func commitDisclosure(_ mutation: () -> Void) {
+        var transaction = Transaction()
+        transaction.disablesAnimations = !TranscriptRowInteractionPolicy.animatesTranscriptLayout
+        withTransaction(transaction, mutation)
+        requestTranscriptRowMeasurement("tool-\(item.id.uuidString)")
+    }
+}
+
+private struct ToolDetailsView: View {
+    let item: ChatItem
+
+    var body: some View {
+        let input = item.toolInput?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let output = item.toolOutput?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return VStack(alignment: .leading, spacing: 8) {
+            if !input.isEmpty {
+                Text("Input")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+                Text(input)
+                    .font(.system(size: 12, weight: .regular, design: .monospaced))
+                    .bubbleTextSelection()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if !output.isEmpty {
+                Text("Output")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+                Text(output)
+                    .font(.system(size: 12, weight: .regular, design: .monospaced))
+                    .bubbleTextSelection()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if input.isEmpty && output.isEmpty && (item.imageNames ?? []).isEmpty {
+                Text("No input/output captured for this tool call.")
+                    .font(.system(size: 12, weight: .regular))
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct CollapsedToolsHost: View {
+    let id: String
+    let items: [ChatItem]
+    @State private var expanded = false
+
+    var body: some View {
+        return VStack(alignment: .leading, spacing: 6) {
+            Button {
+                commitDisclosure {
+                    expanded.toggle()
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9, weight: .bold))
+                        .frame(width: 8)
+                    Image(systemName: "chevron.left.forwardslash.chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                    Text("+\(items.count) previous tool call\(items.count == 1 ? "" : "s")")
+                    Spacer(minLength: 0)
+                }
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.tertiary)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            if expanded {
+                ForEach(items) { item in
+                    ToolRowHost(item: item)
+                        .id("tool-\(item.id.uuidString)")
+                }
+            }
+        }
+        .padding(.vertical, 2)
+        .opacity(0.92)
+    }
+
+    private func commitDisclosure(_ mutation: () -> Void) {
+        var transaction = Transaction()
+        transaction.disablesAnimations = !TranscriptRowInteractionPolicy.animatesTranscriptLayout
+        withTransaction(transaction, mutation)
+        requestTranscriptRowMeasurement(id)
     }
 }
 
@@ -2730,7 +3409,150 @@ private struct QuoteChipLayer: View {
     }
 }
 
+private struct FileChangeCardExpansionHost<Content: View>: View {
+    let id: String
+    let content: (Bool, FileChangeCardToggleAction) -> Content
+    @State private var expanded = false
+
+    init(
+        id: String,
+        @ViewBuilder content: @escaping (Bool, FileChangeCardToggleAction) -> Content
+    ) {
+        self.id = id
+        self.content = content
+    }
+
+    var body: some View {
+        content(expanded, FileChangeCardToggleAction(action: toggle))
+            .onReceive(NotificationCenter.default.publisher(for: .fileChangeDiagnosticToggleRequested)) { _ in
+                guard ProcessInfo.processInfo.environment["BUBBLE_FILE_CHANGE_DIAGNOSTICS"] == "1" else {
+                    return
+                }
+                toggle()
+            }
+    }
+
+    private func toggle() {
+        let mutation = {
+            expanded.toggle()
+        }
+        if FileChangeExpansionPolicy.animatesTranscriptLayout {
+            withAnimation(OverlayMotion.snappy, mutation)
+        } else {
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction, mutation)
+        }
+        if FileChangeExpansionPolicy.requestsTranscriptFollow {
+            NotificationCenter.default.post(
+                name: .fileChangeExpansionChanged,
+                object: id,
+                userInfo: ["expanded": expanded]
+            )
+        }
+        requestTranscriptRowMeasurement(id)
+        if ProcessInfo.processInfo.environment["BUBBLE_FILE_CHANGE_DIAGNOSTICS"] == "1" {
+            let marker = expanded ? CGFloat(1) : CGFloat(0)
+            OverlayPulse.shared.onNextFrame {
+                NotificationCenter.default.post(
+                    name: .fileChangeDiagnosticPresented,
+                    object: id,
+                    userInfo: ["height": marker]
+                )
+            }
+        }
+    }
+}
+
+private struct FileChangeCardToggleAction {
+    let action: () -> Void
+
+    func callAsFunction() {
+        action()
+    }
+}
+
+private struct FileChangeTreeHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+private struct FileChangeTreeReveal<Content: View>: View {
+    let expanded: Bool
+    let content: Content
+    @State private var naturalHeight: CGFloat = 0
+    @State private var presentedHeight: CGFloat = 0
+
+    init(expanded: Bool, @ViewBuilder content: () -> Content) {
+        self.expanded = expanded
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            content
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .background {
+            GeometryReader { geometry in
+                Color.clear.preference(
+                    key: FileChangeTreeHeightKey.self,
+                    value: geometry.size.height
+                )
+            }
+        }
+        .frame(height: expanded ? naturalHeight : 0, alignment: .top)
+        .clipped()
+        .allowsHitTesting(expanded)
+        .accessibilityHidden(!expanded)
+        .background {
+            if ProcessInfo.processInfo.environment["BUBBLE_FILE_CHANGE_DIAGNOSTICS"] == "1" {
+                GeometryReader { geometry in
+                    Color.clear
+                        .onAppear { presentedHeight = geometry.size.height }
+                        .onChange(of: geometry.size.height) { _, height in
+                            presentedHeight = height
+                        }
+                }
+            }
+        }
+        .onPreferenceChange(FileChangeTreeHeightKey.self) { height in
+            guard height > 0, abs(height - naturalHeight) > 0.25 else { return }
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                naturalHeight = height
+            }
+        }
+        .onChange(of: expanded) { _, isExpanded in
+            guard isExpanded,
+                  ProcessInfo.processInfo.environment["BUBBLE_FILE_CHANGE_DIAGNOSTICS"] == "1" else {
+                return
+            }
+            reportPresentedHeight(attempt: 0)
+        }
+    }
+
+    private func reportPresentedHeight(attempt: Int) {
+        OverlayPulse.shared.onNextFrame {
+            if presentedHeight >= 20 || attempt >= 2 {
+                NotificationCenter.default.post(
+                    name: .fileChangeDiagnosticContentMeasured,
+                    object: nil,
+                    userInfo: ["height": presentedHeight]
+                )
+            } else {
+                reportPresentedHeight(attempt: attempt + 1)
+            }
+        }
+    }
+}
+
 private struct FileChangeFolderBlock: View {
+    let rowID: String
     let group: FileChangeGroup
     let plus: Color
     let minus: Color
@@ -2742,9 +3564,17 @@ private struct FileChangeFolderBlock: View {
         return VStack(alignment: .leading, spacing: 2) {
             if !group.folder.isEmpty {
                 Button {
-                    withAnimation(OverlayMotion.snappy) {
+                    let mutation = {
                         expanded.toggle()
                     }
+                    if FileChangeExpansionPolicy.animatesTranscriptLayout {
+                        withAnimation(OverlayMotion.snappy, mutation)
+                    } else {
+                        var transaction = Transaction()
+                        transaction.disablesAnimations = true
+                        withTransaction(transaction, mutation)
+                    }
+                    requestTranscriptRowMeasurement(rowID)
                 } label: {
                     HStack(spacing: 6) {
                         Image(systemName: open ? "chevron.down" : "chevron.right")
@@ -2775,9 +3605,11 @@ private struct FileChangeFolderBlock: View {
                 .buttonStyle(.plain)
             }
             if open {
-                ForEach(group.files) { file in
-                    FileChangeFileRow(file: file, plus: plus, minus: minus, onOpen: onOpenFile)
-                        .padding(.leading, group.folder.isEmpty ? 0 : 16)
+                LazyVStack(alignment: .leading, spacing: 2) {
+                    ForEach(group.files) { file in
+                        FileChangeFileRow(file: file, plus: plus, minus: minus, onOpen: onOpenFile)
+                            .padding(.leading, group.folder.isEmpty ? 0 : 16)
+                    }
                 }
             }
         }
@@ -3149,7 +3981,7 @@ private struct RowRenderKey: Equatable {
     var workspaceSummary: String?
     var live: Bool
     var selected: Bool
-    var expansionKey: String
+    var interactionDisabled: Bool
 }
 
 private struct MainTranscriptRenderKey: Equatable {
@@ -3326,9 +4158,149 @@ private enum WorkspaceTranscriptRow: Identifiable {
         }
         return false
     }
+
+    func contains(_ itemID: UUID) -> Bool {
+        switch self {
+        case .transcript(let row): return row.contains(itemID)
+        case .assistantChunk(let id, _, _, _): return id == itemID
+        }
+    }
+
+    var sourceItemIDs: Set<UUID> {
+        switch self {
+        case .transcript(let row):
+            switch row {
+            case .message(let item), .tool(let item): return [item.id]
+            case .collapsedTools(_, let items): return Set(items.map(\.id))
+            case .fileChanges: return []
+            }
+        case .assistantChunk(let id, _, _, _): return [id]
+        }
+    }
 }
 
-private enum TranscriptRow: Identifiable {
+private final class WorkspaceTranscriptRowBox: Identifiable {
+    var row: WorkspaceTranscriptRow
+    var id: String { row.id }
+
+    init(_ row: WorkspaceTranscriptRow) {
+        self.row = row
+    }
+}
+
+/// Keeps side-session streaming row-local. SwiftUI retains the box array and
+/// only the affected box (or collapsed-tool group) mutates for a normal
+/// token; structural changes rebuild from the authoritative grouped rows.
+private final class WorkspaceRowsProjectionStore {
+    private var boxes: [WorkspaceTranscriptRowBox] = []
+    private var boxIndexByItemID: [UUID: Int] = [:]
+    private var lastRevision: UInt64?
+    private var lastItemCount = 0
+    private var lastItemID: UUID?
+    private var lastStructure: WorkspaceRowsProjectionStructure?
+
+    var revision: UInt64? { lastRevision }
+
+    func value(
+        for key: WorkspaceRowsProjectionKey,
+        items: [ChatItem],
+        changedItems: [ChatItem],
+        mutationHistory: [WorkspacePaneRevisionDelta]?,
+        make: () -> [WorkspaceTranscriptRow]
+    ) -> [WorkspaceTranscriptRowBox] {
+        if lastRevision == key.revision { return boxes }
+        let structure = WorkspaceRowsProjectionStructure(key)
+        let revisionIsCovered = mutationHistory != nil
+        if revisionIsCovered,
+           lastStructure == structure,
+           items.count == lastItemCount,
+           items.last?.id == lastItemID,
+           !(mutationHistory?.isEmpty ?? true),
+           apply(
+               mutationHistory ?? [],
+               items: items,
+               changedItems: changedItems,
+               streamingThoughtID: key.streamingThoughtID
+           ) {
+        } else {
+            rebuild(make())
+        }
+        lastRevision = key.revision
+        lastItemCount = items.count
+        lastItemID = items.last?.id
+        lastStructure = structure
+        return boxes
+    }
+
+    private func rebuild(_ rows: [WorkspaceTranscriptRow]) {
+        boxes = rows.map(WorkspaceTranscriptRowBox.init)
+        boxIndexByItemID.removeAll(keepingCapacity: true)
+        for (index, box) in boxes.enumerated() {
+            for id in box.row.sourceItemIDs {
+                boxIndexByItemID[id] = index
+            }
+        }
+    }
+
+    private func apply(
+        _ mutations: [WorkspacePaneRevisionDelta],
+        items: [ChatItem],
+        changedItems: [ChatItem],
+        streamingThoughtID: UUID?
+    ) -> Bool {
+        // `changedItems` is the latest revision's payload. The authoritative
+        // array is used for older coalesced revisions so no growing text is
+        // retained in the mutation log. It is still useful as a cheap sanity
+        // check for the common one-revision path.
+        let latestChangedIDs = Set(changedItems.map(\.id))
+        for delta in mutations {
+            switch delta.mutation {
+            case .rebuild:
+                return false
+            case .update(let itemID, let sourceIndex):
+                guard items.indices.contains(sourceIndex),
+                      items[sourceIndex].id == itemID,
+                      isVisible(items[sourceIndex], streamingThoughtID: streamingThoughtID),
+                      let index = boxIndexByItemID[itemID],
+                      boxes.indices.contains(index) else { return false }
+                let item = items[sourceIndex]
+                if mutations.count == 1, !latestChangedIDs.isEmpty,
+                   !latestChangedIDs.contains(itemID) {
+                    return false
+                }
+                switch boxes[index].row {
+                case .transcript(.message):
+                    boxes[index].row = .transcript(.message(item))
+                case .transcript(.tool):
+                    boxes[index].row = .transcript(.tool(item))
+                case .transcript(.collapsedTools(let groupID, var grouped)):
+                    guard let groupedIndex = grouped.firstIndex(where: { $0.id == itemID }) else {
+                        return false
+                    }
+                    grouped[groupedIndex] = item
+                    boxes[index].row = .transcript(.collapsedTools(id: groupID, items: grouped))
+                case .transcript(.fileChanges), .assistantChunk:
+                    return false
+                }
+            }
+        }
+        return true
+    }
+
+    private func isVisible(_ item: ChatItem, streamingThoughtID: UUID?) -> Bool {
+        switch item.kind {
+        case .assistant:
+            return AssistantMessagePresentation.hasContent(text: item.text, imageNames: item.imageNames)
+        case .thought:
+            return !item.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || item.id == streamingThoughtID
+        default:
+            return true
+        }
+    }
+}
+
+enum TranscriptRow: Identifiable {
     case message(ChatItem)
     case tool(ChatItem)
     case collapsedTools(id: String, items: [ChatItem])
@@ -3386,6 +4358,697 @@ private struct MainTranscriptRenderRow: Identifiable {
     var isAssistantChunk: Bool {
         unit.kind == .assistant && unit.isChunked
     }
+    var isThoughtChunk: Bool {
+        unit.kind == .thought && unit.isChunked
+    }
+    var isTextChunk: Bool { isAssistantChunk || isThoughtChunk }
+}
+
+private struct OverlayTranscriptStructureKey: Equatable {
+    let sessionID: String
+    let visibleWindowFirstID: String?
+    let visibleWindowCount: Int
+    let historyCapacity: Int
+    let isBusy: Bool
+    let streamingAssistantID: String?
+    let streamingThoughtID: String?
+    let childBusy: Bool
+    let childStreamingAssistantID: String?
+    let childStreamingThoughtID: String?
+    let branchSourceID: String?
+    let branchSwitching: Bool
+    let selectedWorkspaceCardID: String?
+    let interactionDisabled: Bool
+    let lastTurnDurationBucket: Int
+    let resumeSessionID: String?
+    let queuedCount: Int
+    let queuedLastID: String?
+    let queuedLastText: String?
+}
+
+/// Reference-backed consumption cursor. Mutating it while producing the
+/// representable snapshot must not publish a second SwiftUI body invalidation
+/// for the same transcript revision.
+private final class TranscriptProjectionSyncState {
+    var sessionID: String?
+    var revision: UInt64 = .max
+    var structureKey: OverlayTranscriptStructureKey?
+}
+
+private struct WorkspaceRowsProjectionKey: Equatable {
+    let revision: UInt64
+    let workspaceRoot: String?
+    let childBusy: Bool
+    let streamingAssistantID: UUID?
+    let streamingThoughtID: UUID?
+}
+
+private struct WorkspaceRowsProjectionStructure: Equatable {
+    let workspaceRoot: String?
+    let childBusy: Bool
+    let streamingAssistantID: UUID?
+    let streamingThoughtID: UUID?
+
+    init(_ key: WorkspaceRowsProjectionKey) {
+        workspaceRoot = key.workspaceRoot
+        childBusy = key.childBusy
+        streamingAssistantID = key.streamingAssistantID
+        streamingThoughtID = key.streamingThoughtID
+    }
+}
+
+private struct OverlayHistoryTicksKey: Equatable {
+    let projection: OverlayTranscriptStructureKey
+    let treeLeafID: String?
+    let treeEntryCount: Int
+    let treeLastEntryID: String?
+}
+
+private struct OverlayTranscriptSurfaceEntry {
+    let snapshot: TranscriptRowSnapshot
+    let render: () -> AnyView
+}
+
+private final class OverlayTranscriptRenderBox {
+    private var renderers: [String: () -> AnyView] = [:]
+    private var lastEntriesSignal: UInt64?
+    var decorator: ((_ rowID: String, _ content: AnyView) -> AnyView)?
+    var onMeasuredHeight: ((_ rowID: String, _ height: CGFloat) -> Void)?
+    var shouldMeasure: (() -> Bool)?
+
+    func update(entries: [OverlayTranscriptSurfaceEntry], signal: UInt64, force: Bool = false) {
+        guard force || lastEntriesSignal != signal else { return }
+        renderers = Dictionary(uniqueKeysWithValues: entries.map { ($0.snapshot.id, $0.render) })
+        lastEntriesSignal = signal
+    }
+
+    func update(entry: OverlayTranscriptSurfaceEntry) {
+        renderers[entry.snapshot.id] = entry.render
+        // Keep the full-surface signal untouched: row updates are applied by
+        // identity and must not trigger a dictionary rebuild for every token.
+    }
+
+    func render(rowID: String) -> AnyView {
+        let content = renderers[rowID]?() ?? AnyView(EmptyView())
+        return decorator?(rowID, content) ?? content
+    }
+}
+
+private final class OverlayTranscriptRowHost: AppKitTranscriptRowHost {
+    private let hostingController: NSHostingController<AnyView>
+    private var hostingView: NSView { hostingController.view }
+    private let rootFactory: (TranscriptRowSnapshot) -> AnyView
+    private let onMeasuredHeight: (String, CGFloat) -> Void
+    private let shouldMeasure: () -> Bool
+    private var lastMeasuredHeight: CGFloat = -.greatestFiniteMagnitude
+    private var lastMeasuredWidth: CGFloat = -.greatestFiniteMagnitude
+    private var measurementDirty = true
+    private var measurementObserver: NSObjectProtocol?
+
+    init(
+        row: TranscriptRowSnapshot,
+        key: AppKitTranscriptRowReuseKey,
+        rootFactory: @escaping (TranscriptRowSnapshot) -> AnyView,
+        onMeasuredHeight: @escaping (String, CGFloat) -> Void,
+        shouldMeasure: @escaping () -> Bool
+    ) {
+        self.rootFactory = rootFactory
+        self.onMeasuredHeight = onMeasuredHeight
+        self.shouldMeasure = shouldMeasure
+        self.hostingController = NSHostingController(
+            rootView: TranscriptHostingSizingPolicy.root(rootFactory(row))
+        )
+        super.init(row: row, key: key)
+
+        // The base host retains a plain-text fallback for deterministic
+        // standalone checks.  Production rows cover it with the rich hosting
+        // view; hiding the fallback avoids double text while keeping the
+        // subclass independent of the base class's private label.
+        subviews.first?.isHidden = true
+        hostingView.translatesAutoresizingMaskIntoConstraints = true
+        hostingView.frame = bounds
+        hostingView.autoresizingMask = TranscriptHostingSizingPolicy.autoresizingMask
+        hostingController.sizingOptions = TranscriptHostingSizingPolicy.options
+        hostingView.appearance = NSApp.effectiveAppearance
+        addSubview(hostingView)
+        measurementObserver = NotificationCenter.default.addObserver(
+            forName: .transcriptRowIntrinsicSizeChanged,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let self, let sourceID = notification.object as? String else { return }
+            let currentID = self.row.id
+            guard currentID == sourceID || currentID.hasPrefix("\(sourceID)-chunk-") else { return }
+            self.measurementDirty = true
+            self.needsLayout = true
+        }
+    }
+
+    deinit {
+        if let measurementObserver {
+            NotificationCenter.default.removeObserver(measurementObserver)
+        }
+    }
+
+    override func configure(row: TranscriptRowSnapshot, key: AppKitTranscriptRowReuseKey) {
+        super.configure(row: row, key: key)
+        subviews.first?.isHidden = true
+        hostingController.rootView = TranscriptHostingSizingPolicy.root(rootFactory(row))
+        hostingView.appearance = NSApp.effectiveAppearance
+        lastMeasuredHeight = -.greatestFiniteMagnitude
+        lastMeasuredWidth = -.greatestFiniteMagnitude
+        measurementDirty = true
+        invalidateIntrinsicContentSize()
+        needsLayout = true
+    }
+
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        // Drop the old SwiftUI tree while this pooled cell is detached.  This
+        // releases images, Markdown storage, and store-capturing closures
+        // across session switches instead of retaining up to 144 stale rows.
+        hostingController.rootView = TranscriptHostingSizingPolicy.root(EmptyView())
+        lastMeasuredHeight = -.greatestFiniteMagnitude
+        lastMeasuredWidth = -.greatestFiniteMagnitude
+        measurementDirty = true
+    }
+
+    override func layout() {
+        super.layout()
+        hostingView.frame = bounds
+        guard shouldMeasure() else { return }
+        guard bounds.width.isFinite, bounds.width > 0,
+              measurementDirty || abs(bounds.width - lastMeasuredWidth) > 0.5 else { return }
+        hostingView.layoutSubtreeIfNeeded()
+        let fittingHeight = TranscriptHostingSizingPolicy.contentHeight(
+            of: hostingController,
+            width: bounds.width
+        )
+        guard fittingHeight.isFinite, fittingHeight > 0 else { return }
+        lastMeasuredWidth = bounds.width
+        measurementDirty = false
+        let measuredHeight = max(1, fittingHeight)
+        guard abs(measuredHeight - lastMeasuredHeight) > 0.5 else { return }
+        lastMeasuredHeight = measuredHeight
+        onMeasuredHeight(row.id, measuredHeight)
+        // The callback synchronously updates the height index and can resize
+        // this host before this layout pass returns. Refit immediately as a
+        // deterministic fallback in addition to the autoresizing mask.
+        hostingView.frame = bounds
+        hostingView.layoutSubtreeIfNeeded()
+    }
+
+    override var intrinsicContentSize: NSSize {
+        let width = max(1, bounds.width, hostingView.bounds.width)
+        let height = TranscriptHostingSizingPolicy.contentHeight(
+            of: hostingController,
+            width: width
+        )
+        return NSSize(
+            width: NSView.noIntrinsicMetric,
+            height: height
+        )
+    }
+
+    override var preferredContentHeight: CGFloat {
+        intrinsicContentSize.height
+    }
+
+    override var needsImmediateContentMeasurement: Bool {
+        measurementDirty || abs(bounds.width - lastMeasuredWidth) > 0.5
+    }
+
+    override func invalidateContentMeasurement() {
+        measurementDirty = true
+        hostingView.invalidateIntrinsicContentSize()
+        hostingView.needsLayout = true
+        needsLayout = true
+    }
+}
+
+private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
+    let snapshot: TranscriptSurfaceSnapshot
+    let entries: [OverlayTranscriptSurfaceEntry]
+    let rowUpdates: [OverlayTranscriptSurfaceEntry]
+    let replaceSurface: Bool
+    let viewportSize: NSSize
+    let leadingInset: CGFloat
+    let surfaceSignal: UInt64
+    let command: AppKitTranscriptSurfaceOperation?
+    let commandToken: UInt64
+    let onOpenFilePreview: (String) -> Void
+    let onViewportChanged: (_ atEnd: Bool, _ userDriven: Bool) -> Void
+    let onUserScrollSequenceStarted: () -> Void
+    let onCommandCompleted: (_ operation: AppKitTranscriptSurfaceOperation, _ atEnd: Bool) -> Void
+
+    final class Coordinator {
+        let renderBox: OverlayTranscriptRenderBox
+        let adapter: AppKitTranscriptSurfaceAdapter
+        private var diagnosticsProbe: TranscriptScrollProbe?
+        private var viewportHandler: ((_ atEnd: Bool, _ userDriven: Bool) -> Void)?
+        private var userScrollSequenceHandler: (() -> Void)?
+        private var userScrollSequenceGeneration: UInt64 = 0
+        private var directMountAuditStarted = false
+        private var directMountAuditTimer: Timer?
+        private var lastLeadingInset: CGFloat?
+        var lastCommandToken: UInt64 = 0
+        var lastSurfaceSignal: UInt64?
+
+        private final class DirectMountAuditState {
+            let sampleCount = 120
+            let startY: CGFloat
+            let direction: CGFloat
+            let stepSize: CGFloat = 96
+            var step = 0
+            var blankSamples = 0
+            var currentBlankStreak = 0
+            var longestBlankStreak = 0
+            var coverageMismatches = 0
+            var contentOverflows = 0
+            var maximumOverflow: CGFloat = 0
+            var heightMismatchSamples = 0
+            var maximumHeightMismatch: CGFloat = 0
+
+            init(adapter: AppKitTranscriptSurfaceAdapter) {
+                startY = adapter.contentOffsetY
+                direction = startY > adapter.currentHeightIndex.totalHeight / 2 ? -1 : 1
+            }
+        }
+
+        init(snapshot: TranscriptSurfaceSnapshot) {
+            let box = OverlayTranscriptRenderBox()
+            self.renderBox = box
+            let emptySnapshot = TranscriptSurfaceSnapshot(
+                session: snapshot.session,
+                rows: [],
+                followsLatest: snapshot.followsLatest
+            )
+            let adapter = AppKitTranscriptSurfaceAdapter(
+                // Do not mount before the render box receives entries.  An
+                // initial full snapshot would create EmptyView hosts whose
+                // content identity then appears stable and would never be
+                // configured with the real SwiftUI rows.
+                snapshot: emptySnapshot,
+                // Keep enough immutable rich rows warm for a sustained mouse
+                // wheel run. Cold NSHostingView construction must stay off
+                // the input frame; the 96-host ceiling still bounds memory.
+                overscan: 6_000,
+                maximumMountedRows: 96,
+                maximumReusableHosts: 144,
+                maximumDeferredOverscanMountsPerPass: 1,
+                maximumDeferredOverscanDuration: 0.002,
+                renderer: { row, key in
+                    OverlayTranscriptRowHost(
+                        row: row,
+                        key: key,
+                        rootFactory: { [weak box] row in
+                            box?.render(rowID: row.id) ?? AnyView(EmptyView())
+                        },
+                        onMeasuredHeight: { [weak box] rowID, height in
+                            box?.onMeasuredHeight?(rowID, height)
+                        },
+                        shouldMeasure: { [weak box] in
+                            box?.shouldMeasure?() ?? true
+                        }
+                    )
+                }
+            )
+            self.adapter = adapter
+            box.shouldMeasure = { [weak adapter] in
+                !(adapter?.isUserScrollActive ?? false)
+            }
+            if ProcessInfo.processInfo.environment["BUBBLE_SCROLL_DIAGNOSTICS"] != nil,
+               let document = adapter.scrollView.documentView {
+                let probe = TranscriptScrollProbe(frame: .zero)
+                // The probe only needs the enclosing scroll view. Giving this
+                // diagnostic helper the document's multi-million-point height
+                // forces AppKit through an oversized Auto Layout/display path
+                // that production never executes and contaminates the frame
+                // benchmark (and can exceed NSLayoutConstraint limits).
+                probe.autoresizingMask = []
+                probe.visibleHistoryTickIDsProvider = { [weak adapter] in
+                    Set(adapter?.visibleHistoryTickIDs ?? [])
+                }
+                probe.onChange = { [weak self] atEnd, userDriven in
+                    self?.viewportHandler?(atEnd, userDriven)
+                }
+                document.addSubview(probe)
+                diagnosticsProbe = probe
+            }
+        }
+
+        func configureCallbacks(
+            onOpenFilePreview: @escaping (String) -> Void,
+            onViewportChanged: @escaping (_ atEnd: Bool, _ userDriven: Bool) -> Void,
+            onUserScrollSequenceStarted: @escaping () -> Void,
+            onCommandCompleted: @escaping (_ operation: AppKitTranscriptSurfaceOperation, _ atEnd: Bool) -> Void
+        ) {
+            // The rich row closures already carry the current store's
+            // openFilePreview environment.  Keep this callback parameter in
+            // the bridge so future extracted rows can use the same seam.
+            _ = onOpenFilePreview
+            viewportHandler = { [weak self] atEnd, userDriven in
+                guard let self else { return }
+                if userDriven {
+                    // Physical wheel input must detach before the event is
+                    // applied; this path intentionally remains synchronous.
+                    onViewportChanged(atEnd, true)
+                } else {
+                    // AppKit layout/resize callbacks never mutate SwiftUI
+                    // state during representable updates.
+                    DispatchQueue.main.async { [weak self] in
+                        guard self != nil else { return }
+                        onViewportChanged(atEnd, false)
+                    }
+                }
+            }
+            userScrollSequenceHandler = onUserScrollSequenceStarted
+            adapter.onViewportChanged = { [weak self] atEnd, userDriven in
+                guard let self else { return }
+                // Count every physical packet rather than only gesture
+                // starts. A user can click Scroll to end and reverse within
+                // the prior wheel sequence's debounce window.
+                if userDriven {
+                    self.userScrollSequenceGeneration &+= 1
+                }
+                self.viewportHandler?(atEnd, userDriven)
+            }
+            adapter.onUserScrollSequenceStarted = { [weak self] in
+                self?.userScrollSequenceHandler?()
+            }
+            renderBox.onMeasuredHeight = { [weak self] rowID, height in
+                guard let self, self.adapter.updateMeasuredHeight(rowID: rowID, height: height) else {
+                    return
+                }
+                // A measurement can move the clip origin or tail immediately;
+                // report it through the neutral viewport path on the next
+                // AppKit pass without mutating SwiftUI during layout.
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    onViewportChanged(self.adapter.contentOffsetY >= max(
+                        0,
+                        self.adapter.currentHeightIndex.totalHeight - self.adapter.scrollView.contentView.bounds.height - 1
+                    ), false)
+                }
+            }
+        }
+
+        func update(
+            snapshot: TranscriptSurfaceSnapshot,
+            entries: [OverlayTranscriptSurfaceEntry],
+            rowUpdates: [OverlayTranscriptSurfaceEntry],
+            replaceSurface: Bool,
+            viewportSize: NSSize,
+            leadingInset: CGFloat,
+            surfaceSignal: UInt64,
+            command: AppKitTranscriptSurfaceOperation?,
+            commandToken: UInt64,
+            onOpenFilePreview: @escaping (String) -> Void,
+            onViewportChanged: @escaping (_ atEnd: Bool, _ userDriven: Bool) -> Void,
+            onUserScrollSequenceStarted: @escaping () -> Void,
+            onCommandCompleted: @escaping (_ operation: AppKitTranscriptSurfaceOperation, _ atEnd: Bool) -> Void
+        ) {
+            if replaceSurface {
+                renderBox.update(entries: entries, signal: surfaceSignal, force: true)
+            } else {
+                for entry in rowUpdates {
+                    renderBox.update(entry: entry)
+                }
+            }
+            renderBox.decorator = { rowID, content in
+                guard rowID != "transcript-top-spacer", rowID != "transcript-end" else {
+                    return content
+                }
+                return AnyView(
+                    content
+                        .padding(.leading, leadingInset)
+                        .padding(.trailing, OverlayMetrics.transcriptInset)
+                        .padding(.bottom, OverlaySurface.rowSpacing)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .foregroundStyle(OverlaySurface.conversationInk)
+                )
+            }
+            if let lastLeadingInset, abs(lastLeadingInset - leadingInset) > 0.5 {
+                adapter.invalidateMountedRowsForLayoutChange()
+            }
+            lastLeadingInset = leadingInset
+            configureCallbacks(
+                onOpenFilePreview: onOpenFilePreview,
+                onViewportChanged: onViewportChanged,
+                onUserScrollSequenceStarted: onUserScrollSequenceStarted,
+                onCommandCompleted: onCommandCompleted
+            )
+            adapter.setViewportSize(viewportSize)
+
+            let current = adapter.currentHandle
+            // `replaceSurface` is an authoritative structural boundary even
+            // when its diagnostic signal happens to hash equal to the prior
+            // projection (for example a branch metadata-only change).
+            let surfaceChanged = replaceSurface
+            if surfaceChanged {
+                // Store revisions are a change signal, not the adapter's
+                // ordering authority: auxiliary rows (working/queued/resume)
+                // can change without a transcriptRevision bump.  Allocate a
+                // strictly newer local revision for every changed surface.
+                let nextRevision = max(
+                    current.revision == UInt64.max ? current.revision : current.revision + 1,
+                    snapshot.session.revision
+                )
+                let localSnapshot = TranscriptSurfaceSnapshot(
+                    session: TranscriptSessionHandle(
+                        sessionID: snapshot.session.sessionID,
+                        generation: snapshot.session.generation,
+                        revision: nextRevision
+                    ),
+                    rows: snapshot.rows,
+                    followsLatest: snapshot.followsLatest
+                )
+                if snapshot.session.sessionID == current.sessionID {
+                    _ = adapter.apply(.replace(snapshot: localSnapshot))
+                }
+                lastSurfaceSignal = surfaceSignal
+                startDirectMountAuditIfNeeded()
+            } else if !replaceSurface {
+                var nextRevision = current.revision
+                var updates: [(row: TranscriptRowSnapshot, session: TranscriptSessionHandle)] = []
+                updates.reserveCapacity(rowUpdates.count)
+                for entry in rowUpdates {
+                    nextRevision = max(
+                        nextRevision == UInt64.max ? nextRevision : nextRevision + 1,
+                        snapshot.session.revision
+                    )
+                    let handle = TranscriptSessionHandle(
+                        sessionID: snapshot.session.sessionID,
+                        generation: snapshot.session.generation,
+                        revision: nextRevision
+                    )
+                    updates.append((entry.snapshot, handle))
+                }
+                if updates.count > 1 {
+                    _ = adapter.applyStreamingRowUpdates(updates)
+                } else if let update = updates.first {
+                    _ = adapter.apply(.update(
+                        row: update.row,
+                        session: update.session,
+                        preserving: adapter.currentVisibleAnchor()
+                    ))
+                }
+            }
+
+            guard commandToken != lastCommandToken, let command else { return }
+            if case let .reveal(rowID, _) = command,
+               adapter.snapshot.row(id: rowID) == nil {
+                // Transcript hydration can deliver a reveal before its row is
+                // projected.  Do not consume the token: the next surface
+                // revision retries the same operation once the row exists.
+                return
+            }
+            lastCommandToken = commandToken
+            let issuedUserScrollGeneration = userScrollSequenceGeneration
+            _ = adapter.perform(command)
+            if diagnosticsProbe != nil,
+               case let .reveal(rowID, _) = command {
+                // The production AppKit adapter owns the actual reveal.  The
+                // legacy probe is mounted only for benchmark diagnostics and
+                // still needs the target identity so it can verify the final
+                // anchor after the adapter has mounted that row.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                    guard let self, self.diagnosticsProbe != nil else { return }
+                    NotificationCenter.default.post(
+                        name: .transcriptHistoryNavigationRequested,
+                        object: self.adapter.scrollView,
+                        userInfo: [TranscriptViewportUserInfoKey.targetID: rowID]
+                    )
+                }
+            }
+            // Never mutate SwiftUI state while NSViewRepresentable is being
+            // updated.  A token guard drops a completion from a superseded
+            // command (for example a follow request immediately followed by a
+            // session replacement).
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.lastCommandToken == commandToken else { return }
+                let isScrollToEnd: Bool
+                if case .scrollToEnd = command {
+                    isScrollToEnd = true
+                } else {
+                    isScrollToEnd = false
+                }
+                guard TranscriptCommandCompletionPolicy.shouldApply(
+                    isScrollToEnd: isScrollToEnd,
+                    issuedUserScrollGeneration: issuedUserScrollGeneration,
+                    currentUserScrollGeneration: self.userScrollSequenceGeneration
+                ) else { return }
+                let atEnd = abs(
+                    self.adapter.contentOffsetY - max(
+                        0,
+                        self.adapter.currentHeightIndex.totalHeight - self.adapter.scrollView.contentView.bounds.height
+                    )
+                ) <= 1
+                onCommandCompleted(command, atEnd)
+            }
+        }
+
+        private func startDirectMountAuditIfNeeded() {
+            guard !directMountAuditStarted,
+                  ProcessInfo.processInfo.environment["BUBBLE_SCROLL_DIAGNOSTICS"] == "mount-audit",
+                  adapter.snapshot.rows.count > 100 else { return }
+            directMountAuditStarted = true
+            // Audit two seconds of accelerated continuous motion through a
+            // 600-turn document. Full-document jumps every frame measure cold
+            // random-access construction, not a scroll interaction a user can
+            // produce; reveal/navigation has its own settled-anchor audit.
+            let state = DirectMountAuditState(adapter: adapter)
+            // Sample once per 60 Hz presentation frame. Inspecting immediately
+            // after setBoundsOrigin (or twice per frame) observes AppKit's
+            // pre-layout state rather than anything the user can see.
+            let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] timer in
+                self?.runDirectMountAuditFrame(timer: timer, state: state)
+            }
+            directMountAuditTimer = timer
+            RunLoop.main.add(timer, forMode: .common)
+        }
+
+        private func sampleDirectMountAuditFrame(_ state: DirectMountAuditState) {
+            if adapter.visibleMountedRowIDs.isEmpty {
+                state.blankSamples += 1
+                state.currentBlankStreak += 1
+                state.longestBlankStreak = max(state.longestBlankStreak, state.currentBlankStreak)
+            } else {
+                state.currentBlankStreak = 0
+            }
+            if adapter.visibleCoverageGap > 1 {
+                state.coverageMismatches += 1
+            }
+            let overflow = adapter.contentOverflowDiagnostics
+            state.contentOverflows += overflow.count
+            state.maximumOverflow = max(state.maximumOverflow, overflow.maximum)
+            let mismatch = adapter.contentHeightMismatchDiagnostics
+            state.heightMismatchSamples += mismatch.count
+            state.maximumHeightMismatch = max(state.maximumHeightMismatch, mismatch.maximum)
+        }
+
+        private func runDirectMountAuditFrame(timer: Timer, state: DirectMountAuditState) {
+            guard state.step < state.sampleCount else {
+                sampleDirectMountAuditFrame(state)
+                timer.invalidate()
+                directMountAuditTimer = nil
+                finishDirectMountAuditAfterSettling(state)
+                return
+            }
+            if state.step > 0 {
+                sampleDirectMountAuditFrame(state)
+            }
+            let maximumY = max(
+                0,
+                adapter.currentHeightIndex.totalHeight - adapter.scrollView.contentView.bounds.height
+            )
+            adapter.userDidScroll()
+            adapter.setContentOffset(y: min(
+                maximumY,
+                max(0, state.startY + state.direction * CGFloat(state.step) * state.stepSize)
+            ))
+            adapter.userScrollDidApply()
+            state.step += 1
+        }
+
+        private func finishDirectMountAuditAfterSettling(_ state: DirectMountAuditState) {
+            // Rich text can publish one final intrinsic-size update on the
+            // next AppKit pass. Audit the stable viewport, not the timer
+            // callback that happened to enqueue that last measurement.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                guard let self else { return }
+                let stableMaximumY = max(
+                    0,
+                    self.adapter.currentHeightIndex.totalHeight
+                        - self.adapter.scrollView.contentView.bounds.height
+                )
+                let settledY = self.adapter.contentOffsetY
+                self.adapter.setContentOffset(y: min(stableMaximumY, settledY + 80))
+                self.adapter.setContentOffset(y: settledY)
+                let anchorError = abs(self.adapter.contentOffsetY - settledY)
+                let settledMismatch = self.adapter.contentHeightMismatchDiagnostics
+                OverlayLog.write(String(
+                    format: "transcript mount audit samples=%d anchors=%d peakAnchors=%d blankSamples=%d longestBlankStreak=%d coverageMismatches=%d contentOverflows=%d maximumOverflow=%.2f heightMismatchSamples=%d maximumHeightMismatch=%.2f settledHeightMismatches=%d maximumSettledMismatch=%.2f documentHeight=%.0f anchorError=%.2f",
+                    state.sampleCount,
+                    self.adapter.mountedRowIDs.count,
+                    self.adapter.metrics.mountedPeak,
+                    state.blankSamples,
+                    state.longestBlankStreak,
+                    state.coverageMismatches,
+                    state.contentOverflows,
+                    state.maximumOverflow,
+                    state.heightMismatchSamples,
+                    state.maximumHeightMismatch,
+                    settledMismatch.count,
+                    settledMismatch.maximum,
+                    self.adapter.currentHeightIndex.totalHeight,
+                    anchorError
+                ))
+            }
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(snapshot: snapshot)
+    }
+
+    func makeNSView(context: Context) -> AppKitTranscriptScrollView {
+        context.coordinator.update(
+            snapshot: snapshot,
+            entries: entries,
+            rowUpdates: rowUpdates,
+            replaceSurface: replaceSurface,
+            viewportSize: viewportSize,
+            leadingInset: leadingInset,
+            surfaceSignal: surfaceSignal,
+            command: command,
+            commandToken: commandToken,
+            onOpenFilePreview: onOpenFilePreview,
+            onViewportChanged: onViewportChanged,
+            onUserScrollSequenceStarted: onUserScrollSequenceStarted,
+            onCommandCompleted: onCommandCompleted
+        )
+        return context.coordinator.adapter.scrollView
+    }
+
+    func updateNSView(_ nsView: AppKitTranscriptScrollView, context: Context) {
+        _ = nsView
+        context.coordinator.update(
+            snapshot: snapshot,
+            entries: entries,
+            rowUpdates: rowUpdates,
+            replaceSurface: replaceSurface,
+            viewportSize: viewportSize,
+            leadingInset: leadingInset,
+            surfaceSignal: surfaceSignal,
+            command: command,
+            commandToken: commandToken,
+            onOpenFilePreview: onOpenFilePreview,
+            onViewportChanged: onViewportChanged,
+            onUserScrollSequenceStarted: onUserScrollSequenceStarted,
+            onCommandCompleted: onCommandCompleted
+        )
+    }
 }
 
 private extension WorkspaceTurnRow {
@@ -3408,43 +5071,6 @@ private extension WorkspaceTurnRow {
             sourceEntryId: item.sourceEntryId,
             kind: kind
         )
-    }
-}
-
-private struct WorkingRow: View {
-    var startedAt: Date
-
-    var body: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { context in
-            HStack(spacing: 10) {
-                WorkingDots()
-                Text("Working for \(format(context.date.timeIntervalSince(startedAt)))")
-                    .font(OverlayMetrics.bodyFont)
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    private func format(_ interval: TimeInterval) -> String {
-        let seconds = max(0, Int(interval))
-        let minutes = seconds / 60
-        let remain = seconds % 60
-        if minutes == 0 {
-            return "\(remain)s"
-        }
-        return "\(minutes)m \(remain)s"
-    }
-}
-
-private struct WorkingDots: View {
-    var body: some View {
-        HStack(spacing: 4) {
-            ForEach(0..<3, id: \.self) { index in
-                Circle()
-                    .fill(Color.secondary.opacity(0.35 + Double(index) * 0.18))
-                    .frame(width: 5, height: 5)
-            }
-        }
     }
 }
 
@@ -3595,12 +5221,132 @@ private struct InputCaret: View {
     }
 }
 
-private struct StreamingCaret: View {
-    var body: some View {
-        LayerPulsingCaret(width: 1.6, height: 14, duration: 0.48)
-            .frame(width: 1.6, height: 14)
-            .fixedSize()
-            .offset(y: 1)
+struct RunningSweepLabel: NSViewRepresentable {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func makeNSView(context: Context) -> RunningSweepNSView {
+        RunningSweepNSView(reduceMotion: reduceMotion)
+    }
+
+    func updateNSView(_ view: RunningSweepNSView, context: Context) {
+        view.configure(reduceMotion: reduceMotion)
+    }
+
+    func sizeThatFits(
+        _ proposal: ProposedViewSize,
+        nsView: RunningSweepNSView,
+        context: Context
+    ) -> CGSize {
+        nsView.intrinsicContentSize
+    }
+}
+
+final class RunningSweepNSView: NSView {
+    private static let text = "running"
+    private static let font = NSFont.systemFont(ofSize: 11, weight: .medium)
+    private static let textSize: NSSize = {
+        let measured = (text as NSString).size(withAttributes: [.font: font])
+        return NSSize(width: ceil(measured.width), height: ceil(measured.height))
+    }()
+
+    private let clippedTextLayer = CALayer()
+    private let gradientLayer = CAGradientLayer()
+    private let textMaskLayer = CATextLayer()
+    private var reduceMotion: Bool
+
+    init(reduceMotion: Bool) {
+        self.reduceMotion = reduceMotion
+        super.init(frame: NSRect(origin: .zero, size: Self.textSize))
+        wantsLayer = true
+        setContentHuggingPriority(.required, for: .horizontal)
+        setContentHuggingPriority(.required, for: .vertical)
+        setContentCompressionResistancePriority(.required, for: .horizontal)
+        setContentCompressionResistancePriority(.required, for: .vertical)
+        setAccessibilityElement(true)
+        setAccessibilityRole(.progressIndicator)
+        setAccessibilityLabel("Running")
+
+        textMaskLayer.string = Self.text
+        textMaskLayer.font = Self.font.fontName as CFTypeRef
+        textMaskLayer.fontSize = Self.font.pointSize
+        textMaskLayer.alignmentMode = .left
+        textMaskLayer.truncationMode = .none
+        clippedTextLayer.mask = textMaskLayer
+        clippedTextLayer.addSublayer(gradientLayer)
+        layer?.addSublayer(clippedTextLayer)
+        updateColors()
+        applyMotion()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { nil }
+
+    override var intrinsicContentSize: NSSize { Self.textSize }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        clippedTextLayer.frame = bounds
+        textMaskLayer.frame = clippedTextLayer.bounds
+        textMaskLayer.contentsScale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+        gradientLayer.bounds = NSRect(x: 0, y: 0, width: max(bounds.width * 1.8, 1), height: bounds.height)
+        if gradientLayer.animation(forKey: "running-sweep") == nil {
+            gradientLayer.position = CGPoint(x: bounds.midX, y: bounds.midY)
+        } else {
+            gradientLayer.position.y = bounds.midY
+        }
+        CATransaction.commit()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        needsLayout = true
+        if window != nil, !reduceMotion, gradientLayer.animation(forKey: "running-sweep") == nil {
+            applyMotion()
+        }
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateColors()
+    }
+
+    func configure(reduceMotion: Bool) {
+        guard self.reduceMotion != reduceMotion else { return }
+        self.reduceMotion = reduceMotion
+        applyMotion()
+    }
+
+    private func updateColors() {
+        // Keep every glyph readable while the brighter band travels across
+        // the word. A low floor makes the unswept prefix look clipped even
+        // though the text mask and intrinsic width are correct.
+        let base = NSColor.secondaryLabelColor.withAlphaComponent(0.62).cgColor
+        let highlight = NSColor.labelColor.withAlphaComponent(0.88).cgColor
+        gradientLayer.colors = reduceMotion
+            ? [NSColor.secondaryLabelColor.withAlphaComponent(0.72).cgColor,
+               NSColor.secondaryLabelColor.withAlphaComponent(0.72).cgColor]
+            : [base, base, highlight, base, base]
+        gradientLayer.locations = reduceMotion ? [0, 1] : [0, 0.36, 0.5, 0.64, 1]
+    }
+
+    private func applyMotion() {
+        gradientLayer.removeAnimation(forKey: "running-sweep")
+        updateColors()
+        guard !reduceMotion else {
+            gradientLayer.position = CGPoint(x: bounds.midX, y: bounds.midY)
+            return
+        }
+        let width = max(Self.textSize.width, 1)
+        let animation = CABasicAnimation(keyPath: "position.x")
+        animation.fromValue = -width * 0.45
+        animation.toValue = width * 1.45
+        animation.duration = RunningSweepPolicy.cycleDuration
+        animation.repeatCount = .infinity
+        animation.timingFunction = CAMediaTimingFunction(name: .linear)
+        animation.isRemovedOnCompletion = false
+        gradientLayer.add(animation, forKey: "running-sweep")
     }
 }
 
@@ -3875,7 +5621,7 @@ private struct ComposerBar: View {
         return HStack(alignment: .bottom, spacing: 8) {
             FxAvatarView(
                 file: store.selectedAvatarFile,
-                animation: store.isBusy ? "working" : "idle",
+                animation: "idle",
                 onTap: { store.toggleAvatarPicker() }
             )
             .frame(width: OverlayMetrics.avatarSize, height: OverlayMetrics.avatarSize)

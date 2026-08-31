@@ -49,6 +49,12 @@ private enum TranscriptPerfFixture {
             return Int(arguments[index + 1]) ?? 600
         }()
         let includesSideSession = arguments.contains("--side-session")
+        let fileChangeFiles: Int = {
+            guard let index = arguments.firstIndex(of: "--file-change-files"), index + 1 < arguments.count else {
+                return 0
+            }
+            return max(0, Int(arguments[index + 1]) ?? 0)
+        }()
         let sessionID = includesSideSession ? "bubble-perf-main" : "bubble-perf-600-turns"
         let root = home.appendingPathComponent(".bubble", isDirectory: true)
         let transcripts = root.appendingPathComponent("transcripts", isDirectory: true)
@@ -81,6 +87,20 @@ private enum TranscriptPerfFixture {
                     toolInput: #"{"path":"Sources/Bubble/OverlayView.swift"}"#,
                     toolOutput: "Read completed"
                 ))
+            }
+            if turn == turns - 1, fileChangeFiles > 0 {
+                for file in 0..<fileChangeFiles {
+                    let path = file == 0 ? ".pi/agent/web-search.json" : "Sources/Fixture/File\(file).swift"
+                    items.append(FixtureItem(
+                        kind: "tool",
+                        text: "Edit \(path)",
+                        toolId: "file-change-\(file)",
+                        toolStatus: "completed",
+                        toolKind: "edit",
+                        toolInput: #"{"path":"\#(path)","oldText":"old line","newText":"new line\nsecond line"}"#,
+                        toolOutput: nil
+                    ))
+                }
             }
 
             let paragraphCount = turn.isMultiple(of: 20) ? 180 : 10

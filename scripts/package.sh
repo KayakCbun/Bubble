@@ -23,12 +23,26 @@ swiftc -O -parse-as-library \
   -o /tmp/bubble-check-workspace-render-perf
 /tmp/bubble-check-workspace-render-perf
 
+swiftc -parse-as-library -framework AppKit -framework SwiftUI \
+  Sources/Bubble/TranscriptHostingSizingPolicy.swift \
+  scripts/check_hosting_view_sizing.swift \
+  -o /tmp/bubble-check-hosting-view-sizing
+/tmp/bubble-check-hosting-view-sizing
+
 swiftc -O -parse-as-library \
   Sources/Bubble/WorkspaceTranscriptRenderPlan.swift \
   Sources/Bubble/TranscriptRenderPlan.swift \
   scripts/check_transcript_render_plan.swift \
   -o /tmp/bubble-check-transcript-render-plan
 /tmp/bubble-check-transcript-render-plan
+
+swiftc -O -parse-as-library \
+  Sources/Bubble/WorkspaceTranscriptRenderPlan.swift \
+  Sources/Bubble/TranscriptRenderPlan.swift \
+  Sources/Bubble/TranscriptProjectionStore.swift \
+  scripts/check_transcript_projection_store.swift \
+  -o /tmp/bubble-check-transcript-projection-store
+/tmp/bubble-check-transcript-projection-store
 
 swiftc -parse-as-library \
   Sources/Bubble/TranscriptHistoryWindow.swift \
@@ -49,7 +63,10 @@ swiftc -parse-as-library scripts/check_typography_contract.swift -o /tmp/bubble-
 swiftc -parse-as-library Sources/Bubble/OverlayLayoutPolicy.swift Sources/Bubble/OverlayRenderPolicy.swift scripts/check_overlay_layout.swift -o /tmp/bubble-check-layout
 /tmp/bubble-check-layout
 
-swiftc -parse-as-library -framework AppKit \
+swiftc -parse-as-library -framework AppKit -framework SwiftUI scripts/check_running_sweep_layout.swift -o /tmp/bubble-check-running-sweep-layout
+/tmp/bubble-check-running-sweep-layout
+
+swiftc -O -parse-as-library -framework AppKit \
   Sources/Bubble/OverlayLayoutPolicy.swift \
   Sources/Bubble/OverlayRenderPolicy.swift \
   Sources/Bubble/ComposerEditorLocator.swift \
@@ -65,6 +82,17 @@ swiftc -parse-as-library Sources/Bubble/SessionReloadPolicy.swift scripts/check_
 
 swiftc -parse-as-library Sources/Bubble/TranscriptInteractionPolicy.swift scripts/check_transcript_interactions.swift -o /tmp/bubble-check-transcript-interactions
 /tmp/bubble-check-transcript-interactions
+
+swiftc -parse-as-library Sources/Bubble/TranscriptSurface.swift scripts/check_transcript_surface.swift -o /tmp/bubble-check-transcript-surface
+/tmp/bubble-check-transcript-surface
+
+swiftc -parse-as-library -framework AppKit \
+  Sources/Bubble/TranscriptInteractionPolicy.swift \
+  Sources/Bubble/TranscriptSurface.swift \
+  Sources/Bubble/AppKitTranscriptSurface.swift \
+  scripts/check_appkit_transcript_surface.swift \
+  -o /tmp/bubble-check-appkit-transcript-surface
+/tmp/bubble-check-appkit-transcript-surface
 
 swiftc -parse-as-library Sources/Bubble/AssistantMessageContent.swift scripts/check_assistant_message_images.swift -o /tmp/bubble-check-assistant-images
 /tmp/bubble-check-assistant-images
@@ -161,5 +189,6 @@ if [[ -f "$ICON_SRC" ]]; then
 fi
 
 xattr -cr "$APP" 2>/dev/null || true
+codesign --force --deep --sign - "$APP"
 
 echo "Built $APP"

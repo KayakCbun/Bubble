@@ -347,7 +347,15 @@ struct OverlayLayoutCheck {
             RunningSweepPolicy.minimumFrameInterval <= 1.0 / 120.0,
             "running highlight is eligible to follow a 120 Hz display"
         )
-
+        expect(
+            TranscriptChunkBoundaryPolicy.topInset(isContinuation: false) == 0,
+            "the first virtual chunk keeps the message's normal top edge"
+        )
+        expect(
+            TranscriptChunkBoundaryPolicy.topInset(isContinuation: true)
+                >= TranscriptChunkBoundaryPolicy.minimumTopInset,
+            "continuation chunks keep their first line inside the clipped AppKit host"
+        )
         expect(
             !OverlayPalettePolicy.needsScroll(items: 1, isMount: false),
             "a single command does not scroll"

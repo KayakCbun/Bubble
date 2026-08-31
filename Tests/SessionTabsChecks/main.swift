@@ -105,18 +105,39 @@ do {
         expect(error as? SessionTabsError == .primarySessionCannotClose, "closing the main session must report a dedicated error")
     }
 
+    expect(
+        SessionTabLayoutMetrics.bubble.spacing < 0,
+        "folder tabs must overlap like a stacked divider"
+    )
+    expect(
+        SessionTabLayoutMetrics.bubble.collapsedWidth < SessionTabLayoutMetrics.bubble.expandedWidth,
+        "the selected tab must step forward from the stack"
+    )
     let hitRegions = SessionTabLayout.hitRegions(
         count: 2,
         transcriptOriginY: 36,
         trailingX: 36
     )
     expect(hitRegions == [
-        CGRect(x: 4, y: 60, width: 32, height: 32),
-        CGRect(x: 4, y: 100, width: 32, height: 32),
-    ], "physical hit regions must match the rendered tab strip")
+        CGRect(x: 10, y: 56, width: 26, height: 42),
+        CGRect(x: 10, y: 88, width: 26, height: 42),
+    ], "physical hit regions must match the stacked vertical folder tabs")
+    expect(
+        hitRegions[0].maxY > hitRegions[1].minY,
+        "folder tabs must overlap instead of sitting as isolated buttons"
+    )
     expect(
         SessionTabLayout.index(
-            at: CGPoint(x: 29, y: 76),
+            at: CGPoint(x: 22, y: 93),
+            count: 2,
+            transcriptOriginY: 36,
+            trailingX: 36
+        ) == 1,
+        "a click on the overlap belongs to the front (later) folder"
+    )
+    expect(
+        SessionTabLayout.index(
+            at: CGPoint(x: 22, y: 72),
             count: 2,
             transcriptOriginY: 36,
             trailingX: 36
@@ -125,7 +146,7 @@ do {
     )
     expect(
         SessionTabLayout.index(
-            at: CGPoint(x: 29, y: 116),
+            at: CGPoint(x: 22, y: 110),
             count: 2,
             transcriptOriginY: 36,
             trailingX: 36
@@ -134,7 +155,7 @@ do {
     )
     expect(
         SessionTabLayout.target(
-            at: CGPoint(x: 10, y: 116),
+            at: CGPoint(x: 14, y: 110),
             count: 2,
             transcriptOriginY: 36,
             trailingX: 36
@@ -143,7 +164,7 @@ do {
     )
     expect(
         SessionTabLayout.target(
-            at: CGPoint(x: 29, y: 116),
+            at: CGPoint(x: 22, y: 110),
             count: 2,
             transcriptOriginY: 36,
             trailingX: 36
@@ -152,7 +173,7 @@ do {
     )
     expect(
         SessionTabLayout.target(
-            at: CGPoint(x: 29, y: 76),
+            at: CGPoint(x: 22, y: 72),
             count: 2,
             transcriptOriginY: 36,
             trailingX: 36

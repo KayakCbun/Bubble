@@ -222,6 +222,22 @@ enum RunningSweepPolicy {
     }
 }
 
+enum TranscriptChunkBoundaryPolicy {
+    static let minimumTopInset: CGFloat = 6
+
+    static func topInset(isContinuation: Bool) -> CGFloat {
+        isContinuation ? 8 : 0
+    }
+}
+
+enum TranscriptEstimatedHeightPolicy {
+    static func height(for text: String) -> CGFloat {
+        let lineCount = max(1, text.split(whereSeparator: \.isNewline).count)
+        let roughLines = min(18, max(lineCount, Int(ceil(Double(text.count) / 92.0))))
+        return max(42, min(420, CGFloat(roughLines) * 19 + 26))
+    }
+}
+
 enum OverlaySpring {
     static let panelResponse: CGFloat = 0.22
     static let panelDamping: CGFloat = 0.86

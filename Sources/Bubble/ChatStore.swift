@@ -95,6 +95,32 @@ struct ChatItem: Identifiable, Codable, Equatable, @unchecked Sendable {
     }
 }
 
+/// Stable, source-level transcript mutation emitted alongside
+/// `transcriptRevision`.  Overlay can apply a live tail update without
+/// rebuilding `visibleItems`/grouped rows; any path that cannot describe its
+/// structural effect emits `.rebuild` and is handled by an authoritative
+/// replacement.
+enum ChatStoreTranscriptDelta: @unchecked Sendable {
+    case rebuild
+    case append([ChatItem])
+    case update(ChatItem)
+    case updates([ChatItem])
+    case remove([UUID])
+}
+
+/// A side-session pane mutation marker. The row payload remains in
+/// `workspacePaneItems`; keeping only the stable identity/index here avoids
+/// retaining every growing token string in the mutation history.
+enum WorkspacePaneMutation: Equatable, @unchecked Sendable {
+    case rebuild
+    case update(itemID: UUID, index: Int)
+}
+
+struct WorkspacePaneRevisionDelta: Equatable, @unchecked Sendable {
+    let revision: UInt64
+    let mutation: WorkspacePaneMutation
+}
+
 private struct PendingPrompt {
     var itemId: UUID
     var display: String
@@ -180,6 +206,7 @@ final class ChatStore {
     var composerChromeHeight: CGFloat = OverlayMetrics.minHeight
     var slashMenuPresented = false
     var slashPaletteChromeHeight: CGFloat = 0
+    private var paletteSnapshot: [PaletteItem] = []
     var isStartingSession = false
     var isConnected = false
     var status: String = "starting"
@@ -207,7 +234,25 @@ final class ChatStore {
     var overlayPinned = UserDefaults.standard.bool(forKey: "bubble.overlay.pinned")
     var filePreview: FilePreviewDocument?
     var workspaceStage: WorkspaceStage?
-    var workspacePaneItems: [ChatItem] = []
+    var workspacePaneItems: [ChatItem] = [] {
+        didSet {
+            workspacePaneRevision &+= 1
+            workspacePaneChangedItems.removeAll(keepingCapacity: true)
+            workspacePaneMutationLog.append(
+                WorkspacePaneRevisionDelta(
+                    revision: workspacePaneRevision,
+                    mutation: .rebuild
+                )
+            )
+            if workspacePaneMutationLog.count > Self.workspacePaneMutationHistoryLimit {
+                workspacePaneMutationLog.removeFirst(
+                    workspacePaneMutationLog.count - Self.workspacePaneMutationHistoryLimit
+                )
+            }
+        }
+    }
+    private(set) var workspacePaneRevision: UInt64 = 0
+    private(set) var workspacePaneChangedItems: [UUID: ChatItem] = [:]
     var workspacePaneStreamingAssistantId: UUID?
     var workspacePaneStreamingThoughtId: UUID?
     var workspacePaneScrollToken = 0
@@ -255,7 +300,20 @@ final class ChatStore {
     var streamUISuspended = true
     var composerFocusSuspended = true
     var transcriptRevision: UInt64 = 0
+    /// The mutation associated with the latest `transcriptRevision`.  It is
+    /// intentionally separate from the revision number so a consumer can
+    /// distinguish a one-row streaming update from restore/branch rebuilds.
+    private(set) var transcriptDelta: ChatStoreTranscriptDelta = .rebuild
     var transcriptHistoryTurnCapacity = TranscriptHistoryWindow.configuredInitialCapacity
+    @ObservationIgnored private var pendingTranscriptDelta: ChatStoreTranscriptDelta?
+    @ObservationIgnored private var transcriptMutationBatchDepth = 0
+    @ObservationIgnored private var transcriptItemVersions: [UUID: UInt64] = [:]
+    @ObservationIgnored private var transcriptItemAppends: [UUID: String] = [:]
+    @ObservationIgnored private var transcriptItemIndexCache: [UUID: Int] = [:]
+    @ObservationIgnored private var transcriptToolIndexCache: [String: Int] = [:]
+    @ObservationIgnored private var workspacePaneItemIndexCache: [UUID: Int] = [:]
+    @ObservationIgnored private var workspacePaneToolIndexCache: [String: Int] = [:]
+    @ObservationIgnored private var workspacePaneMutationLog: [WorkspacePaneRevisionDelta] = []
     @ObservationIgnored private var resumeActionGeneration = 0
     var conversationTree: ConversationTreeSnapshot?
     var branchDraft: ConversationBranchDraft? {
@@ -383,6 +441,9 @@ final class ChatStore {
 
     func collapseSideStage() {
         onSideStageChromeInvalidated?()
+        if let runID = workspaceStage?.runId, !runID.isEmpty, !workspacePaneItems.isEmpty {
+            cacheWorkspaceRunRows(workspacePaneItems, runId: runID)
+        }
         filePreview = nil
         clearWorkspaceStage(keepingItems: false)
         sideStageChromeVisible = false
@@ -466,6 +527,16 @@ final class ChatStore {
         let wasPresented = sideStagePresented
         let opensSideStage = workspaceStage == nil && filePreview == nil
         let changesWorkspace = workspaceStage?.cardId != item.id
+        if changesWorkspace,
+           let previousRunID = workspaceStage?.runId,
+           !previousRunID.isEmpty,
+           !workspacePaneItems.isEmpty {
+            // The visible pane may have received live child rows since the
+            // last close. Snapshot it once before switching so a later
+            // reopen cannot select an older run-cache value. Do not retain
+            // the same Array buffer used by the live pane.
+            cacheWorkspaceRunRows(Array(workspacePaneItems), runId: previousRunID)
+        }
         filePreview = nil
         if opensSideStage || changesWorkspace {
             workspacePanePresentationPhase = .placeholder
@@ -528,16 +599,16 @@ final class ChatStore {
             workspacePaneLoadState = .ready
             break
         case .run:
-            workspacePaneItems = cachedRunRows ?? fallbackWorkspacePaneItems(card: item)
+            workspacePaneItems = Array(cachedRunRows ?? fallbackWorkspacePaneItems(card: item))
             workspacePaneLoadState = isLive ? .fallback : .ready
         case .cached:
-            workspacePaneItems = cachedRows ?? []
+            workspacePaneItems = Array(cachedRows ?? [])
             workspacePaneLoadState = .ready
         case .card:
             workspacePaneItems = fallbackWorkspacePaneItems(card: item)
             workspacePaneLoadState = .fallback
             if isLive, let runId = item.workspaceRunId, !runId.isEmpty {
-                cacheWorkspaceRunRows(workspacePaneItems, runId: runId)
+                cacheWorkspaceRunRows(Array(workspacePaneItems), runId: runId)
             }
         case .loading:
             workspacePaneItems = [
@@ -584,6 +655,8 @@ final class ChatStore {
         workspacePaneCoverVisible = true
         if !keepingItems {
             workspacePaneItems = []
+            workspacePaneItemIndexCache.removeAll(keepingCapacity: true)
+            workspacePaneToolIndexCache.removeAll(keepingCapacity: true)
             workspacePaneLoadState = .idle
             workspacePaneStreamingAssistantId = nil
             workspacePaneStreamingThoughtId = nil
@@ -831,7 +904,10 @@ final class ChatStore {
         } else {
             visibleRows = projected
         }
-        workspacePaneItems = visibleRows
+        // Keep the live pane's storage independent from the session cache;
+        // otherwise the next streamed subscript write would COW the entire
+        // retained workspace transcript.
+        workspacePaneItems = Array(visibleRows)
         prewarmWorkspacePaneRendering(visibleRows)
         if childBusy {
             workspacePaneRowsBySession[sessionId] = visibleRows
@@ -905,7 +981,9 @@ final class ChatStore {
            workspacePaneRowsBySession[sessionId] != nil,
            workspacePaneLoadState == .ready,
            !workspacePaneInvalidatedSessionIds.contains(sessionId) {
-            workspacePaneRowsBySession[sessionId] = workspacePaneItems
+            // Keep the snapshot isolated from the live pane's Array storage;
+            // otherwise the next token write would trigger an O(N) COW copy.
+            workspacePaneRowsBySession[sessionId] = Array(workspacePaneItems)
         }
     }
 
@@ -1005,6 +1083,30 @@ final class ChatStore {
         forceNew: Bool = false
     ) {
         guard let runId, !runId.isEmpty else { return }
+        if workspacePaneIsCurrent(path: path, sessionId: sessionId, runId: runId) {
+            if !forceNew,
+               let id = workspacePaneStreamingAssistantId,
+               let index = workspacePaneItemIndex(id) {
+                _ = Self.appendCleanStreamChunk(raw, to: &workspacePaneItems[index].text)
+                publishWorkspacePaneChange(workspacePaneItems[index], at: index)
+            } else if !forceNew,
+                      let index = TranscriptStream.resumeAssistantIndex(
+                        kinds: workspacePaneItems.map(\.kind.rawValue)
+                      ) {
+                _ = Self.appendCleanStreamChunk(raw, to: &workspacePaneItems[index].text)
+                workspacePaneStreamingAssistantId = workspacePaneItems[index].id
+                workspacePaneItemIndexCache[workspacePaneItems[index].id] = index
+                publishWorkspacePaneChange(workspacePaneItems[index], at: index)
+            } else {
+                let cleaned = Self.stripDiagnostics(raw)
+                guard !cleaned.isEmpty else { return }
+                let item = ChatItem(kind: .assistant, text: cleaned)
+                workspacePaneItems.append(item)
+                workspacePaneStreamingAssistantId = item.id
+                workspacePaneItemIndexCache[item.id] = workspacePaneItems.count - 1
+            }
+            return
+        }
         var rows = workspaceRunBuffer(runId: runId)
         if !forceNew, let index = TranscriptStream.resumeAssistantIndex(kinds: rows.map(\.kind.rawValue)) {
             rows[index].text = Self.stripDiagnostics(rows[index].text + raw)
@@ -1028,6 +1130,33 @@ final class ChatStore {
     ) {
         guard let runId, !runId.isEmpty,
               let name = BubbleImages.save(image.data, mimeType: image.mimeType) else { return }
+        if workspacePaneIsCurrent(path: path, sessionId: sessionId, runId: runId) {
+            if !forceNew,
+               let id = workspacePaneStreamingAssistantId,
+               let index = workspacePaneItemIndex(id) {
+                appendAssistantImageName(name, to: &workspacePaneItems[index])
+                publishWorkspacePaneChange(workspacePaneItems[index], at: index)
+            } else if !forceNew,
+                      let index = TranscriptStream.resumeAssistantIndex(
+                        kinds: workspacePaneItems.map(\.kind.rawValue)
+                      ) {
+                appendAssistantImageName(name, to: &workspacePaneItems[index])
+                workspacePaneStreamingAssistantId = workspacePaneItems[index].id
+                workspacePaneItemIndexCache[workspacePaneItems[index].id] = index
+                publishWorkspacePaneChange(workspacePaneItems[index], at: index)
+            } else {
+                let item = ChatItem(
+                    kind: .assistant,
+                    text: "",
+                    imageNames: [name],
+                    assistantImagePlacements: [AssistantImagePlacement(name: name, textOffset: 0)]
+                )
+                workspacePaneItems.append(item)
+                workspacePaneStreamingAssistantId = item.id
+                workspacePaneItemIndexCache[item.id] = workspacePaneItems.count - 1
+            }
+            return
+        }
         var rows = workspaceRunBuffer(runId: runId)
         if !forceNew, let index = TranscriptStream.resumeAssistantIndex(kinds: rows.map(\.kind.rawValue)) {
             appendAssistantImageName(name, to: &rows[index])
@@ -1075,6 +1204,23 @@ final class ChatStore {
         runId: String?
     ) {
         guard let runId, !runId.isEmpty else { return }
+        if workspacePaneIsCurrent(path: path, sessionId: sessionId, runId: runId) {
+            if TranscriptStream.shouldMergeThought(previousKind: workspacePaneItems.last?.kind.rawValue),
+               let index = workspacePaneItems.indices.last {
+                _ = Self.appendCleanStreamChunk(raw, to: &workspacePaneItems[index].text)
+                workspacePaneStreamingThoughtId = workspacePaneItems[index].id
+                workspacePaneItemIndexCache[workspacePaneItems[index].id] = index
+                publishWorkspacePaneChange(workspacePaneItems[index], at: index)
+            } else {
+                let cleaned = Self.stripDiagnostics(raw)
+                guard !cleaned.isEmpty else { return }
+                let item = ChatItem(kind: .thought, text: cleaned)
+                workspacePaneItems.append(item)
+                workspacePaneStreamingThoughtId = item.id
+                workspacePaneItemIndexCache[item.id] = workspacePaneItems.count - 1
+            }
+            return
+        }
         var rows = workspaceRunBuffer(runId: runId)
         if TranscriptStream.shouldMergeThought(previousKind: rows.last?.kind.rawValue),
            let index = rows.indices.last {
@@ -1098,12 +1244,43 @@ final class ChatStore {
         runId: String?
     ) {
         guard let runId, !runId.isEmpty else { return }
-        var rows = workspaceRunBuffer(runId: runId)
         let callId = update.string("toolCallId") ?? UUID().uuidString
         let title = update.string("title") ?? update.string("kind") ?? "tool"
         let status = update.string("status") ?? "pending"
         let payload = extractToolPayload(update)
         let imageNames = persistedImageNames(payload.images)
+        if workspacePaneIsCurrent(path: path, sessionId: sessionId, runId: runId) {
+            if let index = workspacePaneToolIndex(callId) {
+                // Mutate a local value and assign the subscript once. A
+                // tool update carries several fields; separate subscript
+                // writes would publish several revisions (and force a
+                // consumer that coalesces them to rebuild unnecessarily).
+                var item = workspacePaneItems[index]
+                item.text = title
+                item.toolStatus = status
+                if let input = payload.input { item.toolInput = input }
+                if let output = payload.output { item.toolOutput = output }
+                mergeImageNames(imageNames, into: &item)
+                workspacePaneItems[index] = item
+                publishWorkspacePaneChange(item, at: index)
+            } else if !isUpdate || title != "tool" {
+                let item = ChatItem(
+                    kind: .tool,
+                    text: title,
+                    toolId: callId,
+                    toolStatus: status,
+                    toolInput: payload.input,
+                    toolOutput: payload.output,
+                    imageNames: imageNames
+                )
+                workspacePaneItems.append(item)
+                workspacePaneToolIndexCache[callId] = workspacePaneItems.count - 1
+            }
+            workspacePaneStreamingAssistantId = nil
+            workspacePaneStreamingThoughtId = nil
+            return
+        }
+        var rows = workspaceRunBuffer(runId: runId)
         if let index = rows.lastIndex(where: { $0.kind == .tool && $0.toolId == callId }) {
             rows[index].text = title
             rows[index].toolStatus = status
@@ -1170,6 +1347,7 @@ final class ChatStore {
     private var workspacePaneInvalidatedSessionIds: Set<String> = []
     private static let workspacePaneLoadingText = "Loading workspace session…"
     private static let workspacePaneRunCacheLimit = 24
+    private static let workspacePaneMutationHistoryLimit = 256
 
     var isTranscriptRestorePending: Bool { transcriptRestorePending }
 
@@ -1195,7 +1373,19 @@ final class ChatStore {
             workspaceState.active = nil
         }
         refreshMountSkills()
-        refreshCatalog()
+        paletteSnapshot = slashPaletteItems
+        if ProcessInfo.processInfo.environment["BUBBLE_PALETTE_DIAGNOSTICS"] == "1" {
+            skills = (0..<59).map { index in
+                PiSkill(
+                    name: "diagnostic-skill-\(index)",
+                    description: "Synthetic skill used to match the real slash palette catalog size.",
+                    path: "/diagnostic/skill-\(index)/SKILL.md"
+                )
+            }
+            paletteSnapshot = slashPaletteItems
+        } else {
+            refreshCatalog()
+        }
         client.onUpdate = { [weak self] update in
             guard update.shouldDeliverToTranscript else { return }
             DispatchQueue.main.async {
@@ -1321,6 +1511,14 @@ final class ChatStore {
         }
     }
 
+    /// Layout only needs to know whether the transcript card exists. Avoid
+    /// filtering the retained history on every streamed token.
+    var hasTranscriptItems: Bool { !items.isEmpty }
+
+    func transcriptItem(_ id: UUID) -> ChatItem? {
+        transcriptItemIndex(id).map { items[$0] }
+    }
+
     var currentSessionID: String? { client.sessionId }
     var sessionTabRole: SessionTabRuntimeRole { runtimeRole == .main ? .main : .side }
 
@@ -1388,7 +1586,7 @@ final class ChatStore {
     }
 
     var visiblePaletteItems: [PaletteItem] {
-        paletteItems
+        paletteSnapshot
     }
 
     var paletteCaption: String {
@@ -1448,18 +1646,24 @@ final class ChatStore {
         if OverlayComposer.chromeHeightNeedsUpdate(previous: composerChromeHeight, next: nextComposer) {
             composerChromeHeight = nextComposer
         }
-        let visible = PromptTriggerPolicy.hasActiveTrigger(in: draft)
+        let paletteEligible = PromptTriggerPolicy.hasActiveTrigger(in: draft)
             && !paletteSuppressed
             && !showAvatarPicker
             && !isBusy
-            && !visiblePaletteItems.isEmpty
+        if paletteEligible {
+            let nextPaletteItems = paletteItems
+            if nextPaletteItems != paletteSnapshot {
+                paletteSnapshot = nextPaletteItems
+            }
+        }
+        let visible = paletteEligible && !paletteSnapshot.isEmpty
         if visible != slashMenuPresented {
             slashMenuPresented = visible
         }
         let paletteHeight: CGFloat
         if visible {
             paletteHeight = OverlayPalettePolicy.chromeHeight(
-                items: visiblePaletteItems.count,
+                items: paletteSnapshot.count,
                 isMount: isMountPalette,
                 hasSearch: isAppPalette || isMountPalette
             )
@@ -1738,6 +1942,9 @@ final class ChatStore {
                 self.installedApps = apps
                 self.sessions = sessions
                 self.macEpoch += 1
+                if PromptPalette.activeToken(in: self.draft) == nil {
+                    self.paletteSnapshot = self.slashPaletteItems
+                }
                 self.syncOverlayChrome()
                 OverlayLog.write("catalog skills=\(skills.count) prompts=\(prompts.count) files=\(files.count) apps=\(apps.count) sessions=\(sessions.count)")
             }
@@ -2798,6 +3005,7 @@ final class ChatStore {
         let previousHistoryTurnCapacity = transcriptHistoryTurnCapacity
         isStartingSession = true
         items = []
+        resetTranscriptMutationCaches()
         transcriptHistoryTurnCapacity = TranscriptHistoryWindow.configuredInitialCapacity
         richTranscriptRows = [:]
         closeSideStage(animated: false)
@@ -2902,6 +3110,7 @@ final class ChatStore {
         writeTranscript()
         isStartingSession = true
         items = []
+        resetTranscriptMutationCaches()
         transcriptHistoryTurnCapacity = TranscriptHistoryWindow.configuredInitialCapacity
         richTranscriptRows = [:]
         streamingAssistantId = nil
@@ -3093,12 +3302,17 @@ final class ChatStore {
             forceNewAssistantRow = false
             streamingAssistantId = item.id
             items.append(item)
+            markTranscriptDelta(.append([item]))
         } else if let id = streamingAssistantId,
-           let index = items.firstIndex(where: { $0.id == id }) {
+           let index = transcriptItemIndex(id) {
             appendAssistantImageName(name, to: &items[index])
+            transcriptItemAppends[id] = nil
+            markTranscriptDelta(.update(items[index]))
         } else if let index = TranscriptStream.resumeAssistantIndex(kinds: items.map(\.kind.rawValue)) {
             appendAssistantImageName(name, to: &items[index])
             streamingAssistantId = items[index].id
+            transcriptItemAppends[items[index].id] = nil
+            markTranscriptDelta(.update(items[index]))
         } else {
             let item = ChatItem(
                 kind: .assistant,
@@ -3108,6 +3322,7 @@ final class ChatStore {
             )
             streamingAssistantId = item.id
             items.append(item)
+            markTranscriptDelta(.append([item]))
         }
         persist()
     }
@@ -3167,8 +3382,10 @@ final class ChatStore {
         }
         guard !streamFlushQueued else { return }
         streamFlushQueued = true
-        let renderedAssistantBytes = items.last(where: { $0.id == streamingAssistantId })?.text.utf8.count ?? 0
-        let renderedThoughtBytes = items.last(where: { $0.id == streamingThoughtId })?.text.utf8.count ?? 0
+        let renderedAssistantBytes = streamingAssistantId
+            .flatMap(transcriptItemIndex).map { items[$0].text.utf8.count } ?? 0
+        let renderedThoughtBytes = streamingThoughtId
+            .flatMap(transcriptItemIndex).map { items[$0].text.utf8.count } ?? 0
         let interval = OverlayRenderPolicy.streamFlushInterval(
             renderedBytes: max(
                 renderedAssistantBytes + pendingAssistantChunk.utf8.count,
@@ -3192,12 +3409,21 @@ final class ChatStore {
         let thought = pendingThoughtChunk
         pendingAssistantChunk = ""
         pendingThoughtChunk = ""
-        // Thoughts first so a same-frame thought lands above the answer.
+        // Thoughts first so a same-frame thought lands above the answer. If
+        // both channels flush together, publish one combined structural
+        // revision: exposing only the second delta can leave the thought row
+        // stale when Observation coalesces both mutations into one body pass.
+        let batchesMultipleRows = !thought.isEmpty && !assistant.isEmpty
+        if batchesMultipleRows { transcriptMutationBatchDepth += 1 }
         if !thought.isEmpty {
             commitThought(thought)
         }
         if !assistant.isEmpty {
             commitAssistant(assistant)
+        }
+        if batchesMultipleRows {
+            transcriptMutationBatchDepth -= 1
+            persist()
         }
     }
 
@@ -3209,11 +3435,12 @@ final class ChatStore {
             forceNewAssistantRow = false
             streamingAssistantId = item.id
             items.append(item)
+            markTranscriptDelta(.append([item]))
             persist()
             return
         }
         if let id = streamingAssistantId,
-           let index = items.firstIndex(where: { $0.id == id }) {
+           let index = transcriptItemIndex(id) {
             applyAssistant(raw, at: index)
             return
         }
@@ -3226,34 +3453,44 @@ final class ChatStore {
         let item = ChatItem(kind: .assistant, text: cleaned)
         streamingAssistantId = item.id
         items.append(item)
+        markTranscriptDelta(.append([item]))
         persist()
     }
 
     private func applyAssistant(_ raw: String, at index: Int) {
-        let cleaned = Self.stripDiagnostics(items[index].text + raw)
-        if cleaned.isEmpty {
+        let appended = Self.appendCleanStreamChunk(raw, to: &items[index].text)
+        if items[index].text.isEmpty {
             let id = items[index].id
             items.remove(at: index)
+            markTranscriptDelta(.remove([id]))
             if streamingAssistantId == id {
                 streamingAssistantId = nil
             }
         } else {
-            items[index].text = cleaned
             streamingAssistantId = items[index].id
+            markTranscriptDelta(
+                .update(items[index]),
+                appendedText: appended.map { (items[index].id, $0) }
+            )
         }
         persist()
     }
 
     private func commitThought(_ raw: String) {
         if let id = streamingThoughtId,
-           let index = items.firstIndex(where: { $0.id == id }) {
-            items[index].text = Self.stripDiagnostics(items[index].text + raw)
+           let index = transcriptItemIndex(id) {
+            let appended = Self.appendCleanStreamChunk(raw, to: &items[index].text)
+            markTranscriptDelta(
+                .update(items[index]),
+                appendedText: appended.map { (items[index].id, $0) }
+            )
         } else {
             let cleaned = Self.stripDiagnostics(raw)
             guard !cleaned.isEmpty else { return }
             let item = ChatItem(kind: .thought, text: cleaned)
             streamingThoughtId = item.id
             items.append(item)
+            markTranscriptDelta(.append([item]))
         }
         persist()
     }
@@ -3267,7 +3504,7 @@ final class ChatStore {
         let kind = update.string("kind")
         let payload = extractToolPayload(update)
         let imageNames = persistedImageNames(payload.images)
-        if let index = items.lastIndex(where: { $0.kind == .tool && $0.toolId == callId }) {
+        if let index = transcriptToolIndex(callId) {
             if let title, !title.isEmpty {
                 items[index].text = title
             }
@@ -3284,9 +3521,9 @@ final class ChatStore {
                 items[index].toolOutput = output
             }
             mergeImageNames(imageNames, into: &items[index])
+            markTranscriptDelta(.update(items[index]))
         } else if !isUpdate || title != nil {
-            items.append(
-                ChatItem(
+            let item = ChatItem(
                     kind: .tool,
                     text: title ?? kind ?? "tool",
                     toolId: callId,
@@ -3296,7 +3533,8 @@ final class ChatStore {
                     toolOutput: payload.output,
                     imageNames: imageNames
                 )
-            )
+            items.append(item)
+            markTranscriptDelta(.append([item]))
         }
         persist()
         self.status = "tool"
@@ -3678,6 +3916,180 @@ final class ChatStore {
         "\(entryID)|\(kind.rawValue)"
     }
 
+    /// Mark a mutation before calling `persist()`.  Stream handlers use the
+    /// precise append/update/remove forms; all other callers safely fall back
+    /// to a structural rebuild when they do not provide a marker.
+    private func markTranscriptDelta(
+        _ delta: ChatStoreTranscriptDelta,
+        appendedText: (id: UUID, text: String)? = nil
+    ) {
+        switch delta {
+        case .update(let item):
+            transcriptItemVersions[item.id, default: 0] &+= 1
+            transcriptItemAppends[item.id] = nil
+        case .updates(let items):
+            for item in items {
+                transcriptItemVersions[item.id, default: 0] &+= 1
+                transcriptItemAppends[item.id] = nil
+            }
+        case .append(let items):
+            for item in items {
+                transcriptItemVersions[item.id, default: 0] &+= 1
+                transcriptItemAppends[item.id] = nil
+            }
+        case .remove(let ids):
+            for id in ids {
+                transcriptItemVersions[id] = nil
+                transcriptItemAppends[id] = nil
+            }
+        case .rebuild:
+            transcriptItemAppends.removeAll(keepingCapacity: true)
+            let liveIDs = Set(items.map(\.id))
+            transcriptItemVersions = transcriptItemVersions.filter { liveIDs.contains($0.key) }
+            transcriptItemIndexCache.removeAll(keepingCapacity: true)
+            transcriptToolIndexCache.removeAll(keepingCapacity: true)
+        }
+        if let appendedText {
+            transcriptItemAppends[appendedText.id] = appendedText.text
+        }
+        switch (pendingTranscriptDelta, delta) {
+        case (nil, _):
+            pendingTranscriptDelta = delta
+        case (.some(.rebuild), _):
+            break
+        case (.some(.append(var existing)), .append(let next)):
+            existing.append(contentsOf: next)
+            pendingTranscriptDelta = .append(existing)
+        case (.some(.update(let existing)), .update(let next)):
+            pendingTranscriptDelta = .updates(existing.id == next.id ? [next] : [existing, next])
+        case (.some(.updates(var existing)), .update(let next)):
+            if let index = existing.firstIndex(where: { $0.id == next.id }) {
+                existing[index] = next
+            } else {
+                existing.append(next)
+            }
+            pendingTranscriptDelta = .updates(existing)
+        case (.some(.updates), _), (.some(.update), _), (.some(.remove), _), (.some(.append), _):
+            // Multiple mutations in one revision may alter grouping/order;
+            // force the consumer to resynchronize from its authoritative
+            // source rather than attempting to compose an unsafe delta.
+            pendingTranscriptDelta = .rebuild
+        }
+    }
+
+    /// Streaming ids and tool-call ids are stable for the duration of a run.
+    /// Validate cached indexes defensively because restores/removals can shift
+    /// the backing array; the hot token/tool path is O(1), while a structural
+    /// mutation pays a single recovery scan.
+    private func transcriptItemIndex(_ id: UUID) -> Int? {
+        if let cached = transcriptItemIndexCache[id],
+           items.indices.contains(cached),
+           items[cached].id == id {
+            return cached
+        }
+        guard let index = items.firstIndex(where: { $0.id == id }) else {
+            transcriptItemIndexCache[id] = nil
+            return nil
+        }
+        transcriptItemIndexCache[id] = index
+        return index
+    }
+
+    private func transcriptToolIndex(_ callID: String) -> Int? {
+        if let cached = transcriptToolIndexCache[callID],
+           items.indices.contains(cached),
+           items[cached].kind == .tool,
+           items[cached].toolId == callID {
+            return cached
+        }
+        guard let index = items.lastIndex(where: { $0.kind == .tool && $0.toolId == callID }) else {
+            transcriptToolIndexCache[callID] = nil
+            return nil
+        }
+        transcriptToolIndexCache[callID] = index
+        return index
+    }
+
+    private func workspacePaneItemIndex(_ id: UUID) -> Int? {
+        if let cached = workspacePaneItemIndexCache[id],
+           workspacePaneItems.indices.contains(cached),
+           workspacePaneItems[cached].id == id {
+            return cached
+        }
+        guard let index = workspacePaneItems.firstIndex(where: { $0.id == id }) else {
+            workspacePaneItemIndexCache[id] = nil
+            return nil
+        }
+        workspacePaneItemIndexCache[id] = index
+        return index
+    }
+
+    private func workspacePaneToolIndex(_ callID: String) -> Int? {
+        if let cached = workspacePaneToolIndexCache[callID],
+           workspacePaneItems.indices.contains(cached),
+           workspacePaneItems[cached].kind == .tool,
+           workspacePaneItems[cached].toolId == callID {
+            return cached
+        }
+        guard let index = workspacePaneItems.lastIndex(where: {
+            $0.kind == .tool && $0.toolId == callID
+        }) else {
+            workspacePaneToolIndexCache[callID] = nil
+            return nil
+        }
+        workspacePaneToolIndexCache[callID] = index
+        return index
+    }
+
+    private func publishWorkspacePaneChange(_ item: ChatItem, at index: Int) {
+        workspacePaneChangedItems[item.id] = item
+        let delta = WorkspacePaneRevisionDelta(
+            revision: workspacePaneRevision,
+            mutation: .update(itemID: item.id, index: index)
+        )
+        if let historyIndex = workspacePaneMutationLog.lastIndex(where: {
+            $0.revision == workspacePaneRevision
+        }) {
+            workspacePaneMutationLog[historyIndex] = delta
+        } else {
+            // Defensive fallback for a platform/runtime that does not invoke
+            // the array observer for a subscript write.
+            workspacePaneMutationLog.append(delta)
+            if workspacePaneMutationLog.count > Self.workspacePaneMutationHistoryLimit {
+                workspacePaneMutationLog.removeFirst(
+                    workspacePaneMutationLog.count - Self.workspacePaneMutationHistoryLimit
+                )
+            }
+        }
+    }
+
+    /// Returns the bounded mutation suffix needed by a projection consumer.
+    /// A nil result means the consumer fell behind the retained history (or
+    /// has no baseline) and must rebuild from the authoritative pane items.
+    func workspacePaneMutationHistory(
+        after revision: UInt64?
+    ) -> [WorkspacePaneRevisionDelta]? {
+        guard let revision else { return nil }
+        guard revision <= workspacePaneRevision else { return nil }
+        let distance = workspacePaneRevision - revision
+        guard distance > 0 else { return [] }
+        guard distance <= UInt64(workspacePaneMutationLog.count) else { return nil }
+        let suffix = workspacePaneMutationLog.suffix(Int(distance))
+        guard suffix.first?.revision == revision &+ 1,
+              suffix.last?.revision == workspacePaneRevision else {
+            return nil
+        }
+        return Array(suffix)
+    }
+
+    func transcriptItemVersion(_ id: UUID) -> UInt64 {
+        transcriptItemVersions[id, default: 0]
+    }
+
+    func transcriptItemAppend(_ id: UUID) -> String? {
+        transcriptItemAppends[id]
+    }
+
     private static func savedConversationLeaves() -> [String: String] {
         UserDefaults.standard.dictionary(forKey: "bubble.conversation.leaves") as? [String: String] ?? [:]
     }
@@ -3698,13 +4110,20 @@ final class ChatStore {
     }
 
     private func persist(immediate: Bool = false) {
+        guard transcriptMutationBatchDepth == 0 else { return }
         transcriptRevision &+= 1
+        transcriptDelta = pendingTranscriptDelta ?? .rebuild
+        pendingTranscriptDelta = nil
         if !immediate,
            !OverlayRenderPolicy.shouldPersistStreamChunk(isBusy: isBusy, childBusy: childBusy) {
             return
         }
         if items.count > TranscriptVirtualizationLimits.retainedItems {
             items = Array(items.suffix(TranscriptVirtualizationLimits.retainedItems))
+            // Dropping the retained prefix changes row indexes and grouping;
+            // never expose the preceding append/update marker for this
+            // revision. Consumers must cold-rebuild their projection.
+            transcriptDelta = .rebuild
         }
         persistWork?.cancel()
         let write = DispatchWorkItem { [weak self] in
@@ -3784,6 +4203,7 @@ final class ChatStore {
             self.mergeRestoredTranscript(restored, removingSetupCards: true)
             self.writeTranscript()
             self.onTranscriptUpdated?()
+            TranscriptHydrationTiming.completeIfDiagnosing()
         }
         transcriptRestoreTask = task
     }
@@ -3807,17 +4227,34 @@ final class ChatStore {
             !removingSetupCards
                 || !StartupTranscriptPolicy.isSetupCard(item.text, isSystem: item.kind == .system)
         }
-        items = TranscriptRestoreMerge.merge(
+        let mergedItems = TranscriptRestoreMerge.merge(
             restored: restoredItems,
             live: items,
             id: \.id,
             stableKey: Self.richKey
         )
+        if mergedItems != items {
+            items = mergedItems
+            resetTranscriptMutationCaches()
+            // Restore may complete after Overlay has already rendered a live
+            // setup/session state. Publish an explicit structural revision so
+            // the projection cannot remain on the pre-restore rows.
+            transcriptRevision &+= 1
+            transcriptDelta = .rebuild
+            pendingTranscriptDelta = nil
+        }
         richTranscriptRows = [:]
         for item in restored.richItems + restored.items + items {
             if let key = Self.richKey(item) { richTranscriptRows[key] = item }
         }
         Self.prewarmTranscriptChunks(Array(items[transcriptHistoryLowerBound...]))
+    }
+
+    private func resetTranscriptMutationCaches() {
+        transcriptItemVersions.removeAll(keepingCapacity: true)
+        transcriptItemAppends.removeAll(keepingCapacity: true)
+        transcriptItemIndexCache.removeAll(keepingCapacity: true)
+        transcriptToolIndexCache.removeAll(keepingCapacity: true)
     }
 
     private static func loadTranscriptOffMain(sessionID: String) async -> TranscriptLoadResult {
@@ -3837,7 +4274,10 @@ final class ChatStore {
         guard !assistantRows.isEmpty else { return }
         transcriptWarmupQueue.async {
             for (id, text) in assistantRows {
-                _ = WorkspaceTranscriptChunker.chunks(text, identity: id)
+                let chunks = WorkspaceTranscriptChunker.chunks(text, identity: id)
+                for chunk in chunks {
+                    MessagePart.prewarmDisplay(chunk)
+                }
             }
         }
     }
@@ -4048,6 +4488,29 @@ final class ChatStore {
         }
         result = result.replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
         return result.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Normal stream chunks are already plain model text. Append them in
+    /// place so a 100k response does not run four regular expressions over
+    /// its entire prefix every display tick. Rare diagnostic/startup chunks
+    /// retain the authoritative full normalizer.
+    @discardableResult
+    private static func appendCleanStreamChunk(_ raw: String, to text: inout String) -> String? {
+        let lowered = raw.lowercased()
+        let requiresNormalization = lowered.contains("[context]")
+            || lowered.contains("bytes effective=")
+            || lowered.contains("skill_description_bytes")
+            || lowered.contains("skill_catalog_bytes")
+            || lowered.contains("override with --context-limit")
+            || raw.contains("\n\n\n")
+            || (text.hasSuffix("\n\n") && raw.hasPrefix("\n"))
+            || (text.hasSuffix("\n") && raw.hasPrefix("\n\n"))
+        if requiresNormalization {
+            text = stripDiagnostics(text + raw)
+            return nil
+        }
+        text.append(contentsOf: raw)
+        return raw
     }
 
     private static func isPiStartupMetadata(_ text: String) -> Bool {

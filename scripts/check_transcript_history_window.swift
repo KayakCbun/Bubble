@@ -91,6 +91,21 @@ private enum TranscriptHistoryWindowCheck {
             "restore deduplicates source-backed rows by stable identity while preserving local rows"
         )
 
+        setenv("BUBBLE_SCROLL_DIAGNOSTICS", "drive", 1)
+        TranscriptHydrationTiming.startIfDiagnosing()
+        expect(
+            TranscriptHydrationTiming.diagnosticStartedAt != nil
+                && !TranscriptHydrationTiming.diagnosticHydrationCompleted,
+            "diagnostic hydration starts behind an explicit completion gate"
+        )
+        TranscriptHydrationTiming.completeIfDiagnosing()
+        expect(
+            TranscriptHydrationTiming.diagnosticHydrationCompleted,
+            "diagnostic hydration completion releases the benchmark gate"
+        )
+        TranscriptHydrationTiming.clear()
+        unsetenv("BUBBLE_SCROLL_DIAGNOSTICS")
+
         print("PASS: transcript history window")
     }
 }

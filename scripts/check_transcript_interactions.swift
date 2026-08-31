@@ -115,6 +115,14 @@ private enum TranscriptInteractionCheck {
             "a live main turn still follows revision while streaming"
         )
         expect(
+            !FileChangeExpansionPolicy.animatesTranscriptLayout,
+            "changed-file expansion must not animate the entire transcript layout"
+        )
+        expect(
+            !FileChangeExpansionPolicy.requestsTranscriptFollow,
+            "changed-file expansion should preserve its viewport anchor"
+        )
+        expect(
             !TranscriptScrollSequencePolicy.suppressesEventAfterProgrammaticScroll(
                 isScrollWheel: true,
                 beginsNewGesture: false,
@@ -173,8 +181,92 @@ private enum TranscriptInteractionCheck {
                 hasPreciseDeltas: false,
                 minimum: 0,
                 maximum: 200
-            ) == 88,
-            "one discrete mouse-wheel notch remains large enough to feel immediate"
+            ) == 76,
+            "one discrete mouse-wheel notch has enough distance to interpolate visibly"
+        )
+        expect(
+            TranscriptWheelCapturePolicy.shouldCapture(deltaX: 0, deltaY: 1),
+            "a vertical mouse-wheel packet is captured at the transcript boundary"
+        )
+        expect(
+            !TranscriptWheelCapturePolicy.shouldCapture(deltaX: 12, deltaY: 1),
+            "a nested horizontal scroller keeps a horizontal gesture"
+        )
+        expect(
+            !TranscriptWheelCapturePolicy.shouldCapture(deltaX: 8, deltaY: 8),
+            "an equal diagonal gesture stays available to a nested horizontal scroller"
+        )
+        expect(
+            !TranscriptWheelCapturePolicy.shouldCapture(deltaX: 0, deltaY: 0),
+            "a zero-delta wheel packet is not consumed"
+        )
+        expect(
+            !TranscriptCommandCompletionPolicy.shouldApply(
+                isScrollToEnd: true,
+                issuedUserScrollGeneration: 4,
+                currentUserScrollGeneration: 5
+            ),
+            "a physical wheel gesture supersedes a pending scroll-to-end completion"
+        )
+        expect(
+            TranscriptCommandCompletionPolicy.shouldApply(
+                isScrollToEnd: false,
+                issuedUserScrollGeneration: 4,
+                currentUserScrollGeneration: 5
+            ),
+            "ordinary command completion is independent of wheel generations"
+        )
+        expect(
+            TranscriptWheelFramePolicy.queuedDelta(
+                pending: 200,
+                incoming: 400,
+                maximumPendingDelta: TranscriptWheelFramePolicy.maximumPendingDelta(
+                    hasPreciseDeltas: true
+                )
+            ) == 96,
+            "same-direction trackpad packets coalesce without creating a long post-input tail"
+        )
+        expect(
+            TranscriptWheelFramePolicy.queuedDelta(
+                pending: 200,
+                incoming: -40,
+                maximumPendingDelta: 96
+            ) == -40,
+            "a direction reversal discards stale queued motion immediately"
+        )
+        expect(
+            TranscriptWheelFramePolicy.nextFrame(
+                pending: 600,
+                maximumStep: TranscriptWheelFramePolicy.maximumStep(hasPreciseDeltas: true)
+            ) == TranscriptWheelFrameStep(applied: 32, remaining: 568),
+            "one display refresh cannot realize an unbounded LazyVStack jump"
+        )
+        expect(
+            TranscriptWheelFramePolicy.nextFrame(
+                pending: -600,
+                maximumStep: TranscriptWheelFramePolicy.maximumStep(hasPreciseDeltas: true)
+            ) == TranscriptWheelFrameStep(applied: -32, remaining: -568),
+            "the per-frame movement bound is symmetric in both directions"
+        )
+        expect(
+            TranscriptWheelFramePolicy.nextFrame(pending: 40, maximumStep: 96)
+                == TranscriptWheelFrameStep(applied: 40, remaining: 0),
+            "a small direct gesture is fully visible on the first refresh"
+        )
+        expect(
+            TranscriptWheelFramePolicy.nextFrame(
+                pending: 24,
+                maximumStep: TranscriptWheelFramePolicy.maximumStep(hasPreciseDeltas: false)
+            ) == TranscriptWheelFrameStep(applied: 8, remaining: 16),
+            "one mouse-wheel notch is interpolated across more than one display refresh"
+        )
+        expect(
+            TranscriptWheelFramePolicy.maximumPendingDelta(hasPreciseDeltas: false) == 32,
+            "mouse interpolation remains bounded to four display refreshes"
+        )
+        expect(
+            TranscriptViewportReportPolicy.minimumInterval >= 1.0 / 60.0,
+            "viewport bookkeeping cannot run more often than the 60 fps UI contract"
         )
         var follow = TranscriptFollowState()
         expect(follow.followsLatest, "a transcript starts pinned to the live edge")
@@ -272,12 +364,12 @@ private enum TranscriptInteractionCheck {
             "starting a turn does not masquerade as final layout settlement"
         )
         expect(
-            TranscriptFollowTriggerPolicy.shouldRequestLatest(
+            !TranscriptFollowTriggerPolicy.shouldRequestLatest(
                 trigger: .expansionSettled,
                 followsLatest: follow.followsLatest,
                 isBusy: false
             ),
-            "collapsing a thought keeps an end-following transcript pinned to the bottom"
+            "row-local disclosure changes must not request a transcript-wide follow"
         )
         expect(
             !TranscriptFollowTriggerPolicy.shouldRequestLatest(
@@ -308,19 +400,39 @@ private enum TranscriptInteractionCheck {
             ) == 160,
             "non-flipped scroll documents preserve the same anchor offset"
         )
-        let collapsed = TranscriptExpansionPolicy.renderKey(
-            containerExpanded: false,
-            expandedChildIDs: []
-        )
-        let expanded = TranscriptExpansionPolicy.renderKey(
-            containerExpanded: true,
-            expandedChildIDs: []
-        )
-        expect(collapsed != expanded, "expanding a thought or tool must invalidate its equatable row")
         expect(
-            TranscriptExpansionPolicy.renderKey(containerExpanded: true, expandedChildIDs: ["tool-b", "tool-a"])
-                == TranscriptExpansionPolicy.renderKey(containerExpanded: true, expandedChildIDs: ["tool-a", "tool-b"]),
-            "group expansion keys are stable regardless of Set iteration order"
+            TranscriptRowInteractionPolicy.usesRowLocalState,
+            "thought and tool disclosure state is owned by a stable row host"
+        )
+        expect(
+            TranscriptRowInteractionPolicy.isOpen(isLive: true, isExpanded: false),
+            "a live thought remains open while its row streams"
+        )
+        expect(
+            !TranscriptRowInteractionPolicy.canToggle(isLive: true),
+            "a live thought cannot be collapsed mid-stream"
+        )
+        expect(
+            TranscriptRowInteractionPolicy.invalidatedRowIDs(
+                changedRowID: "tool-b",
+                visibleRowIDs: ["thought-a", "tool-b", "group-c"]
+            ) == ["tool-b"],
+            "a disclosure mutation invalidates only its own stable row"
+        )
+        expect(
+            TranscriptRowInteractionPolicy.invalidatedRowIDs(
+                changedRowID: "stale",
+                visibleRowIDs: ["thought-a", "tool-b"]
+            ).isEmpty,
+            "stale disclosure callbacks do not invalidate the transcript"
+        )
+        expect(
+            !TranscriptRowInteractionPolicy.animatesTranscriptLayout,
+            "completed row expansion commits a final height without layout animation"
+        )
+        expect(
+            !TranscriptRowInteractionPolicy.requestsTranscriptFollow,
+            "completed row expansion does not request transcript-wide scrolling"
         )
         if !failures.isEmpty {
             for failure in failures {

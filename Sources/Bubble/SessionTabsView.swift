@@ -16,10 +16,11 @@ struct SessionOverlayView: View {
         .overlay(alignment: .topLeading) {
             if sessions.showsTabs {
                 VStack(alignment: .trailing, spacing: SessionTabLayoutMetrics.bubble.spacing) {
-                    ForEach(sessions.tabs) { tab in
+                    ForEach(Array(sessions.tabs.enumerated()), id: \.element.id) { index, tab in
                         SessionTabButton(
                             tab: tab,
                             selected: tab.id == sessions.presentedSelectedID,
+                            stackIndex: index,
                             preview: sessions.preview(for: tab.id),
                             select: { sessions.select(tab.id) }
                         )
@@ -46,95 +47,76 @@ struct SessionOverlayView: View {
     }
 }
 
+private enum SessionTabChrome {
+    static let joinRadius: CGFloat = 5
+    static let unreadDot: CGFloat = 5
+}
+
 private struct SessionTabButton: View {
     let tab: SessionTabState
     let selected: Bool
+    let stackIndex: Int
     let preview: String
     let select: () -> Void
     @State private var hovering = false
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var metrics: SessionTabLayoutMetrics { .bubble }
+
+    private var fill: Color {
+        if selected {
+            return colorScheme == .dark
+                ? Color(red: 0.16, green: 0.16, blue: 0.17)
+                : .white
+        }
+        if colorScheme == .dark {
+            return Color(white: hovering ? 0.26 : 0.22)
+        }
+        return Color(white: hovering ? 0.90 : 0.86)
+    }
+
+    private var tabShape: UnevenRoundedRectangle {
+        UnevenRoundedRectangle(
+            topLeadingRadius: metrics.cornerRadius,
+            bottomLeadingRadius: metrics.cornerRadius,
+            bottomTrailingRadius: 0,
+            topTrailingRadius: 0,
+            style: .continuous
+        )
+    }
 
     var body: some View {
-        HStack(spacing: 3) {
-            Button(action: select) {
-                Text("\(tab.ordinal)")
-                    .font(.system(size: 11, weight: selected ? .bold : .semibold, design: .rounded))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
+        Button(action: select) {
+            Text("\(tab.ordinal)")
+                .font(.system(size: 11, weight: selected ? .semibold : .medium, design: .rounded))
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .contentShape(Rectangle())
         }
-            .foregroundStyle(selected ? Color.accentColor : Color.secondary)
-            .frame(
-                width: SessionTabLayoutMetrics.bubble.collapsedWidth,
-                height: SessionTabLayoutMetrics.bubble.height
-            )
-            .background {
-                UnevenRoundedRectangle(
-                    topLeadingRadius: SessionTabLayoutMetrics.bubble.cornerRadius,
-                    bottomLeadingRadius: SessionTabLayoutMetrics.bubble.cornerRadius,
-                    bottomTrailingRadius: 3,
-                    topTrailingRadius: 3,
-                    style: .continuous
-                )
-                .fill(
-                    selected
-                        ? Color(nsColor: .controlBackgroundColor)
-                        : Color(nsColor: hovering ? .controlBackgroundColor : .windowBackgroundColor)
-                )
-                .overlay {
-                    UnevenRoundedRectangle(
-                        topLeadingRadius: SessionTabLayoutMetrics.bubble.cornerRadius,
-                        bottomLeadingRadius: SessionTabLayoutMetrics.bubble.cornerRadius,
-                        bottomTrailingRadius: 3,
-                        topTrailingRadius: 3,
-                        style: .continuous
-                    )
-                    .strokeBorder(
-                        selected ? Color.accentColor.opacity(0.58) : Color.primary.opacity(0.09),
-                        lineWidth: selected ? 1.5 : 1
-                    )
-                }
-                .shadow(color: .black.opacity(selected ? 0.13 : 0.08), radius: 4, y: 1)
-            }
-            .overlay(alignment: .trailing) {
-                if selected {
-                    Capsule(style: .continuous)
-                        .fill(Color.accentColor)
-                        .frame(width: 3, height: 16)
-                        .offset(x: 1)
-                }
-            }
-            .overlay(alignment: .topLeading) {
-                if tab.hasUnread {
-                    Circle()
-                        .fill(Color.accentColor)
-                        .frame(width: 6, height: 6)
-                        .offset(x: 3, y: 3)
-                }
-            }
-            .overlay(alignment: .bottomLeading) {
-                if tab.isBusy {
-                    Capsule()
-                        .fill(Color.accentColor.opacity(0.8))
-                        .frame(width: 8, height: 2)
-                        .offset(x: 3, y: -3)
-                }
-            }
-            .contentShape(Rectangle())
-            .onHover { isHovering in
-                hovering = isHovering
-                if isHovering {
-                    NSCursor.pointingHand.set()
-                } else {
-                    NSCursor.arrow.set()
-                }
-            }
-
+        .buttonStyle(.plain)
+        .foregroundStyle(selected ? Color.primary : Color.primary.opacity(0.48))
         .frame(
-            width: SessionTabLayoutMetrics.bubble.expandedWidth,
-            height: SessionTabLayoutMetrics.bubble.height,
+            width: selected ? metrics.expandedWidth : metrics.collapsedWidth,
+            height: metrics.height
+        )
+        .background(alignment: .leading) { folderFace }
+        .overlay(alignment: .topLeading) {
+            SessionTabStatusMarks(hasUnread: tab.hasUnread, isBusy: tab.isBusy)
+        }
+        .contentShape(Rectangle())
+        .onHover { isHovering in
+            hovering = isHovering
+            if isHovering {
+                NSCursor.pointingHand.set()
+            } else {
+                NSCursor.arrow.set()
+            }
+        }
+        .frame(
+            width: metrics.expandedWidth,
+            height: metrics.height,
             alignment: .trailing
         )
+        .contentShape(Rectangle())
         .overlay(alignment: .topLeading) {
             if hovering {
                 SessionTabPreviewCard(
@@ -142,13 +124,14 @@ private struct SessionTabButton: View {
                     preview: preview,
                     selected: selected
                 )
-                .offset(x: SessionTabLayoutMetrics.bubble.expandedWidth + 8, y: -4)
+                .offset(x: metrics.expandedWidth + 8, y: -4)
                 .transition(.opacity.combined(with: .scale(scale: 0.97, anchor: .leading)))
                 .allowsHitTesting(false)
             }
         }
-        .zIndex(hovering ? 20 : (selected ? 2 : 1))
+        .zIndex(hovering ? 40 : (selected ? 20 : Double(stackIndex + 1)))
         .animation(OverlayMotion.quick, value: hovering)
+        .animation(OverlayMotion.quick, value: selected)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Session \(tab.ordinal)\(selected ? ", selected" : "")")
         .accessibilityValue(preview)
@@ -156,6 +139,94 @@ private struct SessionTabButton: View {
         .accessibilityAction(named: "Select Session \(tab.ordinal)", select)
     }
 
+    private var folderFace: some View {
+        let join = selected ? SessionTabChrome.joinRadius : 0
+        let tabWidth = selected ? metrics.expandedWidth : metrics.collapsedWidth
+        return ZStack(alignment: .topLeading) {
+            tabShape
+                .fill(fill)
+                .frame(width: tabWidth, height: metrics.height)
+
+            if selected {
+                Rectangle()
+                    .fill(fill)
+                    .frame(width: 4, height: metrics.height)
+                    .offset(x: tabWidth - 1)
+
+                InverseFolderCorner(corner: .topTrailing)
+                    .fill(fill, style: FillStyle(eoFill: true))
+                    .frame(width: join, height: join)
+                    .clipped()
+                    .offset(x: tabWidth)
+
+                InverseFolderCorner(corner: .bottomTrailing)
+                    .fill(fill, style: FillStyle(eoFill: true))
+                    .frame(width: join, height: join)
+                    .clipped()
+                    .offset(x: tabWidth, y: metrics.height - join)
+            }
+        }
+        .frame(width: tabWidth + join, height: metrics.height, alignment: .topLeading)
+        .compositingGroup()
+        .shadow(
+            color: .black.opacity(colorScheme == .dark ? (selected ? 0.28 : 0.18) : (selected ? 0.08 : 0.06)),
+            radius: selected ? 3 : 2,
+            x: -1.5,
+            y: 1
+        )
+    }
+}
+
+private struct SessionTabStatusMarks: View {
+    let hasUnread: Bool
+    let isBusy: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            if hasUnread {
+                Circle()
+                    .fill(Color.accentColor)
+                    .frame(width: SessionTabChrome.unreadDot, height: SessionTabChrome.unreadDot)
+            }
+            if isBusy {
+                Capsule()
+                    .fill(Color.accentColor.opacity(0.85))
+                    .frame(width: 8, height: 2)
+            }
+        }
+        .padding(.leading, 4)
+        .padding(.top, 4)
+        .allowsHitTesting(false)
+    }
+}
+
+private struct InverseFolderCorner: Shape {
+    enum Corner {
+        case topTrailing
+        case bottomTrailing
+    }
+
+    var corner: Corner
+
+    func path(in rect: CGRect) -> Path {
+        let radius = min(rect.width, rect.height)
+        let center: CGPoint
+        switch corner {
+        case .topTrailing:
+            center = CGPoint(x: rect.minX, y: rect.maxY)
+        case .bottomTrailing:
+            center = CGPoint(x: rect.minX, y: rect.minY)
+        }
+        var path = Path()
+        path.addRect(rect)
+        path.addEllipse(in: CGRect(
+            x: center.x - radius,
+            y: center.y - radius,
+            width: radius * 2,
+            height: radius * 2
+        ))
+        return path
+    }
 }
 
 private struct SessionTabPreviewCard: View {

@@ -40,13 +40,21 @@ enum TranscriptHistoryWindow {
 
 enum TranscriptHydrationTiming {
     nonisolated(unsafe) private(set) static var diagnosticStartedAt: TimeInterval?
+    nonisolated(unsafe) private(set) static var diagnosticHydrationCompleted = false
 
     static func startIfDiagnosing() {
         guard ProcessInfo.processInfo.environment["BUBBLE_SCROLL_DIAGNOSTICS"] != nil else { return }
         diagnosticStartedAt = ProcessInfo.processInfo.systemUptime
+        diagnosticHydrationCompleted = false
+    }
+
+    static func completeIfDiagnosing() {
+        guard diagnosticStartedAt != nil else { return }
+        diagnosticHydrationCompleted = true
     }
 
     static func clear() {
         diagnosticStartedAt = nil
+        diagnosticHydrationCompleted = false
     }
 }

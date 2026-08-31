@@ -35,22 +35,31 @@ final class OverlayController: NSObject, NSWindowDelegate {
     private var chromeHideGeneration = 0
     private let presentationAnimator = OverlayPresentationAnimator()
     private var presentationDiagnostics: WindowPresentationDiagnostics?
+    private var paletteDiagnostics: PalettePresentationDiagnostics?
+    private var fileChangeDiagnostics: FileChangePresentationDiagnostics?
     private var isPreparingShow = false
     private var presentationPreflightScheduled = false
     private var showGeneration = 0
     private var pendingShowCompletion: (() -> Void)?
     private var deferredPresentationWorkGeneration = 0
+    private var foregroundPerformanceActivity: NSObjectProtocol?
 
     private let positionCenterXKey = "bubble.position.centerX"
     private let positionBottomYKey = "bubble.position.bottomY"
     private var runsPresentationDiagnostics: Bool {
         ProcessInfo.processInfo.environment["BUBBLE_PRESENTATION_DIAGNOSTICS"] == "1"
     }
+    private var runsPaletteDiagnostics: Bool {
+        ProcessInfo.processInfo.environment["BUBBLE_PALETTE_DIAGNOSTICS"] == "1"
+    }
+    private var runsFileChangeDiagnostics: Bool {
+        ProcessInfo.processInfo.environment["BUBBLE_FILE_CHANGE_DIAGNOSTICS"] == "1"
+    }
 
     func start() {
         OverlayPaths.bootstrap()
         installView()
-        if runsPresentationDiagnostics { return }
+        if runsPresentationDiagnostics || runsPaletteDiagnostics || runsFileChangeDiagnostics { return }
         tapMonitor.onDoubleTap = { [weak self] in
             self?.toggleFromCommandTap()
         }
@@ -212,6 +221,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         store.composerFocusSuspended = true
         store.setStreamUISuspended(true)
         pendingShowCompletion = completion
+        beginForegroundPerformanceActivity()
 
         if panel.isVisible, presentationAnimator.isAnimating {
             isPreparingShow = false
@@ -261,6 +271,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         guard panel.isVisible else {
             panel.orderOut(nil)
             presentationAnimator.resetVisible()
+            endForegroundPerformanceActivity()
             application?.activate(options: [])
             completion?()
             return
@@ -273,6 +284,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
             targetPanelFrame = nil
             isUpdatingFrame = false
             panel.orderOut(nil)
+            endForegroundPerformanceActivity()
             application?.activate(options: [])
             completion?()
             return
@@ -300,9 +312,24 @@ final class OverlayController: NSObject, NSWindowDelegate {
             self.presentationAnimator.resetVisible()
             self.panel.ignoresMouseEvents = false
             self.isHiding = false
+            self.endForegroundPerformanceActivity()
             application?.activate(options: [])
             completion?()
         }
+    }
+
+    private func beginForegroundPerformanceActivity() {
+        guard foregroundPerformanceActivity == nil else { return }
+        foregroundPerformanceActivity = ProcessInfo.processInfo.beginActivity(
+            options: [.userInitiated, .latencyCritical],
+            reason: "Bubble overlay is visible and handling interactive input"
+        )
+    }
+
+    private func endForegroundPerformanceActivity() {
+        guard let activity = foregroundPerformanceActivity else { return }
+        foregroundPerformanceActivity = nil
+        ProcessInfo.processInfo.endActivity(activity)
     }
 
     func runPresentationBenchmark(cycles: Int = 6) {
@@ -334,6 +361,78 @@ final class OverlayController: NSObject, NSWindowDelegate {
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
             runCycle(max(cycles, 1))
+        }
+    }
+
+    func runPaletteBenchmark(cycles: Int = 20) {
+        guard runsPaletteDiagnostics else { return }
+        let diagnostics = PalettePresentationDiagnostics()
+        diagnostics.attach(panel: panel)
+        paletteDiagnostics = diagnostics
+
+        func runCycle(_ remaining: Int) {
+            diagnostics.beginCycle()
+            let mutationStartedAt = CACurrentMediaTime()
+            store.draft = "/"
+            diagnostics.recordMutationDuration(CACurrentMediaTime() - mutationStartedAt)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) { [weak self] in
+                guard let self else { return }
+                diagnostics.beginHide()
+                self.store.draft = ""
+                if remaining > 1 {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+                        runCycle(remaining - 1)
+                    }
+                } else {
+                    let summary = diagnostics.summary(cycles: cycles)
+                    OverlayLog.write(summary)
+                    self.paletteDiagnostics = nil
+                }
+            }
+        }
+
+        show(returningFocusTo: nil) {
+            diagnostics.start()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) {
+                runCycle(max(cycles, 1))
+            }
+        }
+    }
+
+    func runFileChangeBenchmark(cycles: Int = 12) {
+        guard runsFileChangeDiagnostics else { return }
+        let diagnostics = FileChangePresentationDiagnostics()
+        diagnostics.attach(panel: panel)
+        fileChangeDiagnostics = diagnostics
+
+        show(returningFocusTo: nil) { [weak self] in
+            guard let self else { return }
+            diagnostics.start()
+            let cycleCount = max(cycles, 1)
+            let observationInterval = 0.30
+            let restInterval = 0.10
+
+            func runCycle(_ remaining: Int) {
+                diagnostics.beginCycle()
+                NotificationCenter.default.post(
+                    name: .fileChangeDiagnosticToggleRequested,
+                    object: nil
+                )
+                DispatchQueue.main.asyncAfter(deadline: .now() + observationInterval) {
+                    if remaining > 1 {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + restInterval) {
+                            runCycle(remaining - 1)
+                        }
+                    } else {
+                        OverlayLog.write(diagnostics.summary(cycles: cycleCount))
+                        self.fileChangeDiagnostics = nil
+                    }
+                }
+            }
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                runCycle(cycleCount)
+            }
         }
     }
 
@@ -603,7 +702,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
               ) else { return }
         let height = max(OverlayMetrics.minHeight, min(layout.totalHeight.rounded(), OverlayMetrics.maxHeight))
         let hasTranscript = layout.transcriptHeight > 1
-            || !store.visibleItems.isEmpty
+            || store.hasTranscriptItems
             || store.isStartingSession
             || store.sideStagePresented
         let chatWidth = hasTranscript
@@ -652,6 +751,9 @@ final class OverlayController: NSObject, NSWindowDelegate {
             chromeVisible: layout.chromeVisible,
             sessionTabCount: layout.sessionTabCount
         )
+        if applied.commandPaletteHeight > 1 {
+            paletteDiagnostics?.markPresented()
+        }
         let animateFrame = panel.isVisible
             && !isPreparingShow
             && !isHiding
@@ -699,7 +801,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         apply(OverlayLayout(
             sessionID: store.runtimeID,
             totalHeight: contentHeight,
-            transcriptHeight: (store.visibleItems.isEmpty && !store.isStartingSession && !store.sideStagePresented && !sessions.showsTabs)
+            transcriptHeight: (!store.hasTranscriptItems && !store.isStartingSession && !store.sideStagePresented && !sessions.showsTabs)
                 ? 0
                 : max(0, contentHeight - OverlayMetrics.minHeight - OverlayMetrics.stackSpacing),
             pickerHeight: store.showAvatarPicker ? OverlayMetrics.pickerHeight : 0,

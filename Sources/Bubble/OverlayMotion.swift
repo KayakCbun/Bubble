@@ -2,6 +2,24 @@ import AppKit
 import QuartzCore
 import SwiftUI
 
+extension Notification.Name {
+    static let fileChangeDiagnosticToggleRequested = Notification.Name(
+        "BubbleFileChangeDiagnosticToggleRequested"
+    )
+    static let fileChangeDiagnosticPresented = Notification.Name(
+        "BubbleFileChangeDiagnosticPresented"
+    )
+    static let fileChangeDiagnosticContentMeasured = Notification.Name(
+        "BubbleFileChangeDiagnosticContentMeasured"
+    )
+    static let fileChangeExpansionChanged = Notification.Name(
+        "BubbleFileChangeExpansionChanged"
+    )
+    static let transcriptRowIntrinsicSizeChanged = Notification.Name(
+        "BubbleTranscriptRowIntrinsicSizeChanged"
+    )
+}
+
 enum OverlayMotion {
     static let snappy = Animation.spring(
         response: OverlaySpring.snappyResponse,
@@ -485,4 +503,198 @@ final class WindowPresentationDiagnostics: NSObject {
         )
         return values[index]
     }
+}
+
+final class PalettePresentationDiagnostics: NSObject {
+    private weak var panel: NSPanel?
+    private var link: CADisplayLink?
+    private var lastTimestamp: CFTimeInterval = 0
+    private var intervals: [TimeInterval] = []
+    private var showIntervals: [TimeInterval] = []
+    private var hideIntervals: [TimeInterval] = []
+    private var latencies: [TimeInterval] = []
+    private var mutationDurations: [TimeInterval] = []
+    private var cycleStartedAt: TimeInterval?
+    private var phase = "idle"
+
+    func attach(panel: NSPanel) {
+        self.panel = panel
+    }
+
+    func start() {
+        guard link == nil, let panel else { return }
+        let link = panel.displayLink(target: self, selector: #selector(tick(_:)))
+        link.preferredFrameRateRange = OverlayMotion.frameRate
+        link.add(to: .main, forMode: .common)
+        self.link = link
+    }
+
+    func beginCycle() {
+        phase = "show"
+        cycleStartedAt = CACurrentMediaTime()
+    }
+
+    func beginHide() {
+        phase = "hide"
+    }
+
+    func markPresented() {
+        guard let cycleStartedAt else { return }
+        latencies.append(CACurrentMediaTime() - cycleStartedAt)
+        self.cycleStartedAt = nil
+    }
+
+    func recordMutationDuration(_ duration: TimeInterval) {
+        mutationDurations.append(duration)
+    }
+
+    func summary(cycles: Int) -> String {
+        link?.invalidate()
+        link = nil
+        let frameMilliseconds = intervals.sorted().map { $0 * 1_000 }
+        let showMilliseconds = showIntervals.sorted().map { $0 * 1_000 }
+        let hideMilliseconds = hideIntervals.sorted().map { $0 * 1_000 }
+        let latencyMilliseconds = latencies.sorted().map { $0 * 1_000 }
+        let mutationMilliseconds = mutationDurations.sorted().map { $0 * 1_000 }
+        return String(
+            format: "palette presentation benchmark cycles=%d presented=%d p95=%.2fms p99=%.2fms max=%.2fms showP99=%.2fms hideP99=%.2fms latencyP95=%.2fms latencyMax=%.2fms mutationP95=%.2fms mutationMax=%.2fms",
+            cycles,
+            latencies.count,
+            percentile(frameMilliseconds, 0.95),
+            percentile(frameMilliseconds, 0.99),
+            frameMilliseconds.last ?? 0,
+            percentile(showMilliseconds, 0.99),
+            percentile(hideMilliseconds, 0.99),
+            percentile(latencyMilliseconds, 0.95),
+            latencyMilliseconds.last ?? 0,
+            percentile(mutationMilliseconds, 0.95),
+            mutationMilliseconds.last ?? 0
+        )
+    }
+
+    @objc private func tick(_ link: CADisplayLink) {
+        if lastTimestamp > 0 {
+            let interval = max(0, link.timestamp - lastTimestamp)
+            intervals.append(interval)
+            if phase == "show" {
+                showIntervals.append(interval)
+            } else if phase == "hide" {
+                hideIntervals.append(interval)
+            }
+        }
+        lastTimestamp = link.timestamp
+    }
+
+    private func percentile(_ values: [Double], _ percentile: Double) -> Double {
+        guard !values.isEmpty else { return .infinity }
+        let index = min(
+            values.count - 1,
+            max(0, Int((Double(values.count - 1) * percentile).rounded(.up)))
+        )
+        return values[index]
+    }
+}
+
+final class FileChangePresentationDiagnostics: NSObject {
+    private weak var panel: NSPanel?
+    private var link: CADisplayLink?
+    private var presentationObserver: NSObjectProtocol?
+    private var contentObserver: NSObjectProtocol?
+    private var lastTimestamp: CFTimeInterval = 0
+    private var cycleStartedAt: CFTimeInterval?
+    private var cyclePresented = false
+    private var frameIntervals: [TimeInterval] = []
+    private var firstFrameLatencies: [TimeInterval] = []
+    private var expandedContentHeights: [CGFloat] = []
+
+    func attach(panel: NSPanel) {
+        self.panel = panel
+    }
+
+    func start() {
+        guard link == nil, let panel else { return }
+        presentationObserver = NotificationCenter.default.addObserver(
+            forName: .fileChangeDiagnosticPresented,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            self?.recordPresentation()
+        }
+        contentObserver = NotificationCenter.default.addObserver(
+            forName: .fileChangeDiagnosticContentMeasured,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            guard let height = note.userInfo?["height"] as? CGFloat else { return }
+            self?.expandedContentHeights.append(height)
+        }
+        let link = panel.displayLink(target: self, selector: #selector(tick(_:)))
+        link.preferredFrameRateRange = OverlayMotion.frameRate
+        link.add(to: .main, forMode: .common)
+        self.link = link
+    }
+
+    func beginCycle() {
+        if cycleStartedAt != nil {
+            finishCycle()
+        }
+        cycleStartedAt = CACurrentMediaTime()
+        cyclePresented = false
+    }
+
+    func summary(cycles: Int) -> String {
+        finishCycle()
+        link?.invalidate()
+        link = nil
+        if let presentationObserver {
+            NotificationCenter.default.removeObserver(presentationObserver)
+            self.presentationObserver = nil
+        }
+        if let contentObserver {
+            NotificationCenter.default.removeObserver(contentObserver)
+            self.contentObserver = nil
+        }
+        let frameMilliseconds = frameIntervals.sorted().map { $0 * 1_000 }
+        let latencyMilliseconds = firstFrameLatencies.sorted().map { $0 * 1_000 }
+        return String(
+            format: "file change presentation benchmark cycles=%d presented=%d expanded=%d expandedMinHeight=%.2f frameP95=%.2fms frameP99=%.2fms frameMax=%.2fms latencyP95=%.2fms latencyMax=%.2fms",
+            cycles,
+            firstFrameLatencies.count,
+            expandedContentHeights.count,
+            expandedContentHeights.min() ?? 0,
+            percentile(frameMilliseconds, 0.95),
+            percentile(frameMilliseconds, 0.99),
+            frameMilliseconds.last ?? 0,
+            percentile(latencyMilliseconds, 0.95),
+            latencyMilliseconds.last ?? 0
+        )
+    }
+
+    private func recordPresentation() {
+        guard !cyclePresented, let cycleStartedAt else { return }
+        cyclePresented = true
+        firstFrameLatencies.append(CACurrentMediaTime() - cycleStartedAt)
+    }
+
+    private func finishCycle() {
+        guard cycleStartedAt != nil else { return }
+        cycleStartedAt = nil
+    }
+
+    @objc private func tick(_ link: CADisplayLink) {
+        if lastTimestamp > 0, cycleStartedAt != nil {
+            frameIntervals.append(max(0, link.timestamp - lastTimestamp))
+        }
+        lastTimestamp = link.timestamp
+    }
+
+    private func percentile(_ values: [Double], _ percentile: Double) -> Double {
+        guard !values.isEmpty else { return .infinity }
+        let index = min(
+            values.count - 1,
+            max(0, Int((Double(values.count - 1) * percentile).rounded(.up)))
+        )
+        return values[index]
+    }
+
 }

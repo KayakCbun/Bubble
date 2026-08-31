@@ -279,24 +279,80 @@ private struct HistoryRailMarks: View, Animatable {
     }
 
     var body: some View {
-        Canvas { context, _ in
-            for (index, tick) in ticks.enumerated() {
-                let hoveredDistance = isHovering ? abs(CGFloat(index) - hoverPosition) : .infinity
-                let inViewport = visibleRowIDs.contains(tick.id.uuidString)
-                let isLatest = index == ticks.count - 1
-                let width = hoveredDistance < 3
-                    ? HistoryRailPolicy.width(distance: hoveredDistance)
-                    : (inViewport ? 11 : (isLatest ? 9 : 7))
-                let height: CGFloat = hoveredDistance < 0.55 ? 3 : (inViewport ? 2.5 : 2)
-                let opacity = hoveredDistance < 3
-                    ? 0.88
-                    : (inViewport ? 0.72 : (isLatest ? 0.46 : 0.20))
+        ZStack {
+            // The 600-turn baseline is immutable while the viewport moves.
+            // Rasterize it independently so a visible-row notification does
+            // not rebuild hundreds of paths on every scroll frame.
+            HistoryRailStaticMarks(ticks: ticks, layout: layout)
+                .equatable()
+
+            Canvas(rendersAsynchronously: true) { context, _ in
+                for (index, tick) in ticks.enumerated()
+                    where visibleRowIDs.contains(tick.id.uuidString) {
+                    drawMark(
+                        context: &context,
+                        index: index,
+                        width: 11,
+                        height: 2.5,
+                        opacity: 0.72
+                    )
+                }
+
+                guard isHovering else { return }
+                let center = min(max(Int(hoverPosition.rounded()), 0), max(0, ticks.count - 1))
+                let lower = max(0, center - 3)
+                let upper = min(ticks.count, center + 4)
+                for index in lower..<upper {
+                    let distance = abs(CGFloat(index) - hoverPosition)
+                    guard distance < 3 else { continue }
+                    drawMark(
+                        context: &context,
+                        index: index,
+                        width: HistoryRailPolicy.width(distance: distance),
+                        height: distance < 0.55 ? 3 : 2,
+                        opacity: 0.88
+                    )
+                }
+            }
+        }
+    }
+
+    private func drawMark(
+        context: inout GraphicsContext,
+        index: Int,
+        width: CGFloat,
+        height: CGFloat,
+        opacity: Double
+    ) {
                 let rect = CGRect(x: 6, y: layout.y(for: index) - height / 2, width: width, height: height)
                 context.fill(
                     Path(roundedRect: rect, cornerRadius: height / 2),
                     with: .color(Color.primary.opacity(opacity))
                 )
+    }
+}
 
+private struct HistoryRailStaticMarks: View, Equatable {
+    let ticks: [HistoryTick]
+    let layout: HistoryRailLayout
+
+    var body: some View {
+        Canvas(rendersAsynchronously: true) { context, _ in
+            for (index, tick) in ticks.enumerated() {
+                let isLatest = index == ticks.count - 1
+                let width: CGFloat = isLatest ? 9 : 7
+                let height: CGFloat = 2
+                let opacity = isLatest ? 0.46 : 0.20
+                let rect = CGRect(
+                    x: 6,
+                    y: layout.y(for: index) - height / 2,
+                    width: width,
+                    height: height
+                )
+                context.fill(
+                    Path(roundedRect: rect, cornerRadius: height / 2),
+                    with: .color(Color.primary.opacity(opacity))
+                )
                 if tick.branchCount > 1 {
                     var branch = Path()
                     branch.move(to: CGPoint(x: rect.maxX - 1, y: rect.midY))

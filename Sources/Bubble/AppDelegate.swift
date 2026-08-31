@@ -18,6 +18,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let cycles = ProcessInfo.processInfo.environment["BUBBLE_PRESENTATION_CYCLES"]
                 .flatMap(Int.init) ?? 30
             overlay.runPresentationBenchmark(cycles: cycles)
+        } else if ProcessInfo.processInfo.environment["BUBBLE_PALETTE_DIAGNOSTICS"] == "1" {
+            let cycles = ProcessInfo.processInfo.environment["BUBBLE_PALETTE_CYCLES"]
+                .flatMap(Int.init) ?? 20
+            overlay.runPaletteBenchmark(cycles: cycles)
+        } else if ProcessInfo.processInfo.environment["BUBBLE_FILE_CHANGE_DIAGNOSTICS"] == "1" {
+            let cycles = ProcessInfo.processInfo.environment["BUBBLE_FILE_CHANGE_CYCLES"]
+                .flatMap(Int.init) ?? 12
+            overlay.runFileChangeBenchmark(cycles: cycles)
         } else if ProcessInfo.processInfo.arguments.contains("--show") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                 self.overlay.show()

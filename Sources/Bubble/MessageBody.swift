@@ -5,6 +5,26 @@ import BeautifulMermaid
 import BubbleDiagramSupport
 import WebKit
 
+private enum MarkdownContentPreparation {
+    static let layoutVersion = 2
+
+    static func content(_ markdown: String, completed: Bool) -> MarkdownContent {
+        guard completed else { return MarkdownContent(markdown) }
+        // MarkdownContent only stores MarkdownUI's parsed block tree. Theme,
+        // colors, fonts, and width are applied later by the Markdown view.
+        let fingerprint = ProseTypographyFingerprint.contentOnly(layoutVersion: layoutVersion)
+        let key = ProseRenderKey(text: markdown, width: 0, typography: fingerprint, variant: 10)
+        return ProseRenderCache.shared.cachedObject(
+            for: key,
+            variant: "markdown-content",
+            completed: completed,
+            estimatedBytes: max(512, markdown.utf8.count * 4)
+        ) {
+            MarkdownContent(markdown)
+        }
+    }
+}
+
 struct MessageBody: View {
     var text: String
     var streaming: Bool = false
@@ -30,11 +50,11 @@ struct MessageBody: View {
 
     @ViewBuilder
     private var messageParts: some View {
-        ForEach(Array(MessagePart.displayParts(text).enumerated()), id: \.offset) { _, part in
+        ForEach(Array(MessagePart.displayParts(text, completed: !streaming).enumerated()), id: \.offset) { _, part in
             switch part {
             case .markdown(let markdown):
                 if preferClassicMarkdown || PathChipStyle.needsClassicMarkdown(markdown) {
-                    Markdown(markdown)
+                    Markdown(MarkdownContentPreparation.content(markdown, completed: !streaming))
                         .markdownTheme(.overlay)
                         .markdownTextStyle(\.text) {
                             FontSize(OverlayMetrics.fontSize)
@@ -44,7 +64,7 @@ struct MessageBody: View {
                         .bubbleTextSelection()
                         .frame(maxWidth: .infinity, alignment: .leading)
                 } else {
-                    ProseDocument(text: markdown)
+                    ProseDocument(text: markdown, streaming: streaming)
                 }
             case .code(let language, let body):
                 CodeBlockView(
@@ -74,8 +94,9 @@ enum MessagePart {
     case mermaid(String)
     case math(String)
 
-    static func displayParts(_ text: String) -> [MessagePart] {
-        MessagePartCache.shared.parts(for: text) {
+    static func displayParts(_ text: String, completed: Bool = true) -> [MessagePart] {
+        guard completed else { return parseDisplayParts(text) }
+        return MessagePartCache.shared.parts(for: text) {
             parseDisplayParts(text)
         }
     }

@@ -38,6 +38,48 @@ enum TranscriptFollowPolicy {
     }
 }
 
+enum FileChangeExpansionPolicy {
+    /// Height animation invalidates the containing transcript layout on every
+    /// animation frame, so file-tree expansion must be committed atomically.
+    static let animatesTranscriptLayout = false
+    /// A transcript-wide scroll correction creates a second visible hitch.
+    /// Keep the card header anchored and reveal its files beneath it instead.
+    static let requestsTranscriptFollow = false
+}
+
+/// Interaction state for disclosure rows belongs to the row that owns the
+/// disclosure, not to the transcript container.  Keeping this contract in a
+/// small policy makes the SwiftUI implementation easy to audit and gives the
+/// interaction check a seam that does not depend on view internals.
+enum TranscriptRowInteractionPolicy {
+    /// A local @State host keyed by the row's stable ID owns disclosure state.
+    static let usesRowLocalState = true
+    /// Disclosure changes commit one final row height.  Animating the height
+    /// would invalidate every row below it on every animation frame.
+    static let animatesTranscriptLayout = false
+    /// A row disclosure must not move the transcript viewport behind the
+    /// user's pointer or trigger a second scroll pass.
+    static let requestsTranscriptFollow = false
+
+    static func isOpen(isLive: Bool, isExpanded: Bool) -> Bool {
+        isLive || isExpanded
+    }
+
+    static func canToggle(isLive: Bool) -> Bool {
+        !isLive
+    }
+
+    /// Return the only row that needs invalidation after a local disclosure
+    /// mutation.  Unknown IDs are ignored so stale callbacks cannot rebuild
+    /// the whole transcript.
+    static func invalidatedRowIDs(
+        changedRowID: String,
+        visibleRowIDs: [String]
+    ) -> Set<String> {
+        visibleRowIDs.contains(changedRowID) ? [changedRowID] : []
+    }
+}
+
 enum TranscriptFollowTrigger {
     case contentHeightChanged
     case turnSettled
@@ -57,7 +99,10 @@ enum TranscriptFollowTriggerPolicy {
         case .turnSettled:
             return !isBusy
         case .expansionSettled:
-            return true
+            // Row-local disclosure updates already commit their final height;
+            // a second transcript-wide scroll pass would re-layout the whole
+            // document and can steal the user's viewport.
+            return false
         }
     }
 }
@@ -120,7 +165,14 @@ enum TranscriptScrollAnimationPolicy {
 }
 
 enum TranscriptWheelScrollPolicy {
-    private static let discreteStep: CGFloat = 12
+    private static let discreteStep: CGFloat = 24
+
+    static func resolvedDelta(
+        scrollingDeltaY: CGFloat,
+        hasPreciseDeltas: Bool
+    ) -> CGFloat {
+        hasPreciseDeltas ? scrollingDeltaY : scrollingDeltaY * discreteStep
+    }
 
     static func nextOrigin(
         current: CGFloat,
@@ -129,9 +181,78 @@ enum TranscriptWheelScrollPolicy {
         minimum: CGFloat,
         maximum: CGFloat
     ) -> CGFloat {
-        let delta = hasPreciseDeltas ? scrollingDeltaY : scrollingDeltaY * discreteStep
+        let delta = resolvedDelta(
+            scrollingDeltaY: scrollingDeltaY,
+            hasPreciseDeltas: hasPreciseDeltas
+        )
         return min(maximum, max(minimum, current - delta))
     }
+}
+
+enum TranscriptWheelCapturePolicy {
+    /// SwiftUI rich rows can contain their own horizontal scroll views. Those
+    /// views are allowed to own horizontal gestures, but a vertical wheel
+    /// gesture anywhere inside the transcript must reach the transcript's
+    /// AppKit scroll view instead of dying at a nested scroll boundary.
+    static func shouldCapture(deltaX: CGFloat, deltaY: CGFloat) -> Bool {
+        abs(deltaY) > 0.01 && abs(deltaY) > abs(deltaX)
+    }
+}
+
+enum TranscriptCommandCompletionPolicy {
+    /// A scroll-to-end command completes asynchronously after AppKit applies
+    /// it. A newer physical wheel gesture owns the viewport and must not be
+    /// overwritten by that stale completion.
+    static func shouldApply(
+        isScrollToEnd: Bool,
+        issuedUserScrollGeneration: UInt64,
+        currentUserScrollGeneration: UInt64
+    ) -> Bool {
+        !isScrollToEnd || issuedUserScrollGeneration == currentUserScrollGeneration
+    }
+}
+
+struct TranscriptWheelFrameStep: Equatable {
+    let applied: CGFloat
+    let remaining: CGFloat
+}
+
+enum TranscriptWheelFramePolicy {
+    /// Keep one LazyVStack realization slice below a 60 fps frame budget on
+    /// ProMotion displays while still allowing several thousand points/second.
+    static func maximumStep(hasPreciseDeltas: Bool) -> CGFloat {
+        hasPreciseDeltas ? 32 : 8
+    }
+
+    static func maximumPendingDelta(hasPreciseDeltas: Bool) -> CGFloat {
+        maximumStep(hasPreciseDeltas: hasPreciseDeltas) * (hasPreciseDeltas ? 3 : 4)
+    }
+
+    static func queuedDelta(
+        pending: CGFloat,
+        incoming: CGFloat,
+        maximumPendingDelta: CGFloat
+    ) -> CGFloat {
+        let combined: CGFloat
+        if pending == 0 || incoming == 0 || (pending > 0) == (incoming > 0) {
+            combined = pending + incoming
+        } else {
+            combined = incoming
+        }
+        return min(maximumPendingDelta, max(-maximumPendingDelta, combined))
+    }
+
+    static func nextFrame(pending: CGFloat, maximumStep: CGFloat) -> TranscriptWheelFrameStep {
+        let applied = min(maximumStep, max(-maximumStep, pending))
+        return TranscriptWheelFrameStep(applied: applied, remaining: pending - applied)
+    }
+}
+
+enum TranscriptViewportReportPolicy {
+    /// End-state and visible-row bookkeeping does not need ProMotion cadence.
+    /// Keeping it to the product's 60 fps contract leaves the intervening
+    /// refreshes available for AppKit and SwiftUI layout.
+    static let minimumInterval: TimeInterval = 1.0 / 60.0
 }
 
 struct TranscriptFollowState: Equatable {
@@ -249,12 +370,5 @@ enum TranscriptViewportAnchorPolicy {
     ) -> CGFloat {
         let desiredEdge = anchorPosition - anchorOffset
         return documentIsFlipped ? desiredEdge : desiredEdge - visibleHeight
-    }
-}
-
-enum TranscriptExpansionPolicy {
-    static func renderKey(containerExpanded: Bool, expandedChildIDs: [String]) -> String {
-        let children = expandedChildIDs.sorted().joined(separator: ",")
-        return "\(containerExpanded ? 1 : 0):\(children)"
     }
 }
