@@ -652,24 +652,53 @@ private enum AppKitTranscriptSurfaceCheck {
             defer: false
         )
         window.contentView = adapter.scrollView
-        adapter.setContentOffset(y: max(
-            0,
-            adapter.currentHeightIndex.totalHeight - adapter.scrollView.contentView.bounds.height
-        ))
-        let endBeforeRoutedWheel = adapter.contentOffsetY
+        window.makeKeyAndOrderFront(nil)
+
+        // A nonactivating panel can receive a windowless wheel packet at the
+        // focus boundary. Its location is in screen coordinates and must be
+        // routed to the visible transcript instead of discarded.
+        let otherWindow = NSWindow(
+            contentRect: NSRect(x: 500, y: 0, width: 100, height: 100),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
         let handlerGeneration = adapter.scrollView.localWheelHandlerGeneration
+        var focusCyclesMoved = 0
+        for _ in 0..<20 {
+            otherWindow.makeKeyAndOrderFront(nil)
+            window.makeKeyAndOrderFront(nil)
+            adapter.setContentOffset(y: max(
+                0,
+                adapter.currentHeightIndex.totalHeight - adapter.scrollView.contentView.bounds.height
+            ))
+            let endBeforeRoutedWheel = adapter.contentOffsetY
+            NSApp.sendEvent(WindowRoutedWheelEvent(
+                windowNumber: 0,
+                location: window.convertPoint(toScreen: NSPoint(x: 240, y: 60)),
+                deltaY: 1
+            ))
+            if adapter.contentOffsetY < endBeforeRoutedWheel - 0.5 {
+                focusCyclesMoved += 1
+            }
+        }
+        expect(
+            focusCyclesMoved == 20,
+            "every refocused windowless wheel immediately leaves the transcript end"
+        )
+        expect(
+            adapter.scrollView.localWheelHandlerGeneration == handlerGeneration + 20,
+            "each refocused wheel receives exactly one local-monitor pass"
+        )
+        let generationBeforeOutsideWheel = adapter.scrollView.localWheelHandlerGeneration
         NSApp.sendEvent(WindowRoutedWheelEvent(
-            windowNumber: window.windowNumber,
-            location: NSPoint(x: 240, y: 60),
+            windowNumber: 0,
+            location: NSPoint(x: -10_000, y: -10_000),
             deltaY: 1
         ))
         expect(
-            adapter.contentOffsetY < endBeforeRoutedWheel - 0.5,
-            "the local monitor routes a window mouse wheel and immediately leaves the transcript end"
-        )
-        expect(
-            adapter.scrollView.localWheelHandlerGeneration == handlerGeneration + 1,
-            "the production local monitor records exactly one handler pass"
+            adapter.scrollView.localWheelHandlerGeneration == generationBeforeOutsideWheel,
+            "a windowless wheel outside Bubble is not captured"
         )
         expect(
             adapter.scrollView.lastLocalWheelHandlerDuration >= 0,

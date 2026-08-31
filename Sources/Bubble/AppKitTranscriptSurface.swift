@@ -369,13 +369,23 @@ final class AppKitTranscriptScrollView: NSScrollView {
 
     private func handleLocalWheelEvent(_ event: NSEvent) -> NSEvent? {
         guard let window,
-              event.windowNumber == window.windowNumber,
-              !isHidden,
+              window.isVisible,
+              !isHiddenOrHasHiddenAncestor,
               TranscriptWheelCapturePolicy.shouldCapture(
                   deltaX: event.scrollingDeltaX,
                   deltaY: event.scrollingDeltaY
               ) else { return event }
-        let location = convert(event.locationInWindow, from: nil)
+        let location: NSPoint
+        if event.windowNumber == window.windowNumber {
+            location = convert(event.locationInWindow, from: nil)
+        } else if event.windowNumber == 0 {
+            location = convert(
+                window.convertPoint(fromScreen: event.locationInWindow),
+                from: nil
+            )
+        } else {
+            return event
+        }
         guard bounds.contains(location) else { return event }
 
         // Capture before hit testing reaches an embedded SwiftUI table,
