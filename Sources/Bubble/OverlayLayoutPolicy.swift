@@ -230,6 +230,22 @@ enum TranscriptChunkBoundaryPolicy {
     }
 }
 
+enum TranscriptEstimatedHeightPolicy {
+    static func height(for text: String) -> CGFloat {
+        let explicitLineCount = max(1, text.split(whereSeparator: \.isNewline).count)
+        let wrappedLineCount = max(1, Int(ceil(Double(text.count) / 54.0)))
+        let blockCount = max(1, text.components(separatedBy: "\n\n").count)
+        let roughLines = max(explicitLineCount, wrappedLineCount)
+        let bodyHeight = CGFloat(roughLines) * 28
+        let blockSpacing = CGFloat(blockCount - 1) * 12
+
+        // Completed prose under the chunking threshold is hosted as one view.
+        // Reserve enough initial space for its full body and action row so the
+        // host's fitting size is not itself constrained by a short estimate.
+        return max(42, min(1_600, bodyHeight + blockSpacing + 34))
+    }
+}
+
 enum OverlaySpring {
     static let panelResponse: CGFloat = 0.22
     static let panelDamping: CGFloat = 0.86

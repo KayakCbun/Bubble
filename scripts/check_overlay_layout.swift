@@ -356,6 +356,15 @@ struct OverlayLayoutCheck {
                 >= TranscriptChunkBoundaryPolicy.minimumTopInset,
             "continuation chunks keep their first line inside the clipped AppKit host"
         )
+        let restoredCompletedReply = Array(
+            repeating: Array(repeating: String(repeating: "测", count: 48), count: 3)
+                .joined(separator: "\n"),
+            count: 8
+        ).joined(separator: "\n\n")
+        expect(
+            TranscriptEstimatedHeightPolicy.height(for: restoredCompletedReply) >= 700,
+            "an ordinary completed multi-block reply reserves its full body and action-row height"
+        )
         expect(
             !OverlayPalettePolicy.needsScroll(items: 1, isMount: false),
             "a single command does not scroll"

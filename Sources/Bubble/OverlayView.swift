@@ -1596,9 +1596,7 @@ struct OverlayView: View {
     }
 
     private func appKitTranscriptEstimatedHeight(_ text: String) -> CGFloat {
-        let lineCount = max(1, text.split(whereSeparator: \.isNewline).count)
-        let roughLines = min(18, max(lineCount, Int(ceil(Double(text.count) / 92.0))))
-        return max(42, min(420, CGFloat(roughLines) * 19 + 26))
+        TranscriptEstimatedHeightPolicy.height(for: text)
     }
 
     private var loadEarlierTranscriptButton: some View {
