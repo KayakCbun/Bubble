@@ -203,54 +203,22 @@ enum OverlayPixel {
     }
 }
 
-struct OrbLoadingPlane: Equatable {
-    let tiltDegrees: Double
-    let verticalScale: Double
-    let duration: TimeInterval
-    let direction: Double
-    let restDegrees: Double
-    let radius: Double
-}
+enum RunningSweepPolicy {
+    static let cycleDuration: TimeInterval = 1.45
+    static let minimumFrameInterval: TimeInterval = 1.0 / 120.0
+    static let highlightRadius = 0.24
+    static let offscreenPadding = 0.12
 
-enum OrbLoadingPolicy {
-    static let planes = [
-        OrbLoadingPlane(
-            tiltDegrees: -26,
-            verticalScale: 0.3,
-            duration: 2.6,
-            direction: 1,
-            restDegrees: 34,
-            radius: 20
-        ),
-        OrbLoadingPlane(
-            tiltDegrees: 34,
-            verticalScale: 0.38,
-            duration: 3.4,
-            direction: -1,
-            restDegrees: 158,
-            radius: 16
-        ),
-        OrbLoadingPlane(
-            tiltDegrees: 86,
-            verticalScale: 0.26,
-            duration: 4.2,
-            direction: 1,
-            restDegrees: 262,
-            radius: 22
-        ),
-    ]
-
-    static func angleDegrees(
-        at time: TimeInterval,
-        plane: OrbLoadingPlane,
-        rate: Double = 1,
-        reduceMotion: Bool = false
-    ) -> Double {
-        if reduceMotion { return plane.restDegrees }
-        let cycle = max(plane.duration * max(rate, .leastNonzeroMagnitude), .leastNonzeroMagnitude)
+    static func progress(at time: TimeInterval) -> Double {
+        let cycle = max(cycleDuration, .leastNonzeroMagnitude)
         let remainder = time.truncatingRemainder(dividingBy: cycle)
-        let progress = (remainder < 0 ? remainder + cycle : remainder) / cycle
-        return plane.direction * progress * 360
+        return (remainder < 0 ? remainder + cycle : remainder) / cycle
+    }
+
+    static func highlightCenter(at time: TimeInterval) -> Double {
+        let start = -(highlightRadius + offscreenPadding)
+        let end = 1 + highlightRadius + offscreenPadding
+        return start + (end - start) * progress(at: time)
     }
 }
 

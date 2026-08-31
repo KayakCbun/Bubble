@@ -395,7 +395,7 @@ struct OverlayView: View {
                 if let item = store.transcriptItem(stage.cardId),
                    let status = item.workspaceStatus {
                     if status == "running" {
-                        OrbLoadingIndicator(diameter: 14)
+                        RunningSweepLabel()
                     } else {
                         Text(status)
                             .font(.system(size: 11, weight: .medium))
@@ -1755,20 +1755,15 @@ struct OverlayView: View {
         )
     }
 
-    @ViewBuilder
     private func mountBadge(_ state: String) -> some View {
-        if state == "running" {
-            OrbLoadingIndicator(diameter: 14)
-                .accessibilityLabel("Running")
-        } else {
-            Image(systemName: mountBadgeSymbol(state))
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(state == "waiting" ? Color.accentColor : Color.secondary)
-        }
+        Image(systemName: mountBadgeSymbol(state))
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(state == "running" || state == "waiting" ? Color.accentColor : Color.secondary)
     }
 
     private func mountBadgeSymbol(_ state: String) -> String {
         switch state {
+        case "running": "arrow.trianglehead.2.clockwise"
         case "waiting": "questionmark.circle"
         case "mounted": "checkmark.circle"
         default: "circle"
@@ -1786,7 +1781,7 @@ struct OverlayView: View {
                     .font(.system(size: 12, weight: .medium))
                     .lineLimit(1)
                 if brief.status == .running {
-                    OrbLoadingIndicator(diameter: 14)
+                    RunningSweepLabel()
                 } else {
                     Text(brief.status.rawValue)
                         .font(.system(size: 11, weight: .medium))
@@ -2623,7 +2618,7 @@ struct OverlayView: View {
         return VStack(alignment: .leading, spacing: 8) {
             assistantOrderedContent(item, live: live)
             if live {
-                OrbLoadingIndicator()
+                RunningSweepLabel()
             }
             if !live, !text.isEmpty {
                 HStack(alignment: .center, spacing: 0) {
@@ -2692,7 +2687,7 @@ struct OverlayView: View {
                 MessageBody(text: text, streaming: live, virtualizedChunk: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 if live {
-                    OrbLoadingIndicator()
+                    RunningSweepLabel()
                 }
             }
             if let completeText, !completeText.isEmpty {
@@ -2806,7 +2801,7 @@ struct OverlayView: View {
                             .font(.system(size: 13, weight: .semibold))
                             .lineLimit(1)
                         if status == "running" {
-                            OrbLoadingIndicator(diameter: 14)
+                            RunningSweepLabel()
                         } else {
                             Text(status)
                                 .font(.system(size: 11, weight: .medium))
@@ -3260,7 +3255,7 @@ private struct ToolRowHost: View {
                             .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(.red.opacity(0.7))
                     } else {
-                        OrbLoadingIndicator(diameter: 14)
+                        RunningSweepLabel()
                     }
                 }
                 .font(.system(size: 12, weight: .medium))
@@ -3812,8 +3807,12 @@ private struct BubbleOpeningPlaceholder: View {
 
     var body: some View {
         VStack(spacing: 12) {
-            OrbLoadingIndicator(diameter: 46)
-                .accessibilityLabel(text)
+            Image(nsImage: NSApp.applicationIconImage)
+                .resizable()
+                .interpolation(.high)
+                .scaledToFit()
+                .frame(width: 46, height: 46)
+                .opacity(0.72)
             Text(text)
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(.tertiary)
@@ -5201,197 +5200,45 @@ private struct InputCaret: View {
     }
 }
 
-struct OrbLoadingIndicator: NSViewRepresentable {
-    var diameter: CGFloat = 16
-    var rate: Double = 1
-
+struct RunningSweepLabel: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    func makeNSView(context: Context) -> OrbLoadingNSView {
-        OrbLoadingNSView(diameter: diameter, rate: rate, reduceMotion: reduceMotion)
-    }
-
-    func updateNSView(_ view: OrbLoadingNSView, context: Context) {
-        view.configure(diameter: diameter, rate: rate, reduceMotion: reduceMotion)
-    }
-
-    func sizeThatFits(
-        _ proposal: ProposedViewSize,
-        nsView: OrbLoadingNSView,
-        context: Context
-    ) -> CGSize {
-        CGSize(width: diameter, height: diameter)
-    }
-}
-
-final class OrbLoadingNSView: NSView {
-    private struct PlaneLayers {
-        let config: OrbLoadingPlane
-        let plane: CALayer
-        let arm: CALayer
-        let bead: CAShapeLayer
-        let track: CAShapeLayer
-    }
-
-    private let orbLayer = CALayer()
-    private let coreLayer = CAShapeLayer()
-    private var planeLayers: [PlaneLayers] = []
-    private var diameter: CGFloat
-    private var rate: Double
-    private var reduceMotion: Bool
-
-    init(diameter: CGFloat, rate: Double, reduceMotion: Bool) {
-        self.diameter = diameter
-        self.rate = rate
-        self.reduceMotion = reduceMotion
-        super.init(frame: NSRect(x: 0, y: 0, width: diameter, height: diameter))
-        wantsLayer = true
-        setAccessibilityElement(true)
-        setAccessibilityRole(.progressIndicator)
-        setAccessibilityLabel("Loading")
-        setContentHuggingPriority(.required, for: .horizontal)
-        setContentHuggingPriority(.required, for: .vertical)
-        setContentCompressionResistancePriority(.required, for: .horizontal)
-        setContentCompressionResistancePriority(.required, for: .vertical)
-        buildLayers()
-        configure(diameter: diameter, rate: rate, reduceMotion: reduceMotion)
-    }
-
-    required init?(coder: NSCoder) { nil }
-
-    override var intrinsicContentSize: NSSize {
-        NSSize(width: diameter, height: diameter)
-    }
-
-    override func layout() {
-        super.layout()
-        orbLayer.bounds = CGRect(x: 0, y: 0, width: 64, height: 64)
-        orbLayer.position = CGPoint(x: bounds.midX, y: bounds.midY)
-        let scale = min(bounds.width, bounds.height) / 64
-        orbLayer.setAffineTransform(CGAffineTransform(scaleX: scale, y: scale))
-    }
-
-    override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        updateColors()
-    }
-
-    func configure(diameter: CGFloat, rate: Double, reduceMotion: Bool) {
-        let animationChanged = self.rate != rate || self.reduceMotion != reduceMotion
-        self.diameter = diameter
-        self.rate = rate
-        self.reduceMotion = reduceMotion
-        frame.size = NSSize(width: diameter, height: diameter)
-        invalidateIntrinsicContentSize()
-        needsLayout = true
-        updateColors()
-        if animationChanged || planeLayers.first?.arm.animation(forKey: "orb-arm") == nil {
-            applyMotion()
-        }
-    }
-
-    private func buildLayers() {
-        orbLayer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
-        orbLayer.isGeometryFlipped = true
-        layer?.addSublayer(orbLayer)
-
-        for config in OrbLoadingPolicy.planes {
-            let plane = CALayer()
-            plane.bounds = CGRect(x: 0, y: 0, width: 64, height: 64)
-            plane.position = CGPoint(x: 32, y: 32)
-            plane.anchorPoint = CGPoint(x: 0.5, y: 0.5)
-            plane.setAffineTransform(
-                CGAffineTransform(rotationAngle: config.tiltDegrees * .pi / 180)
-                    .scaledBy(x: 1, y: config.verticalScale)
-            )
-
-            let track = CAShapeLayer()
-            track.path = CGPath(
-                ellipseIn: CGRect(
-                    x: 32 - config.radius,
-                    y: 32 - config.radius,
-                    width: config.radius * 2,
-                    height: config.radius * 2
-                ),
-                transform: nil
-            )
-            track.fillColor = nil
-            track.lineWidth = 0.9
-            plane.addSublayer(track)
-
-            let arm = CALayer()
-            arm.bounds = CGRect(x: 0, y: 0, width: 64, height: 64)
-            arm.position = CGPoint(x: 32, y: 32)
-            arm.anchorPoint = CGPoint(x: 0.5, y: 0.5)
-
-            let bead = CAShapeLayer()
-            bead.bounds = CGRect(x: 0, y: 0, width: 5, height: 5)
-            bead.position = CGPoint(x: 32 + config.radius, y: 32)
-            bead.anchorPoint = CGPoint(x: 0.5, y: 0.5)
-            bead.path = CGPath(ellipseIn: bead.bounds, transform: nil)
-            arm.addSublayer(bead)
-            plane.addSublayer(arm)
-            orbLayer.addSublayer(plane)
-            planeLayers.append(PlaneLayers(
-                config: config,
-                plane: plane,
-                arm: arm,
-                bead: bead,
-                track: track
-            ))
-        }
-
-        coreLayer.path = CGPath(
-            ellipseIn: CGRect(x: 30.4, y: 30.4, width: 3.2, height: 3.2),
-            transform: nil
-        )
-        orbLayer.addSublayer(coreLayer)
-    }
-
-    private func updateColors() {
-        let ink = NSColor(srgbRed: 19 / 255, green: 19 / 255, blue: 22 / 255, alpha: 1)
-        for layers in planeLayers {
-            layers.track.strokeColor = ink.withAlphaComponent(0.2).cgColor
-            layers.bead.fillColor = ink.cgColor
-        }
-        coreLayer.fillColor = ink.withAlphaComponent(0.3).cgColor
-    }
-
-    private func applyMotion() {
-        for layers in planeLayers {
-            layers.arm.removeAnimation(forKey: "orb-arm")
-            layers.bead.removeAnimation(forKey: "orb-bead")
-            let rest = layers.config.restDegrees * .pi / 180
+    var body: some View {
+        Group {
             if reduceMotion {
-                layers.arm.setAffineTransform(CGAffineTransform(rotationAngle: rest))
-                layers.bead.setAffineTransform(
-                    CGAffineTransform(rotationAngle: -rest)
-                        .scaledBy(x: 1, y: 1 / layers.config.verticalScale)
-                )
-                continue
+                Text("running")
+                    .foregroundStyle(Color.secondary.opacity(0.72))
+            } else {
+                TimelineView(
+                    .animation(minimumInterval: RunningSweepPolicy.minimumFrameInterval)
+                ) { context in
+                    let center = RunningSweepPolicy.highlightCenter(
+                        at: context.date.timeIntervalSinceReferenceDate
+                    )
+                    Text("running")
+                        .foregroundStyle(
+                            LinearGradient(
+                                colors: [
+                                    Color.secondary.opacity(0.34),
+                                    Color.primary.opacity(0.84),
+                                    Color.secondary.opacity(0.34),
+                                ],
+                                startPoint: UnitPoint(
+                                    x: center - RunningSweepPolicy.highlightRadius,
+                                    y: 0.5
+                                ),
+                                endPoint: UnitPoint(
+                                    x: center + RunningSweepPolicy.highlightRadius,
+                                    y: 0.5
+                                )
+                            )
+                        )
+                }
             }
-
-            layers.arm.setAffineTransform(.identity)
-            layers.bead.setAffineTransform(
-                CGAffineTransform(scaleX: 1, y: 1 / layers.config.verticalScale)
-            )
-            let duration = layers.config.duration * max(rate, .leastNonzeroMagnitude)
-            let arm = CABasicAnimation(keyPath: "transform.rotation.z")
-            arm.fromValue = 0
-            arm.toValue = layers.config.direction * 2 * Double.pi
-            arm.duration = duration
-            arm.repeatCount = .infinity
-            arm.timingFunction = CAMediaTimingFunction(name: .linear)
-            layers.arm.add(arm, forKey: "orb-arm")
-
-            let bead = CABasicAnimation(keyPath: "transform.rotation.z")
-            bead.fromValue = 0
-            bead.toValue = -layers.config.direction * 2 * Double.pi
-            bead.duration = duration
-            bead.repeatCount = .infinity
-            bead.timingFunction = CAMediaTimingFunction(name: .linear)
-            layers.bead.add(bead, forKey: "orb-bead")
         }
+        .font(.system(size: 11, weight: .medium))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Running")
     }
 }
 
