@@ -112,6 +112,22 @@ private enum RunningSweepLayoutCheck {
                 !implementation.contains("TimelineView"),
                 "running sweep avoids a display-linked TimelineView inside virtualized transcript rows"
             )
+            if let alphaStart = implementation.range(
+                of: "secondaryLabelColor.withAlphaComponent("
+            ) {
+                let suffix = implementation[alphaStart.upperBound...]
+                if let alphaEnd = suffix.firstIndex(of: ")"),
+                   let alpha = Double(suffix[..<alphaEnd]) {
+                    expect(
+                        alpha >= 0.56,
+                        "running sweep keeps the whole word legible between highlight passes (base alpha \(alpha))"
+                    )
+                } else {
+                    failures.append("running sweep base alpha remains measurable")
+                }
+            } else {
+                failures.append("running sweep base color remains discoverable")
+            }
         } else {
             failures.append("running sweep implementation remains discoverable")
         }

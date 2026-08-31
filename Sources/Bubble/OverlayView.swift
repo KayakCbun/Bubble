@@ -5319,7 +5319,10 @@ final class RunningSweepNSView: NSView {
     }
 
     private func updateColors() {
-        let base = NSColor.secondaryLabelColor.withAlphaComponent(0.38).cgColor
+        // Keep every glyph readable while the brighter band travels across
+        // the word. A low floor makes the unswept prefix look clipped even
+        // though the text mask and intrinsic width are correct.
+        let base = NSColor.secondaryLabelColor.withAlphaComponent(0.62).cgColor
         let highlight = NSColor.labelColor.withAlphaComponent(0.88).cgColor
         gradientLayer.colors = reduceMotion
             ? [NSColor.secondaryLabelColor.withAlphaComponent(0.72).cgColor,
