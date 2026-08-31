@@ -348,6 +348,35 @@ struct OverlayLayoutCheck {
             "running highlight is eligible to follow a 120 Hz display"
         )
         expect(
+            RunningSweepPolicy.startPointX(at: 0) < 0
+                && RunningSweepPolicy.endPointX(at: 0) > 0,
+            "the highlight band enters from the leading edge of the word"
+        )
+        expect(
+            RunningSweepPolicy.startPointX(at: 1) < 1
+                && RunningSweepPolicy.endPointX(at: 1) > 1,
+            "the highlight band exits through the trailing edge of the word"
+        )
+        expect(
+            RunningSweepPolicy.startPointX(at: 0.25) < RunningSweepPolicy.startPointX(at: 0.75),
+            "the highlight travels left to right across the letters"
+        )
+        expect(
+            RunningSweepPresentationPolicy.showsPendingLabel(isBusy: true, streamingAssistantID: nil),
+            "a turn shows running immediately after send, before the first assistant token"
+        )
+        expect(
+            !RunningSweepPresentationPolicy.showsPendingLabel(isBusy: false, streamingAssistantID: nil),
+            "an idle transcript does not keep a pending running label"
+        )
+        expect(
+            !RunningSweepPresentationPolicy.showsPendingLabel(
+                isBusy: true,
+                streamingAssistantID: UUID()
+            ),
+            "the live assistant bubble owns running once tokens start"
+        )
+        expect(
             TranscriptChunkBoundaryPolicy.topInset(isContinuation: false) == 0,
             "the first virtual chunk keeps the message's normal top edge"
         )
