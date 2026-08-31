@@ -189,6 +189,29 @@ enum TranscriptWheelScrollPolicy {
     }
 }
 
+enum TranscriptWheelCapturePolicy {
+    /// SwiftUI rich rows can contain their own horizontal scroll views. Those
+    /// views are allowed to own horizontal gestures, but a vertical wheel
+    /// gesture anywhere inside the transcript must reach the transcript's
+    /// AppKit scroll view instead of dying at a nested scroll boundary.
+    static func shouldCapture(deltaX: CGFloat, deltaY: CGFloat) -> Bool {
+        abs(deltaY) > 0.01 && abs(deltaY) > abs(deltaX)
+    }
+}
+
+enum TranscriptCommandCompletionPolicy {
+    /// A scroll-to-end command completes asynchronously after AppKit applies
+    /// it. A newer physical wheel gesture owns the viewport and must not be
+    /// overwritten by that stale completion.
+    static func shouldApply(
+        isScrollToEnd: Bool,
+        issuedUserScrollGeneration: UInt64,
+        currentUserScrollGeneration: UInt64
+    ) -> Bool {
+        !isScrollToEnd || issuedUserScrollGeneration == currentUserScrollGeneration
+    }
+}
+
 struct TranscriptWheelFrameStep: Equatable {
     let applied: CGFloat
     let remaining: CGFloat
@@ -198,7 +221,7 @@ enum TranscriptWheelFramePolicy {
     /// Keep one LazyVStack realization slice below a 60 fps frame budget on
     /// ProMotion displays while still allowing several thousand points/second.
     static func maximumStep(hasPreciseDeltas: Bool) -> CGFloat {
-        hasPreciseDeltas ? 32 : 12
+        hasPreciseDeltas ? 32 : 8
     }
 
     static func maximumPendingDelta(hasPreciseDeltas: Bool) -> CGFloat {

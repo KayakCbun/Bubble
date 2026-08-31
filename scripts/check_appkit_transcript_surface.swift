@@ -49,6 +49,35 @@ private final class FirstMountMeasurementHost: AppKitTranscriptRowHost {
     override var needsImmediateContentMeasurement: Bool { requiresImmediateMeasurement }
 }
 
+/// A window-addressed event lets the focused harness pass through
+/// `NSApplication.sendEvent` and the production local event monitor without
+/// requiring accessibility permission or posting a global HID event.
+private final class WindowRoutedWheelEvent: NSEvent {
+    private let targetWindowNumber: Int
+    private let targetLocation: NSPoint
+    private let wheelDeltaX: CGFloat
+    private let wheelDeltaY: CGFloat
+
+    init(windowNumber: Int, location: NSPoint, deltaX: CGFloat = 0, deltaY: CGFloat) {
+        self.targetWindowNumber = windowNumber
+        self.targetLocation = location
+        self.wheelDeltaX = deltaX
+        self.wheelDeltaY = deltaY
+        super.init()
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override var type: NSEvent.EventType { .scrollWheel }
+    override var windowNumber: Int { targetWindowNumber }
+    override var locationInWindow: NSPoint { targetLocation }
+    override var scrollingDeltaX: CGFloat { wheelDeltaX }
+    override var scrollingDeltaY: CGFloat { wheelDeltaY }
+    override var hasPreciseScrollingDeltas: Bool { false }
+    override var phase: NSEvent.Phase { [] }
+    override var momentumPhase: NSEvent.Phase { [] }
+}
+
 private func assertNear(
     _ actual: CGFloat,
     _ expected: CGFloat,
@@ -64,6 +93,18 @@ private func assertNear(
     )
     let withinTolerance = abs(actual - expected) <= tolerance
     expect(withinTolerance, detail)
+}
+
+private func upwardLineWheelEvent() -> NSEvent? {
+    guard let cgEvent = CGEvent(
+        scrollWheelEvent2Source: nil,
+        units: .line,
+        wheelCount: 1,
+        wheel1: 1,
+        wheel2: 0,
+        wheel3: 0
+    ) else { return nil }
+    return NSEvent(cgEvent: cgEvent)
 }
 
 @main
@@ -577,12 +618,63 @@ private enum AppKitTranscriptSurfaceCheck {
             max(0, adapter.currentHeightIndex.totalHeight - adapter.scrollView.contentView.bounds.height),
             "scroll-to-end reaches the document end"
         )
+        if let wheelAwayFromEnd = upwardLineWheelEvent() {
+            let endBeforeWheel = adapter.contentOffsetY
+            expect(
+                wheelAwayFromEnd.scrollingDeltaY > 0,
+                "synthetic end-detach wheel uses the upward physical direction"
+            )
+            adapter.scrollView.scrollWheel(with: wheelAwayFromEnd)
+            expect(
+                adapter.contentOffsetY < endBeforeWheel - 0.5,
+                "a discrete mouse wheel detaches and moves immediately from the transcript end"
+            )
+            expect(
+                !adapter.snapshot.followsLatest,
+                "a discrete mouse wheel leaves follow-latest after moving from the end"
+            )
+        } else {
+            failures.append("synthetic end-detach mouse wheel event is available")
+        }
         _ = adapter.perform(.reveal(rowID: "row-0", session: adapter.currentHandle.nextRevision()))
         expect(adapter.contentOffsetY <= 1, "reveal brings the requested row into view")
         _ = adapter.perform(.setFollowLatest(false, session: adapter.currentHandle.nextRevision()))
         expect(!adapter.snapshot.followsLatest, "set-follow command updates follow state")
         _ = adapter.perform(.invalidate(rowIDs: [stableID], session: adapter.currentHandle.nextRevision()))
         expect(adapter.metrics.layoutCount > 0, "local invalidation triggers a bounded layout pass")
+
+        // Exercise the window/location capture seam used before AppKit hit
+        // testing reaches nested SwiftUI horizontal scroll views.
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 120),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = adapter.scrollView
+        adapter.setContentOffset(y: max(
+            0,
+            adapter.currentHeightIndex.totalHeight - adapter.scrollView.contentView.bounds.height
+        ))
+        let endBeforeRoutedWheel = adapter.contentOffsetY
+        let handlerGeneration = adapter.scrollView.localWheelHandlerGeneration
+        NSApp.sendEvent(WindowRoutedWheelEvent(
+            windowNumber: window.windowNumber,
+            location: NSPoint(x: 240, y: 60),
+            deltaY: 1
+        ))
+        expect(
+            adapter.contentOffsetY < endBeforeRoutedWheel - 0.5,
+            "the local monitor routes a window mouse wheel and immediately leaves the transcript end"
+        )
+        expect(
+            adapter.scrollView.localWheelHandlerGeneration == handlerGeneration + 1,
+            "the production local monitor records exactly one handler pass"
+        )
+        expect(
+            adapter.scrollView.lastLocalWheelHandlerDuration >= 0,
+            "the production local monitor reports finite app-owned work"
+        )
 
         finish()
     }

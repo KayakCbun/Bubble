@@ -291,6 +291,15 @@ if [[ "$MODE" == "mount-audit" ]]; then
     echo "$benchmark_line" >&2
     exit 1
   fi
+  height_mismatch_samples="$(sed -nE 's/.* heightMismatchSamples=([0-9]+).*/\1/p' <<<"$benchmark_line")"
+  if [[ -z "$height_mismatch_samples" ]]; then
+    echo "FAIL: mount audit did not report per-frame transcript height mismatches" >&2
+    echo "$benchmark_line" >&2
+    exit 1
+  fi
+  # A newly created SwiftUI rich row can publish a second intrinsic size on
+  # the following AppKit pass. Keep the per-frame count as a diagnostic; the
+  # settled mismatch and overflow gates below are the correctness boundary.
   settled_height_mismatches="$(sed -nE 's/.* settledHeightMismatches=([0-9]+).*/\1/p' <<<"$benchmark_line")"
   if [[ -z "$settled_height_mismatches" ]]; then
     echo "FAIL: mount audit did not report settled transcript height mismatches" >&2

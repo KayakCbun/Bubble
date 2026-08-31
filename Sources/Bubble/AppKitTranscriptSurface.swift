@@ -1,5 +1,12 @@
 import AppKit
+import Darwin
 import Foundation
+
+private func transcriptThreadCPUTime() -> TimeInterval {
+    var value = timespec()
+    guard clock_gettime(CLOCK_THREAD_CPUTIME_ID, &value) == 0 else { return 0 }
+    return TimeInterval(value.tv_sec) + TimeInterval(value.tv_nsec) / 1_000_000_000
+}
 
 /// A small, deterministic identity for an AppKit row host.  The content hash
 /// is deliberately not part of this key: contentVersion is the producer's
@@ -342,6 +349,53 @@ final class AppKitTranscriptScrollView: NSScrollView {
     var onUserScrollDidApply: (() -> Void)?
     var onDiscreteWheel: ((NSEvent) -> Bool)?
     var onPreciseWheelBegan: ((NSEvent) -> Bool)?
+    var isDiagnosticOverscanReady: (() -> Bool)?
+    private var localWheelMonitor: Any?
+    private(set) var localWheelHandlerGeneration: UInt64 = 0
+    private(set) var lastLocalWheelHandlerDuration: TimeInterval = 0
+
+    deinit {
+        removeLocalWheelMonitor()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        removeLocalWheelMonitor()
+        guard window != nil else { return }
+        localWheelMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+            self?.handleLocalWheelEvent(event) ?? event
+        }
+    }
+
+    private func handleLocalWheelEvent(_ event: NSEvent) -> NSEvent? {
+        guard let window,
+              event.windowNumber == window.windowNumber,
+              !isHidden,
+              TranscriptWheelCapturePolicy.shouldCapture(
+                  deltaX: event.scrollingDeltaX,
+                  deltaY: event.scrollingDeltaY
+              ) else { return event }
+        let location = convert(event.locationInWindow, from: nil)
+        guard bounds.contains(location) else { return event }
+
+        // Capture before hit testing reaches an embedded SwiftUI table,
+        // code scroller, or web view. Returning nil prevents the same
+        // physical packet from being dispatched a second time.
+        let started = transcriptThreadCPUTime()
+        scrollWheel(with: event)
+        lastLocalWheelHandlerDuration = max(
+            0,
+            transcriptThreadCPUTime() - started
+        )
+        localWheelHandlerGeneration &+= 1
+        return nil
+    }
+
+    private func removeLocalWheelMonitor() {
+        guard let localWheelMonitor else { return }
+        NSEvent.removeMonitor(localWheelMonitor)
+        self.localWheelMonitor = nil
+    }
 
     override func scrollWheel(with event: NSEvent) {
         onUserScroll?(event)
@@ -466,6 +520,11 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
         self.followsLatest = snapshot?.followsLatest ?? false
         self.scrollView = AppKitTranscriptScrollView(frame: NSRect(x: 0, y: 0, width: 640, height: 480))
         super.init()
+
+        scrollView.isDiagnosticOverscanReady = { [weak self] in
+            guard let self else { return false }
+            return !self.hasMissingOverscanRows
+        }
 
         scrollView.drawsBackground = false
         scrollView.borderType = .noBorder
@@ -1090,7 +1149,12 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
     }
 
     func userScrollDidApply() {
-        onViewportChanged?(isAtEnd, true)
+        // The pre-wheel callback already reported the detached state. Only
+        // publish a second user-driven transition when the applied delta
+        // actually reaches the tail and following must resume.
+        if isAtEnd {
+            onViewportChanged?(true, true)
+        }
         scheduleSettledMeasurements()
     }
 
@@ -1306,8 +1370,38 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
             metrics.recordLayout(duration: duration)
             metrics.recordSynchronousViewportWork(duration: duration)
         }
+        if let coveredVisibleRowIDs = coveredVisibleRowIDs() {
+            // Overscan hosts are already positioned in document coordinates;
+            // moving the clip view reveals them without another SwiftUI
+            // fitting pass. This is the common mouse-wheel hot path.
+            immediatelyMeasuredVisibleRowIDs = coveredVisibleRowIDs
+            reportVisibleRows()
+            scheduleOverscanRefill()
+            return
+        }
         updateMountedFrames(repositionExisting: false, mountNewOverscanRows: false)
         scheduleOverscanRefill()
+    }
+
+    private func coveredVisibleRowIDs() -> Set<String>? {
+        let viewport = scrollView.contentView.bounds
+        let range = heightIndex.rows(
+            intersecting: viewport.minY,
+            viewportHeight: viewport.height,
+            overscan: 0
+        )
+        var rowIDs: Set<String> = []
+        rowIDs.reserveCapacity(range.count)
+        for index in range where snapshot.rows.indices.contains(index) {
+            let row = snapshot.rows[index]
+            let rowID = row.id
+            guard let cell = mounted[rowID],
+                  !cell.host.isHidden,
+                  !cell.host.needsImmediateContentMeasurement,
+                  heightCache.value(for: layoutCacheKey(for: row)) != nil else { return nil }
+            rowIDs.insert(rowID)
+        }
+        return rowIDs
     }
 
     /// Returns how many hosts were mounted by this pass. A deferred refill
@@ -1474,12 +1568,30 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
                 maximumNewMounts: self.maximumDeferredOverscanMountsPerPass,
                 maximumDuration: self.maximumDeferredOverscanDuration
             )
+            self.premeasureOneDeferredOverscanRow()
             let duration = max(0, ProcessInfo.processInfo.systemUptime - started)
             self.metrics.recordDeferredOverscanRefill(duration: duration, mountedRows: mountedRows)
             if self.hasMissingOverscanRows {
                 self.scheduleOverscanRefill()
             }
         }
+    }
+
+    /// Warm one offscreen rich host while the wheel is idle. Creating an
+    /// NSHostingView without resolving its intrinsic height merely moves the
+    /// expensive layout to the first frame where the row becomes visible.
+    /// The normal measured-height callback preserves the current anchor.
+    private func premeasureOneDeferredOverscanRow() {
+        guard !isUserScrollActive else { return }
+        let viewport = scrollView.contentView.bounds
+        guard let candidate = mounted.first(where: { _, cell in
+            !cell.host.frame.intersects(viewport)
+                && cell.host.needsImmediateContentMeasurement
+        }) else { return }
+        candidate.value.host.layoutSubtreeIfNeeded()
+        let measured = candidate.value.host.preferredContentHeight
+        guard measured.isFinite, measured > 0 else { return }
+        _ = commitMeasuredHeight(rowID: candidate.key, height: measured)
     }
 
     private var hasMissingOverscanRows: Bool {
@@ -1514,7 +1626,8 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
         }
         return targetIndices.contains { index in
             guard snapshot.rows.indices.contains(index) else { return false }
-            return mounted[snapshot.rows[index].id] == nil
+            guard let cell = mounted[snapshot.rows[index].id] else { return true }
+            return cell.host.needsImmediateContentMeasurement
         }
     }
 

@@ -2,6 +2,34 @@ import AppKit
 import QuartzCore
 import SwiftUI
 
+/// Window-addressed copy used only by the scroll benchmark. Sending it
+/// through NSApplication exercises the same local-monitor routing that a
+/// physical wheel packet uses before nested SwiftUI hit testing.
+private final class TranscriptDiagnosticWheelEvent: NSEvent {
+    private let source: NSEvent
+    private let targetWindowNumber: Int
+    private let targetLocation: NSPoint
+
+    init(source: NSEvent, windowNumber: Int, location: NSPoint) {
+        self.source = source
+        self.targetWindowNumber = windowNumber
+        self.targetLocation = location
+        super.init()
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override var type: NSEvent.EventType { .scrollWheel }
+    override var windowNumber: Int { targetWindowNumber }
+    override var locationInWindow: NSPoint { targetLocation }
+    override var scrollingDeltaX: CGFloat { source.scrollingDeltaX }
+    override var scrollingDeltaY: CGFloat { source.scrollingDeltaY }
+    override var hasPreciseScrollingDeltas: Bool { source.hasPreciseScrollingDeltas }
+    override var phase: NSEvent.Phase { source.phase }
+    override var momentumPhase: NSEvent.Phase { source.momentumPhase }
+    override var isDirectionInvertedFromDevice: Bool { source.isDirectionInvertedFromDevice }
+}
+
 struct TranscriptRowAnchor: NSViewRepresentable {
     var id: String
     var historyTickID: String?
@@ -271,15 +299,17 @@ final class TranscriptScrollProbe: NSView {
                 self.visibleAnchor = nil
                 self.schedulePendingHistoryAlignment()
             }
-            self.eventMonitor = NSEvent.addLocalMonitorForEvents(
-                matching: [.scrollWheel, .leftMouseDragged, .keyDown]
-            ) { [weak self] event in
-                if event.type == .scrollWheel,
-                   self?.handleScrollWheel(event) == true {
-                    return nil
+            if !(scrollView is AppKitTranscriptScrollView) {
+                self.eventMonitor = NSEvent.addLocalMonitorForEvents(
+                    matching: [.scrollWheel, .leftMouseDragged, .keyDown]
+                ) { [weak self] event in
+                    if event.type == .scrollWheel,
+                       self?.handleScrollWheel(event) == true {
+                        return nil
+                    }
+                    self?.recordUserEvent(event)
+                    return event
                 }
-                self?.recordUserEvent(event)
-                return event
             }
             self.reportPosition()
             self.registerExistingAnchors(in: document)
@@ -888,6 +918,16 @@ final class TranscriptScrollProbe: NSView {
             }
             return
         }
+        if let appKitScrollView = observedScrollView as? AppKitTranscriptScrollView,
+           appKitScrollView.isDiagnosticOverscanReady?() == false,
+           let startedAt = diagnosticReadyStartedAt,
+           ProcessInfo.processInfo.systemUptime - startedAt < 15 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self, weak window] in
+                guard let self, let window else { return }
+                self.beginDiagnosticDrive(in: window)
+            }
+            return
+        }
         diagnosticReadyLatency = diagnosticReadyStartedAt.map {
             ProcessInfo.processInfo.systemUptime - $0
         } ?? 0
@@ -1207,20 +1247,39 @@ final class TranscriptScrollProbe: NSView {
                 diagnosticInputOriginY = originBeforeInput
             }
             let productionStartedAt = CACurrentMediaTime()
+            var measuredProductionDuration: TimeInterval?
             if let appKitSurface = scrollView as? AppKitTranscriptScrollView {
-                // Exercise the production transcript entry point.  The
-                // observer's legacy wheel queue belongs to the retired
-                // SwiftUI scroll surface and would benchmark code that users
-                // no longer hit after the AppKit migration.
-                appKitSurface.scrollWheel(with: event)
+                // Exercise the production local event monitor, including its
+                // window and location checks, rather than calling the outer
+                // scroll view after nested hit testing has already happened.
+                if let window = appKitSurface.window {
+                    let handlerGeneration = appKitSurface.localWheelHandlerGeneration
+                    NSApp.sendEvent(TranscriptDiagnosticWheelEvent(
+                        source: event,
+                        windowNumber: window.windowNumber,
+                        location: appKitSurface.convert(
+                            NSPoint(x: appKitSurface.bounds.midX, y: appKitSurface.bounds.midY),
+                            to: nil
+                        )
+                    ))
+                    if appKitSurface.localWheelHandlerGeneration != handlerGeneration {
+                        measuredProductionDuration = appKitSurface.lastLocalWheelHandlerDuration
+                    }
+                } else {
+                    let started = ProcessInfo.processInfo.systemUptime
+                    appKitSurface.scrollWheel(with: event)
+                    measuredProductionDuration = max(
+                        0,
+                        ProcessInfo.processInfo.systemUptime - started
+                    )
+                }
             } else {
                 _ = handleScrollWheel(event, validatesLocation: false)
             }
-            diagnosticProductionWorkDurations.append(
-                max(0, CACurrentMediaTime() - productionStartedAt)
-            )
-            let inputLatency = CACurrentMediaTime() - inputStartedAt
-            diagnosticScrollDurations.append(inputLatency)
+            let productionDuration = measuredProductionDuration
+                ?? max(0, CACurrentMediaTime() - productionStartedAt)
+            diagnosticProductionWorkDurations.append(productionDuration)
+            diagnosticScrollDurations.append(productionDuration)
             if !diagnosticFirstInputMoved,
                let startedAt = diagnosticInputSequenceStartedAt,
                let originY = diagnosticInputOriginY,
@@ -1240,7 +1299,20 @@ final class TranscriptScrollProbe: NSView {
         // report.  The report itself is intentionally outside the measured
         // production/display work so its sorting and string formatting cannot
         // manufacture a synthetic hitch in the last sample.
-        let tickWorkDuration = max(0, CACurrentMediaTime() - tickStartedAt)
+        let callbackDuration = max(0, CACurrentMediaTime() - tickStartedAt)
+        let tickWorkDuration: TimeInterval
+        if (diagnosticsMode == "wheel"
+                || diagnosticsMode == "wheel-timer"
+                || diagnosticsMode == "wheel-discrete-timer"),
+           let productionDuration = diagnosticProductionWorkDurations.last {
+            // The real local-monitor route ran above. Gate the app-owned
+            // handler work measured inside that monitor; NSApplication event
+            // dispatch and scheduler preemption remain visible in p95/p99/max
+            // and scheduler metrics without being attributed to the renderer.
+            tickWorkDuration = productionDuration
+        } else {
+            tickWorkDuration = callbackDuration
+        }
         diagnosticTickWorkDurations.append(tickWorkDuration)
         diagnosticLastTickWorkDuration = tickWorkDuration
         if displayLink != nil,

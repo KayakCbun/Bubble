@@ -185,6 +185,38 @@ private enum TranscriptInteractionCheck {
             "one discrete mouse-wheel notch has enough distance to interpolate visibly"
         )
         expect(
+            TranscriptWheelCapturePolicy.shouldCapture(deltaX: 0, deltaY: 1),
+            "a vertical mouse-wheel packet is captured at the transcript boundary"
+        )
+        expect(
+            !TranscriptWheelCapturePolicy.shouldCapture(deltaX: 12, deltaY: 1),
+            "a nested horizontal scroller keeps a horizontal gesture"
+        )
+        expect(
+            !TranscriptWheelCapturePolicy.shouldCapture(deltaX: 8, deltaY: 8),
+            "an equal diagonal gesture stays available to a nested horizontal scroller"
+        )
+        expect(
+            !TranscriptWheelCapturePolicy.shouldCapture(deltaX: 0, deltaY: 0),
+            "a zero-delta wheel packet is not consumed"
+        )
+        expect(
+            !TranscriptCommandCompletionPolicy.shouldApply(
+                isScrollToEnd: true,
+                issuedUserScrollGeneration: 4,
+                currentUserScrollGeneration: 5
+            ),
+            "a physical wheel gesture supersedes a pending scroll-to-end completion"
+        )
+        expect(
+            TranscriptCommandCompletionPolicy.shouldApply(
+                isScrollToEnd: false,
+                issuedUserScrollGeneration: 4,
+                currentUserScrollGeneration: 5
+            ),
+            "ordinary command completion is independent of wheel generations"
+        )
+        expect(
             TranscriptWheelFramePolicy.queuedDelta(
                 pending: 200,
                 incoming: 400,
@@ -225,11 +257,11 @@ private enum TranscriptInteractionCheck {
             TranscriptWheelFramePolicy.nextFrame(
                 pending: 24,
                 maximumStep: TranscriptWheelFramePolicy.maximumStep(hasPreciseDeltas: false)
-            ) == TranscriptWheelFrameStep(applied: 12, remaining: 12),
+            ) == TranscriptWheelFrameStep(applied: 8, remaining: 16),
             "one mouse-wheel notch is interpolated across more than one display refresh"
         )
         expect(
-            TranscriptWheelFramePolicy.maximumPendingDelta(hasPreciseDeltas: false) == 48,
+            TranscriptWheelFramePolicy.maximumPendingDelta(hasPreciseDeltas: false) == 32,
             "mouse interpolation remains bounded to four display refreshes"
         )
         expect(

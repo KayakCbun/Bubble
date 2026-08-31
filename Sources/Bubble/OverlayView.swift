@@ -1372,6 +1372,9 @@ struct OverlayView: View {
             render: { [self] in
                 AnyView(
                     TranscriptSelectionScope {
+                        // AppKit continuations are independent clipped hosts.
+                        // Spacing must stay inside each host; moving content
+                        // above its bounds cuts the first line after mounting.
                         mainTranscriptRow(row)
                             .background {
                                 TranscriptRowAnchor(
@@ -1379,7 +1382,6 @@ struct OverlayView: View {
                                     historyTickID: row.historyTickID
                                 )
                             }
-                            .padding(.top, row.isContinuation ? -10 : 0)
                             .opacity(row.isAfterBranchPoint ? 0.34 : 1)
                     }
                     .environment(\.openFilePreview) { path in
@@ -4644,6 +4646,7 @@ private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
         private var diagnosticsProbe: TranscriptScrollProbe?
         private var viewportHandler: ((_ atEnd: Bool, _ userDriven: Bool) -> Void)?
         private var userScrollSequenceHandler: (() -> Void)?
+        private var userScrollSequenceGeneration: UInt64 = 0
         private var directMountAuditStarted = false
         private var directMountAuditTimer: Timer?
         private var lastLeadingInset: CGFloat?
@@ -4662,6 +4665,8 @@ private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
             var coverageMismatches = 0
             var contentOverflows = 0
             var maximumOverflow: CGFloat = 0
+            var heightMismatchSamples = 0
+            var maximumHeightMismatch: CGFloat = 0
 
             init(adapter: AppKitTranscriptSurfaceAdapter) {
                 startY = adapter.contentOffsetY
@@ -4683,7 +4688,10 @@ private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
                 // content identity then appears stable and would never be
                 // configured with the real SwiftUI rows.
                 snapshot: emptySnapshot,
-                overscan: 720,
+                // Keep enough immutable rich rows warm for a sustained mouse
+                // wheel run. Cold NSHostingView construction must stay off
+                // the input frame; the 96-host ceiling still bounds memory.
+                overscan: 6_000,
                 maximumMountedRows: 96,
                 maximumReusableHosts: 144,
                 maximumDeferredOverscanMountsPerPass: 1,
@@ -4755,7 +4763,14 @@ private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
             }
             userScrollSequenceHandler = onUserScrollSequenceStarted
             adapter.onViewportChanged = { [weak self] atEnd, userDriven in
-                self?.viewportHandler?(atEnd, userDriven)
+                guard let self else { return }
+                // Count every physical packet rather than only gesture
+                // starts. A user can click Scroll to end and reverse within
+                // the prior wheel sequence's debounce window.
+                if userDriven {
+                    self.userScrollSequenceGeneration &+= 1
+                }
+                self.viewportHandler?(atEnd, userDriven)
             }
             adapter.onUserScrollSequenceStarted = { [weak self] in
                 self?.userScrollSequenceHandler?()
@@ -4888,6 +4903,7 @@ private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
                 return
             }
             lastCommandToken = commandToken
+            let issuedUserScrollGeneration = userScrollSequenceGeneration
             _ = adapter.perform(command)
             if diagnosticsProbe != nil,
                case let .reveal(rowID, _) = command {
@@ -4910,6 +4926,17 @@ private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
             // session replacement).
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.lastCommandToken == commandToken else { return }
+                let isScrollToEnd: Bool
+                if case .scrollToEnd = command {
+                    isScrollToEnd = true
+                } else {
+                    isScrollToEnd = false
+                }
+                guard TranscriptCommandCompletionPolicy.shouldApply(
+                    isScrollToEnd: isScrollToEnd,
+                    issuedUserScrollGeneration: issuedUserScrollGeneration,
+                    currentUserScrollGeneration: self.userScrollSequenceGeneration
+                ) else { return }
                 let atEnd = abs(
                     self.adapter.contentOffsetY - max(
                         0,
@@ -4954,6 +4981,9 @@ private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
             let overflow = adapter.contentOverflowDiagnostics
             state.contentOverflows += overflow.count
             state.maximumOverflow = max(state.maximumOverflow, overflow.maximum)
+            let mismatch = adapter.contentHeightMismatchDiagnostics
+            state.heightMismatchSamples += mismatch.count
+            state.maximumHeightMismatch = max(state.maximumHeightMismatch, mismatch.maximum)
         }
 
         private func runDirectMountAuditFrame(timer: Timer, state: DirectMountAuditState) {
@@ -4997,7 +5027,7 @@ private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
                 let anchorError = abs(self.adapter.contentOffsetY - settledY)
                 let settledMismatch = self.adapter.contentHeightMismatchDiagnostics
                 OverlayLog.write(String(
-                    format: "transcript mount audit samples=%d anchors=%d peakAnchors=%d blankSamples=%d longestBlankStreak=%d coverageMismatches=%d contentOverflows=%d maximumOverflow=%.2f settledHeightMismatches=%d maximumSettledMismatch=%.2f documentHeight=%.0f anchorError=%.2f",
+                    format: "transcript mount audit samples=%d anchors=%d peakAnchors=%d blankSamples=%d longestBlankStreak=%d coverageMismatches=%d contentOverflows=%d maximumOverflow=%.2f heightMismatchSamples=%d maximumHeightMismatch=%.2f settledHeightMismatches=%d maximumSettledMismatch=%.2f documentHeight=%.0f anchorError=%.2f",
                     state.sampleCount,
                     self.adapter.mountedRowIDs.count,
                     self.adapter.metrics.mountedPeak,
@@ -5006,6 +5036,8 @@ private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
                     state.coverageMismatches,
                     state.contentOverflows,
                     state.maximumOverflow,
+                    state.heightMismatchSamples,
+                    state.maximumHeightMismatch,
                     settledMismatch.count,
                     settledMismatch.maximum,
                     self.adapter.currentHeightIndex.totalHeight,
