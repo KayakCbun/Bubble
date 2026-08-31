@@ -4454,13 +4454,9 @@ private final class OverlayTranscriptRenderBox {
     }
 }
 
-private final class TranscriptRowHostingView: NSHostingView<AnyView> {
-    override var acceptsFirstResponder: Bool { false }
-    override var canBecomeKeyView: Bool { false }
-}
-
 private final class OverlayTranscriptRowHost: AppKitTranscriptRowHost {
-    private let hostingView: TranscriptRowHostingView
+    private let hostingController: NSHostingController<AnyView>
+    private var hostingView: NSView { hostingController.view }
     private let rootFactory: (TranscriptRowSnapshot) -> AnyView
     private let onMeasuredHeight: (String, CGFloat) -> Void
     private let shouldMeasure: () -> Bool
@@ -4479,7 +4475,7 @@ private final class OverlayTranscriptRowHost: AppKitTranscriptRowHost {
         self.rootFactory = rootFactory
         self.onMeasuredHeight = onMeasuredHeight
         self.shouldMeasure = shouldMeasure
-        self.hostingView = TranscriptRowHostingView(rootView: rootFactory(row))
+        self.hostingController = NSHostingController(rootView: rootFactory(row))
         super.init(row: row, key: key)
 
         // The base host retains a plain-text fallback for deterministic
@@ -4488,7 +4484,7 @@ private final class OverlayTranscriptRowHost: AppKitTranscriptRowHost {
         // subclass independent of the base class's private label.
         subviews.first?.isHidden = true
         hostingView.translatesAutoresizingMaskIntoConstraints = true
-        hostingView.sizingOptions = TranscriptHostingSizingPolicy.options
+        hostingController.sizingOptions = TranscriptHostingSizingPolicy.options
         hostingView.appearance = NSApp.effectiveAppearance
         addSubview(hostingView)
         measurementObserver = NotificationCenter.default.addObserver(
@@ -4513,7 +4509,7 @@ private final class OverlayTranscriptRowHost: AppKitTranscriptRowHost {
     override func configure(row: TranscriptRowSnapshot, key: AppKitTranscriptRowReuseKey) {
         super.configure(row: row, key: key)
         subviews.first?.isHidden = true
-        hostingView.rootView = rootFactory(row)
+        hostingController.rootView = rootFactory(row)
         hostingView.appearance = NSApp.effectiveAppearance
         lastMeasuredHeight = -.greatestFiniteMagnitude
         lastMeasuredWidth = -.greatestFiniteMagnitude
@@ -4527,7 +4523,7 @@ private final class OverlayTranscriptRowHost: AppKitTranscriptRowHost {
         // Drop the old SwiftUI tree while this pooled cell is detached.  This
         // releases images, Markdown storage, and store-capturing closures
         // across session switches instead of retaining up to 144 stale rows.
-        hostingView.rootView = AnyView(EmptyView())
+        hostingController.rootView = AnyView(EmptyView())
         lastMeasuredHeight = -.greatestFiniteMagnitude
         lastMeasuredWidth = -.greatestFiniteMagnitude
         measurementDirty = true
@@ -4540,7 +4536,10 @@ private final class OverlayTranscriptRowHost: AppKitTranscriptRowHost {
         guard bounds.width.isFinite, bounds.width > 0,
               measurementDirty || abs(bounds.width - lastMeasuredWidth) > 0.5 else { return }
         hostingView.layoutSubtreeIfNeeded()
-        let fittingHeight = hostingView.fittingSize.height
+        let fittingHeight = TranscriptHostingSizingPolicy.contentHeight(
+            of: hostingController,
+            width: bounds.width
+        )
         guard fittingHeight.isFinite, fittingHeight > 0 else { return }
         lastMeasuredWidth = bounds.width
         measurementDirty = false
@@ -4551,10 +4550,14 @@ private final class OverlayTranscriptRowHost: AppKitTranscriptRowHost {
     }
 
     override var intrinsicContentSize: NSSize {
-        let fitting = hostingView.fittingSize
+        let width = max(1, bounds.width, hostingView.bounds.width)
+        let height = TranscriptHostingSizingPolicy.contentHeight(
+            of: hostingController,
+            width: width
+        )
         return NSSize(
             width: NSView.noIntrinsicMetric,
-            height: max(1, fitting.height.isFinite ? fitting.height : 1)
+            height: height
         )
     }
 
