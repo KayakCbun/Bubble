@@ -7,6 +7,23 @@ enum TranscriptVirtualizationLimits {
 }
 
 enum TranscriptChunkRenderPolicy {
+    /// Completed conversational prose below this size is cheaper and more
+    /// reliable as one semantic NSHostingView row. Active streams still use
+    /// stable tail chunks, while genuinely large completed output remains
+    /// virtualized for scroll performance.
+    static let minimumCompletedChunkBytes = 4 * 1_024
+
+    static func shouldVirtualize(
+        text: String,
+        isChunkable: Bool,
+        hasMedia: Bool,
+        streaming: Bool
+    ) -> Bool {
+        isChunkable
+            && !hasMedia
+            && (streaming || text.utf8.count >= minimumCompletedChunkBytes)
+    }
+
     static func sourceText(_ sourceText: String, isChunked: Bool) -> String {
         isChunked ? "" : sourceText
     }
@@ -154,7 +171,12 @@ struct TranscriptRenderPlan: Equatable, Sendable {
         // Paragraph-local assistant prose is safe to split while it streams.
         // Existing chunk identities stay put as the tail grows, so SwiftUI only
         // has to remeasure the live tail instead of one ever-growing row.
-        let chunks = seed.isChunkable && !seed.hasMedia
+        let chunks = TranscriptChunkRenderPolicy.shouldVirtualize(
+            text: seed.text,
+            isChunkable: seed.isChunkable,
+            hasMedia: seed.hasMedia,
+            streaming: streaming
+        )
             ? WorkspaceTranscriptChunker.chunks(seed.text, identity: seed.id)
             : [seed.text]
         return templates(seed: seed, chunks: chunks, streaming: streaming)

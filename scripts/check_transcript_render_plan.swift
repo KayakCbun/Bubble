@@ -92,6 +92,28 @@ private enum TranscriptRenderPlanCheck {
             "only the terminal chunk invalidates for streaming presentation"
         )
         let streamingIDs = streaming.units.map(\.id)
+
+        // Mirrors the restored 2.3 KB usage/benchmark answer that previously
+        // became four separately clipped NSHostingView rows. Ordinary
+        // completed prose should stay one semantic row; chunking is reserved
+        // for genuinely large completed output and active streaming tails.
+        let ordinaryCompletedText = Array(
+            repeating: String(repeating: "usage benchmark tool context ", count: 12),
+            count: 8
+        ).joined(separator: "\n\n")
+        let ordinaryCompleted = TranscriptRenderPlan.build(
+            seeds: [TranscriptRenderSeed(
+                id: "ordinary-completed",
+                kind: .assistant,
+                text: ordinaryCompletedText
+            )],
+            branchSourceID: nil,
+            streamingSeedIDs: []
+        )
+        expect(
+            ordinaryCompleted.units.count == 1,
+            "ordinary completed prose stays one host instead of creating visible chunk seams"
+        )
         var grownSeeds = Array(seeds.suffix(2))
         grownSeeds[grownSeeds.count - 1].text += "\n\nA newly streamed tail paragraph."
         let grownStreaming = TranscriptRenderPlan.build(
