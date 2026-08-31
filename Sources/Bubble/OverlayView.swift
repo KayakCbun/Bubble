@@ -2684,17 +2684,15 @@ struct OverlayView: View {
             && ConversationBranchControlsPolicy.showsAssistantBranchAction(
                 hasSourceEntry: item.sourceEntryId != nil,
                 isStreaming: false
-            )
+        )
         return VStack(alignment: .leading, spacing: 8) {
             if isTerminalChunk, let names = item.imageNames, !names.isEmpty {
                 assistantImageGrid(names)
             }
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                MessageBody(text: text, streaming: live, virtualizedChunk: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                if live {
-                    RunningSweepLabel()
-                }
+            MessageBody(text: text, streaming: live, virtualizedChunk: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if live {
+                RunningSweepLabel()
             }
             if let completeText, !completeText.isEmpty {
                 HStack(alignment: .center, spacing: 0) {

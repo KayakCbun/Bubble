@@ -115,6 +115,19 @@ private enum RunningSweepLayoutCheck {
         } else {
             failures.append("running sweep implementation remains discoverable")
         }
+        if let chunkStart = overlaySource.range(of: "private func assistantChunkRow"),
+           let chunkEnd = overlaySource.range(
+               of: "private func assistantImageGrid",
+               range: chunkStart.upperBound..<overlaySource.endIndex
+           ) {
+            let implementation = overlaySource[chunkStart.lowerBound..<chunkEnd.lowerBound]
+            expect(
+                !implementation.contains(".firstTextBaseline"),
+                "completed virtual chunks do not shift multi-block Markdown against a baseline container"
+            )
+        } else {
+            failures.append("assistant chunk implementation remains discoverable")
+        }
 
         if failures.isEmpty {
             print("PASS: running sweep layout")
