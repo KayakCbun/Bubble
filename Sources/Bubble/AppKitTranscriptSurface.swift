@@ -483,6 +483,9 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
     private var viewportReportQueued = false
     private var lastViewportReportUptime: TimeInterval = -.greatestFiniteMagnitude
     private var lastUserScrollUptime: TimeInterval = -.greatestFiniteMagnitude
+    private var awaitsPhaseLessWheelBounds = false
+    private var phaseLessWheelGeneration: UInt64 = 0
+    private var phaseLessWheelFallbackWorkItem: DispatchWorkItem?
     private var settledMeasurementWorkItem: DispatchWorkItem?
     private var settledMeasurementGeneration: UInt64 = 0
     private var overscanRefillQueued = false
@@ -538,10 +541,11 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
 
         scrollView.drawsBackground = false
         scrollView.borderType = .noBorder
-        scrollView.hasVerticalScroller = true
+        // The transcript historically hid its SwiftUI scroll indicators.
+        // Keep the AppKit surface visually quiet as well; wheel, trackpad,
+        // keyboard, and programmatic scrolling do not require a scroller.
+        scrollView.hasVerticalScroller = false
         scrollView.hasHorizontalScroller = false
-        scrollView.autohidesScrollers = true
-        scrollView.scrollerStyle = .overlay
         scrollView.verticalScrollElasticity = .allowed
         scrollView.contentView.postsBoundsChangedNotifications = true
         scrollView.onUserScroll = { [weak self] event in
@@ -570,13 +574,22 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
             // direct mouse-wheel input therefore mounts rows without waiting
             // for a measurement pass or a display-linked animation.
             guard let self else { return }
+            let userDrivenPhaseLessWheel = self.awaitsPhaseLessWheelBounds
+            if userDrivenPhaseLessWheel {
+                self.awaitsPhaseLessWheelBounds = false
+                self.phaseLessWheelGeneration &+= 1
+                self.phaseLessWheelFallbackWorkItem?.cancel()
+                self.phaseLessWheelFallbackWorkItem = nil
+            }
             self.layoutViewportNow()
             // Bounds changes are deliberately neutral.  Window resizing,
             // elastic settling, and measurement clamps all arrive through
             // this path too; only `scrollWheel(with:)` calls userDidScroll()
             // and reports userDriven=true.
             let atEnd = self.isAtEnd
-            if self.lastNeutralAtEnd != atEnd {
+            if userDrivenPhaseLessWheel {
+                self.onViewportChanged?(atEnd, true)
+            } else if self.lastNeutralAtEnd != atEnd {
                 self.lastNeutralAtEnd = atEnd
                 self.onViewportChanged?(atEnd, false)
             }
@@ -586,6 +599,7 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
 
     deinit {
         settledMeasurementWorkItem?.cancel()
+        phaseLessWheelFallbackWorkItem?.cancel()
         if let clipBoundsObserver {
             NotificationCenter.default.removeObserver(clipBoundsObserver)
         }
@@ -1141,8 +1155,31 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
         userDidScroll(event: nil)
     }
 
-    private func userDidScroll(event: NSEvent?) {
+    func userDidScroll(event: NSEvent?) {
         let now = ProcessInfo.processInfo.systemUptime
+        if let event,
+           event.hasPreciseScrollingDeltas,
+           event.phase.isEmpty,
+           event.momentumPhase.isEmpty,
+           abs(event.scrollingDeltaY) > 0.01 {
+            awaitsPhaseLessWheelBounds = true
+            phaseLessWheelGeneration &+= 1
+            let generation = phaseLessWheelGeneration
+            phaseLessWheelFallbackWorkItem?.cancel()
+            let fallback = DispatchWorkItem { [weak self] in
+                guard let self,
+                      self.awaitsPhaseLessWheelBounds,
+                      self.phaseLessWheelGeneration == generation else { return }
+                self.awaitsPhaseLessWheelBounds = false
+                self.phaseLessWheelFallbackWorkItem = nil
+                self.onViewportChanged?(self.isAtEnd, true)
+            }
+            phaseLessWheelFallbackWorkItem = fallback
+            // Physical evidence on the affected mouse showed the first native
+            // bounds commit arriving about 67 ms after the packet. A boundary
+            // event may never move bounds, so settle its end state explicitly.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: fallback)
+        }
         let phaseBegan = event?.phase == .began || event?.momentumPhase == .began
         if phaseBegan || now - lastUserScrollUptime > 0.35 {
             onUserScrollSequenceStarted?()
@@ -1162,7 +1199,7 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
         // The pre-wheel callback already reported the detached state. Only
         // publish a second user-driven transition when the applied delta
         // actually reaches the tail and following must resume.
-        if isAtEnd {
+        if !awaitsPhaseLessWheelBounds, isAtEnd {
             onViewportChanged?(true, true)
         }
         scheduleSettledMeasurements()

@@ -107,6 +107,18 @@ private func upwardLineWheelEvent() -> NSEvent? {
     return NSEvent(cgEvent: cgEvent)
 }
 
+private func phaseLessPreciseWheelEvent() -> NSEvent? {
+    guard let cgEvent = CGEvent(
+        scrollWheelEvent2Source: nil,
+        units: .pixel,
+        wheelCount: 1,
+        wheel1: 24,
+        wheel2: 0,
+        wheel3: 0
+    ) else { return nil }
+    return NSEvent(cgEvent: cgEvent)
+}
+
 @main
 private enum AppKitTranscriptSurfaceCheck {
     static func main() {
@@ -144,6 +156,10 @@ private enum AppKitTranscriptSurfaceCheck {
             overscan: 40,
             maximumMountedRows: 18,
             maximumReusableHosts: 24
+        )
+        expect(
+            !adapter.scrollView.hasVerticalScroller,
+            "the transcript keeps its historical hidden-scroll-indicator appearance"
         )
         adapter.setViewportSize(NSSize(width: 480, height: 120))
         adapter.setContentOffset(y: 300)
@@ -704,6 +720,48 @@ private enum AppKitTranscriptSurfaceCheck {
             adapter.scrollView.lastLocalWheelHandlerDuration >= 0,
             "the production local monitor reports finite app-owned work"
         )
+
+        // A precise mouse packet without AppKit phase metadata is applied by
+        // NSScrollView asynchronously. The immediate post-super callback must
+        // not report that the user is still at the end and re-arm following
+        // before the native bounds transaction commits.
+        if let preciseWheel = phaseLessPreciseWheelEvent() {
+            adapter.scrollToEnd()
+            var phaseLessReports: [Bool] = []
+            adapter.onViewportChanged = { atEnd, userDriven in
+                if userDriven { phaseLessReports.append(atEnd) }
+            }
+            adapter.userDidScroll(event: preciseWheel)
+            adapter.userScrollDidApply()
+            expect(
+                phaseLessReports == [false],
+                "phase-less precise wheel stays detached until native bounds commit"
+            )
+            let tailOffset = adapter.contentOffsetY
+            adapter.setContentOffset(y: max(0, tailOffset - 24))
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01))
+            expect(
+                phaseLessReports == [false, false],
+                "the native bounds commit completes the phase-less wheel as detached"
+            )
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.14))
+            expect(
+                phaseLessReports == [false, false],
+                "the cancelled phase-less fallback cannot re-arm following"
+            )
+
+            adapter.scrollToEnd()
+            phaseLessReports.removeAll()
+            adapter.userDidScroll(event: preciseWheel)
+            adapter.userScrollDidApply()
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.14))
+            expect(
+                phaseLessReports == [false, true],
+                "a phase-less boundary packet settles back to the tail when bounds never move"
+            )
+        } else {
+            failures.append("phase-less precise wheel fixture is available")
+        }
 
         finish()
     }
