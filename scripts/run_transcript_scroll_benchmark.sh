@@ -101,6 +101,7 @@ fi
 benchmark_env=(
   HOME="$BENCH_HOME"
   CFFIXED_USER_HOME="$BENCH_HOME"
+  BUBBLE_HOME_OVERRIDE="$BENCH_HOME"
   BUBBLE_SCROLL_DIAGNOSTICS="$diagnostics_mode"
   BUBBLE_SCROLL_DIAGNOSTIC_STEP="$SCROLL_STEP"
 )
@@ -279,6 +280,28 @@ fi
 if [[ "$MODE" == "mount-audit" ]]; then
   blank_samples="$(sed -E 's/.* blankSamples=([0-9]+).*/\1/' <<<"$benchmark_line")"
   longest_blank_streak="$(sed -E 's/.* longestBlankStreak=([0-9]+).*/\1/' <<<"$benchmark_line")"
+  content_overflows="$(sed -nE 's/.* contentOverflows=([0-9]+).*/\1/p' <<<"$benchmark_line")"
+  if [[ -z "$content_overflows" ]]; then
+    echo "FAIL: mount audit did not report transcript content overflow" >&2
+    echo "$benchmark_line" >&2
+    exit 1
+  fi
+  if (( content_overflows > 0 )); then
+    echo "FAIL: mount audit found $content_overflows transcript rows drawing outside their indexed frames" >&2
+    echo "$benchmark_line" >&2
+    exit 1
+  fi
+  settled_height_mismatches="$(sed -nE 's/.* settledHeightMismatches=([0-9]+).*/\1/p' <<<"$benchmark_line")"
+  if [[ -z "$settled_height_mismatches" ]]; then
+    echo "FAIL: mount audit did not report settled transcript height mismatches" >&2
+    echo "$benchmark_line" >&2
+    exit 1
+  fi
+  if (( settled_height_mismatches > 0 )); then
+    echo "FAIL: mount audit retained $settled_height_mismatches clipped transcript rows after settling" >&2
+    echo "$benchmark_line" >&2
+    exit 1
+  fi
   if (( blank_samples > MAX_JUMP_BLANK_SAMPLES || longest_blank_streak > MAX_JUMP_BLANK_STREAK )); then
     echo "FAIL: synthetic jumps found $blank_samples blank samples with a longest streak of $longest_blank_streak" >&2
     echo "$benchmark_line" >&2
@@ -292,7 +315,7 @@ if [[ "$MODE" == "mount-audit" ]]; then
   fi
   coverage_mismatches="$(sed -E 's/.* coverageMismatches=([0-9]+).*/\1/' <<<"$benchmark_line")"
   if (( coverage_mismatches > 0 )); then
-    echo "FAIL: history indicator coverage disagreed with live mounted rows in $coverage_mismatches samples" >&2
+    echo "FAIL: mounted transcript rows left viewport coverage gaps in $coverage_mismatches samples" >&2
     echo "$benchmark_line" >&2
     exit 1
   fi

@@ -10,7 +10,12 @@ enum OverlayPaths {
     static let appName = "Bubble"
 
     static var home: URL {
-        URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+        if let override = ProcessInfo.processInfo.environment["BUBBLE_HOME_OVERRIDE"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !override.isEmpty {
+            return URL(fileURLWithPath: override, isDirectory: true).standardizedFileURL
+        }
+        return URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
     }
 
     static var root: URL {

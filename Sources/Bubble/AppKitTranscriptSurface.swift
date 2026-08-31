@@ -69,6 +69,7 @@ class AppKitTranscriptRowHost: NSView {
         self.reuseKey = key
         super.init(frame: .zero)
         wantsLayer = true
+        layer?.masksToBounds = true
         fallbackLabel.font = NSFont.systemFont(ofSize: 14)
         fallbackLabel.lineBreakMode = .byWordWrapping
         fallbackLabel.maximumNumberOfLines = 0
@@ -105,6 +106,15 @@ class AppKitTranscriptRowHost: NSView {
         guard !fallbackLabel.isHidden else { return NSSize(width: NSView.noIntrinsicMetric, height: 0) }
         return NSSize(width: NSView.noIntrinsicMetric, height: max(1, fitting.height + 16))
     }
+
+    /// The content's preferred height at the host's current width. Rich hosts
+    /// override this with their renderer-backed fitting measurement.
+    var preferredContentHeight: CGFloat { intrinsicContentSize.height }
+
+    /// True when a visible host must reconcile its frame before painting.
+    /// Newly mounted hosts are measured regardless; this hook also covers an
+    /// overscan host that became dirty before it entered the viewport.
+    var needsImmediateContentMeasurement: Bool { false }
 }
 
 /// A Fenwick-backed height index.  Prefix offsets and row lookup stay
@@ -402,6 +412,9 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
     private var userDetachedFromLatest = false
     private var widthBucket: Int = 0
     private var lastVisibleRowIDs: Set<String> = []
+    /// Tracks the previous viewport's semantic rows so an already-mounted
+    /// overscan host is measured on the exact pass where it becomes visible.
+    private var immediatelyMeasuredVisibleRowIDs: Set<String> = []
     private var lastNeutralAtEnd: Bool?
     private var viewportReportQueued = false
     private var lastViewportReportUptime: TimeInterval = -.greatestFiniteMagnitude
@@ -409,6 +422,12 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
     private var settledMeasurementWorkItem: DispatchWorkItem?
     private var settledMeasurementGeneration: UInt64 = 0
     private var overscanRefillQueued = false
+    /// A visible row must not paint with its producer estimate while its rich
+    /// host is waiting for AppKit's next layout pass. Measurements discovered
+    /// while synchronously laying out a mount are collected here and committed
+    /// as one height-index batch, keeping the input-to-visible path bounded.
+    private var synchronousVisibleMeasurementDepth = 0
+    private var pendingVisibleMeasurements: [String: CGFloat] = [:]
     private(set) var metrics = AppKitTranscriptSurfaceMetrics()
 
     let scrollView: AppKitTranscriptScrollView
@@ -518,7 +537,61 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
     var currentHandle: TranscriptSessionHandle { state.currentHandle }
     var mountedRowIDs: [String] { mounted.keys.sorted() }
     var reusableHostCount: Int { reusableHostsByKey.count }
+    var contentOverflowDiagnostics: (count: Int, maximum: CGFloat) {
+        // Masked row hosts cannot paint into adjacent rows. Keep this metric
+        // about actual visual overlap; the separate mismatch metric below
+        // verifies that clipping is only a transient safety boundary.
+        contentHeightDiagnostics(includeMaskedHosts: false)
+    }
+    var contentHeightMismatchDiagnostics: (count: Int, maximum: CGFloat) {
+        contentHeightDiagnostics(includeMaskedHosts: true)
+    }
+
+    private func contentHeightDiagnostics(
+        includeMaskedHosts: Bool
+    ) -> (count: Int, maximum: CGFloat) {
+        var count = 0
+        var maximum: CGFloat = 0
+        let viewport = scrollView.contentView.bounds
+        for cell in mounted.values
+        where !cell.host.isHidden && cell.host.frame.intersects(viewport) {
+            if !includeMaskedHosts, cell.host.layer?.masksToBounds == true {
+                continue
+            }
+            let contentHeight = cell.host.preferredContentHeight
+            guard contentHeight.isFinite, contentHeight > cell.host.bounds.height + 1 else { continue }
+            count += 1
+            maximum = max(maximum, contentHeight - cell.host.bounds.height)
+        }
+        return (count, maximum)
+    }
     var currentHeightIndex: TranscriptHeightIndex { heightIndex }
+    var visibleMountedRowIDs: [String] {
+        let viewport = scrollView.contentView.bounds
+        return mounted.compactMap { rowID, cell in
+            !cell.host.isHidden && cell.host.frame.intersects(viewport) ? rowID : nil
+        }
+    }
+    var visibleCoverageGap: CGFloat {
+        let viewport = scrollView.contentView.bounds
+        guard viewport.height > 0 else { return 0 }
+        let intervals = mounted.values.compactMap { cell -> ClosedRange<CGFloat>? in
+            guard !cell.host.isHidden, cell.host.frame.intersects(viewport) else { return nil }
+            return max(viewport.minY, cell.host.frame.minY)...min(viewport.maxY, cell.host.frame.maxY)
+        }.sorted { $0.lowerBound < $1.lowerBound }
+        var cursor = viewport.minY
+        var gap: CGFloat = 0
+        for interval in intervals {
+            if interval.lowerBound > cursor {
+                gap += interval.lowerBound - cursor
+            }
+            cursor = max(cursor, interval.upperBound)
+        }
+        if cursor < viewport.maxY {
+            gap += viewport.maxY - cursor
+        }
+        return gap
+    }
     var isUserScrollActive: Bool {
         ProcessInfo.processInfo.systemUptime - lastUserScrollUptime <= 0.35
     }
@@ -643,6 +716,20 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
     @discardableResult
     func updateMeasuredHeight(rowID: String, height: CGFloat) -> Bool {
         guard let index = rowIndexByID[rowID], snapshot.rows.indices.contains(index) else { return false }
+        if synchronousVisibleMeasurementDepth > 0 {
+            let current = heightIndex.height(at: index) ?? 1
+            pendingVisibleMeasurements[rowID] = height
+            return abs(current - height) > 0.5
+        }
+        return commitMeasuredHeight(rowID: rowID, height: height)
+    }
+
+    /// Commits one measured row outside the synchronous first-mount batch.
+    /// Keeping the existing anchor/follow behavior here preserves the normal
+    /// asynchronous intrinsic-size callback semantics.
+    @discardableResult
+    private func commitMeasuredHeight(rowID: String, height: CGFloat) -> Bool {
+        guard let index = rowIndexByID[rowID], snapshot.rows.indices.contains(index) else { return false }
         let anchor = currentVisibleAnchor()
         let row = snapshot.rows[index]
         heightCache.insert(height, for: layoutCacheKey(for: row))
@@ -664,6 +751,61 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
         return true
     }
 
+    /// Flushes intrinsic heights collected while newly mounted visible hosts
+    /// were laid out. The update is intentionally one Fenwick batch followed
+    /// by one document/frame reposition, rather than recursively re-entering
+    /// `relayoutNow()` once per host callback.
+    private func commitPendingVisibleMeasurements() -> Bool {
+        guard !pendingVisibleMeasurements.isEmpty else { return false }
+        let pending = pendingVisibleMeasurements
+        pendingVisibleMeasurements.removeAll(keepingCapacity: true)
+        var heightChanged = false
+        for (rowID, height) in pending {
+            guard let index = rowIndexByID[rowID], snapshot.rows.indices.contains(index) else { continue }
+            let row = snapshot.rows[index]
+            heightCache.insert(height, for: layoutCacheKey(for: row))
+            if heightIndex.update(index: index, height: height) != 0 {
+                metrics.recordHeightIndexPointUpdate()
+                heightChanged = true
+            }
+        }
+        guard heightChanged else { return false }
+        updateDocumentFrame()
+        // The caller is already in a bounded mount/layout pass. Reposition the
+        // mounted window directly instead of recursively entering relayoutNow.
+        updateMountedFramesWithoutMounting()
+        if followsLatest {
+            scrollToEnd()
+        }
+        return true
+    }
+
+    /// Forces AppKit to lay out each newly mounted visible host and samples its
+    /// intrinsic content height before the frame is exposed to the user. Rich
+    /// Overlay hosts may also invoke `updateMeasuredHeight` from their layout;
+    /// the depth guard above coalesces those callbacks into the same batch.
+    private func synchronouslyMeasureVisibleMounts(
+        _ mounts: [(rowID: String, host: AppKitTranscriptRowHost)]
+    ) -> Bool {
+        guard !mounts.isEmpty else { return false }
+        synchronousVisibleMeasurementDepth += 1
+        for mount in mounts {
+            guard mounted[mount.rowID]?.host === mount.host else { continue }
+            mount.host.layoutSubtreeIfNeeded()
+            let measured = mount.host.preferredContentHeight
+            guard measured.isFinite, measured > 0 else { continue }
+            pendingVisibleMeasurements[mount.rowID] = measured
+        }
+        synchronousVisibleMeasurementDepth -= 1
+        // These measurements belong only to rows intersecting the current
+        // viewport. Changing their heights cannot move their top offsets, so
+        // preserving the clip origin is the stable anchor. Calling restore()
+        // here would mutate bounds while layoutViewportNow() is guarded by
+        // `layingOut`, dropping the resulting remount pass and exposing a
+        // blank viewport for one frame.
+        return commitPendingVisibleMeasurements()
+    }
+
     @discardableResult
     func apply(_ command: TranscriptSurfaceCommand) -> [TranscriptSurfaceEvent] {
         // Streaming token updates carry the affected row identity. Handle
@@ -681,6 +823,7 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
         if case .replace = command.kind,
            (oldSnapshot.session.sessionID != state.snapshot.session.sessionID
                 || oldSnapshot.session.generation != state.snapshot.session.generation) {
+            immediatelyMeasuredVisibleRowIDs.removeAll(keepingCapacity: true)
             for (id, cell) in Array(mounted) {
                 unmount(id: id, cell: cell)
             }
@@ -1175,7 +1318,8 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
         repositionExisting: Bool = true,
         mountNewOverscanRows: Bool = true,
         maximumNewMounts: Int? = nil,
-        maximumDuration: TimeInterval? = nil
+        maximumDuration: TimeInterval? = nil,
+        convergenceDepth: Int = 0
     ) -> Int {
         guard document != nil else { return 0 }
         let started = ProcessInfo.processInfo.systemUptime
@@ -1192,6 +1336,9 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
             overscan: 0
         )
         let visibleIndices = Set(visibleRange)
+        let visibleRowIDs = Set(visibleRange.compactMap { index in
+            snapshot.rows.indices.contains(index) ? snapshot.rows[index].id : nil
+        })
         var targetIndices = Array(overscanRange)
         if targetIndices.count > maximumMountedRows {
             let center = viewport.midY
@@ -1204,6 +1351,7 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
         let targetIDs = Set(targetIndices.compactMap { index in
             snapshot.rows.indices.contains(index) ? snapshot.rows[index].id : nil
         })
+        var newlyMountedVisibleHosts: [(rowID: String, host: AppKitTranscriptRowHost)] = []
 
         let staleIDs = mounted.keys.filter { !targetIDs.contains($0) }
         for id in staleIDs {
@@ -1234,6 +1382,11 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
                 } else {
                     if repositionExisting {
                         position(cell.host, at: index)
+                    }
+                    if visibleIndices.contains(index),
+                       (!immediatelyMeasuredVisibleRowIDs.contains(row.id)
+                            || cell.host.needsImmediateContentMeasurement) {
+                        newlyMountedVisibleHosts.append((rowID: row.id, host: cell.host))
                     }
                     continue
                 }
@@ -1269,7 +1422,26 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
             mounted[row.id] = AppKitTranscriptMountedCell(key: key, host: host)
             metrics.recordMount(count: 1, peak: mounted.count, reused: reused)
             mountedRows += 1
+            if visibleIndices.contains(index) {
+                newlyMountedVisibleHosts.append((rowID: row.id, host: host))
+            }
         }
+        let visibleHeightsChanged = synchronouslyMeasureVisibleMounts(newlyMountedVisibleHosts)
+        if visibleHeightsChanged, convergenceDepth < 4 {
+            // A row that measured shorter than its estimate can expose rows
+            // below the old visible range. Recompute and fill that range now;
+            // cap convergence so pathological renderer feedback cannot turn a
+            // viewport pass into unbounded recursive layout.
+            mountedRows += updateMountedFrames(
+                repositionExisting: true,
+                mountNewOverscanRows: false,
+                maximumNewMounts: nil,
+                maximumDuration: nil,
+                convergenceDepth: convergenceDepth + 1
+            )
+            return mountedRows
+        }
+        immediatelyMeasuredVisibleRowIDs = visibleRowIDs
         if repositionExisting {
             updateMountedFramesWithoutMounting()
         }

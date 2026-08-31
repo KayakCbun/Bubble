@@ -4544,10 +4544,7 @@ private final class OverlayTranscriptRowHost: AppKitTranscriptRowHost {
         // subclass independent of the base class's private label.
         subviews.first?.isHidden = true
         hostingView.translatesAutoresizingMaskIntoConstraints = true
-        // The transcript adapter owns every cell frame and height. Prevent
-        // NSHostingView from feeding intrinsic/min/max size changes back into
-        // the panel's AppKit layout cycle after each pooled root swap.
-        hostingView.sizingOptions = []
+        hostingView.sizingOptions = TranscriptHostingSizingPolicy.options
         hostingView.appearance = NSApp.effectiveAppearance
         addSubview(hostingView)
         measurementObserver = NotificationCenter.default.addObserver(
@@ -4616,6 +4613,14 @@ private final class OverlayTranscriptRowHost: AppKitTranscriptRowHost {
             height: max(1, fitting.height.isFinite ? fitting.height : 1)
         )
     }
+
+    override var preferredContentHeight: CGFloat {
+        intrinsicContentSize.height
+    }
+
+    override var needsImmediateContentMeasurement: Bool {
+        measurementDirty || abs(bounds.width - lastMeasuredWidth) > 0.5
+    }
 }
 
 private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
@@ -4644,6 +4649,25 @@ private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
         private var lastLeadingInset: CGFloat?
         var lastCommandToken: UInt64 = 0
         var lastSurfaceSignal: UInt64?
+
+        private final class DirectMountAuditState {
+            let sampleCount = 120
+            let startY: CGFloat
+            let direction: CGFloat
+            let stepSize: CGFloat = 96
+            var step = 0
+            var blankSamples = 0
+            var currentBlankStreak = 0
+            var longestBlankStreak = 0
+            var coverageMismatches = 0
+            var contentOverflows = 0
+            var maximumOverflow: CGFloat = 0
+
+            init(adapter: AppKitTranscriptSurfaceAdapter) {
+                startY = adapter.contentOffsetY
+                direction = startY > adapter.currentHeightIndex.totalHeight / 2 ? -1 : 1
+            }
+        }
 
         init(snapshot: TranscriptSurfaceSnapshot) {
             let box = OverlayTranscriptRenderBox()
@@ -4901,55 +4925,93 @@ private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
                   ProcessInfo.processInfo.environment["BUBBLE_SCROLL_DIAGNOSTICS"] == "mount-audit",
                   adapter.snapshot.rows.count > 100 else { return }
             directMountAuditStarted = true
-            // 120 evenly spaced jumps still covers the entire 600-turn
-            // document. Using one jump per turn spends most of the 60-second
-            // gate constructing intentionally discarded rich hosts rather
-            // than auditing viewport coverage.
-            let sampleCount = 120
-            var step = 0
-            var blankSamples = 0
-            var currentBlankStreak = 0
-            var longestBlankStreak = 0
-            let timer = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] timer in
-                guard let self else { timer.invalidate(); return }
-                let maximumY = max(
+            // Audit two seconds of accelerated continuous motion through a
+            // 600-turn document. Full-document jumps every frame measure cold
+            // random-access construction, not a scroll interaction a user can
+            // produce; reveal/navigation has its own settled-anchor audit.
+            let state = DirectMountAuditState(adapter: adapter)
+            // Sample once per 60 Hz presentation frame. Inspecting immediately
+            // after setBoundsOrigin (or twice per frame) observes AppKit's
+            // pre-layout state rather than anything the user can see.
+            let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] timer in
+                self?.runDirectMountAuditFrame(timer: timer, state: state)
+            }
+            directMountAuditTimer = timer
+            RunLoop.main.add(timer, forMode: .common)
+        }
+
+        private func sampleDirectMountAuditFrame(_ state: DirectMountAuditState) {
+            if adapter.visibleMountedRowIDs.isEmpty {
+                state.blankSamples += 1
+                state.currentBlankStreak += 1
+                state.longestBlankStreak = max(state.longestBlankStreak, state.currentBlankStreak)
+            } else {
+                state.currentBlankStreak = 0
+            }
+            if adapter.visibleCoverageGap > 1 {
+                state.coverageMismatches += 1
+            }
+            let overflow = adapter.contentOverflowDiagnostics
+            state.contentOverflows += overflow.count
+            state.maximumOverflow = max(state.maximumOverflow, overflow.maximum)
+        }
+
+        private func runDirectMountAuditFrame(timer: Timer, state: DirectMountAuditState) {
+            guard state.step < state.sampleCount else {
+                sampleDirectMountAuditFrame(state)
+                timer.invalidate()
+                directMountAuditTimer = nil
+                finishDirectMountAuditAfterSettling(state)
+                return
+            }
+            if state.step > 0 {
+                sampleDirectMountAuditFrame(state)
+            }
+            let maximumY = max(
+                0,
+                adapter.currentHeightIndex.totalHeight - adapter.scrollView.contentView.bounds.height
+            )
+            adapter.userDidScroll()
+            adapter.setContentOffset(y: min(
+                maximumY,
+                max(0, state.startY + state.direction * CGFloat(state.step) * state.stepSize)
+            ))
+            adapter.userScrollDidApply()
+            state.step += 1
+        }
+
+        private func finishDirectMountAuditAfterSettling(_ state: DirectMountAuditState) {
+            // Rich text can publish one final intrinsic-size update on the
+            // next AppKit pass. Audit the stable viewport, not the timer
+            // callback that happened to enqueue that last measurement.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                guard let self else { return }
+                let stableMaximumY = max(
                     0,
                     self.adapter.currentHeightIndex.totalHeight
                         - self.adapter.scrollView.contentView.bounds.height
                 )
-                if step < sampleCount {
-                    let progress = CGFloat(step) / CGFloat(max(1, sampleCount - 1))
-                    self.adapter.setContentOffset(y: maximumY * progress)
-                    if self.adapter.visibleRowIDs.isEmpty {
-                        blankSamples += 1
-                        currentBlankStreak += 1
-                        longestBlankStreak = max(longestBlankStreak, currentBlankStreak)
-                    } else {
-                        currentBlankStreak = 0
-                    }
-                    step += 1
-                    return
-                }
-                timer.invalidate()
-                self.directMountAuditTimer = nil
                 let settledY = self.adapter.contentOffsetY
-                self.adapter.setContentOffset(y: min(maximumY, settledY + 80))
+                self.adapter.setContentOffset(y: min(stableMaximumY, settledY + 80))
                 self.adapter.setContentOffset(y: settledY)
                 let anchorError = abs(self.adapter.contentOffsetY - settledY)
+                let settledMismatch = self.adapter.contentHeightMismatchDiagnostics
                 OverlayLog.write(String(
-                    format: "transcript mount audit samples=%d anchors=%d peakAnchors=%d blankSamples=%d longestBlankStreak=%d coverageMismatches=%d documentHeight=%.0f anchorError=%.2f",
-                    sampleCount,
+                    format: "transcript mount audit samples=%d anchors=%d peakAnchors=%d blankSamples=%d longestBlankStreak=%d coverageMismatches=%d contentOverflows=%d maximumOverflow=%.2f settledHeightMismatches=%d maximumSettledMismatch=%.2f documentHeight=%.0f anchorError=%.2f",
+                    state.sampleCount,
                     self.adapter.mountedRowIDs.count,
                     self.adapter.metrics.mountedPeak,
-                    blankSamples,
-                    longestBlankStreak,
-                    0,
+                    state.blankSamples,
+                    state.longestBlankStreak,
+                    state.coverageMismatches,
+                    state.contentOverflows,
+                    state.maximumOverflow,
+                    settledMismatch.count,
+                    settledMismatch.maximum,
                     self.adapter.currentHeightIndex.totalHeight,
                     anchorError
                 ))
             }
-            directMountAuditTimer = timer
-            RunLoop.main.add(timer, forMode: .common)
         }
     }
 

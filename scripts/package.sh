@@ -23,6 +23,12 @@ swiftc -O -parse-as-library \
   -o /tmp/bubble-check-workspace-render-perf
 /tmp/bubble-check-workspace-render-perf
 
+swiftc -parse-as-library -framework AppKit -framework SwiftUI \
+  Sources/Bubble/TranscriptHostingSizingPolicy.swift \
+  scripts/check_hosting_view_sizing.swift \
+  -o /tmp/bubble-check-hosting-view-sizing
+/tmp/bubble-check-hosting-view-sizing
+
 swiftc -O -parse-as-library \
   Sources/Bubble/WorkspaceTranscriptRenderPlan.swift \
   Sources/Bubble/TranscriptRenderPlan.swift \

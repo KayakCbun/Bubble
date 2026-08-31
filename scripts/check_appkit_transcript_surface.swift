@@ -26,6 +26,29 @@ private func row(
     )
 }
 
+/// A host whose rich content is taller than the producer estimate.  This
+/// models a freshly mounted SwiftUI row before its asynchronous intrinsic-size
+/// callback has run; the adapter must synchronously reconcile the visible
+/// frame before exposing it to the viewport.
+private final class FirstMountMeasurementHost: AppKitTranscriptRowHost {
+    private let measuredHeight: CGFloat
+    private let requiresImmediateMeasurement: Bool
+
+    init(
+        row: TranscriptRowSnapshot,
+        key: AppKitTranscriptRowReuseKey,
+        measuredHeight: CGFloat,
+        requiresImmediateMeasurement: Bool = false
+    ) {
+        self.measuredHeight = measuredHeight
+        self.requiresImmediateMeasurement = requiresImmediateMeasurement
+        super.init(row: row, key: key)
+    }
+
+    override var preferredContentHeight: CGFloat { measuredHeight }
+    override var needsImmediateContentMeasurement: Bool { requiresImmediateMeasurement }
+}
+
 private func assertNear(
     _ actual: CGFloat,
     _ expected: CGFloat,
@@ -88,6 +111,111 @@ private enum AppKitTranscriptSurfaceCheck {
         expect(!adapter.mountedRowIDs.contains("row-239"), "offscreen rows are not mounted")
         expect(adapter.metrics.mountedPeak <= 18, "mounted peak respects the configured bound")
         expect(adapter.visibleRowIDs.count < 18, "visible row lookup stays independent of long-session row count")
+
+        // A newly mounted rich host can report an intrinsic height larger than
+        // its producer estimate. The first visible mount must commit that
+        // height before the row is painted; otherwise the following row is
+        // drawn on top of the overflowing content (the reported regression).
+        let firstMountRow = row("first-mount", height: 24, text: "short estimate")
+        let firstMountAdapter = AppKitTranscriptSurfaceAdapter(
+            snapshot: TranscriptSurfaceSnapshot(
+                session: session,
+                rows: [],
+                followsLatest: false
+            ),
+            overscan: 0,
+            maximumMountedRows: 1,
+            maximumReusableHosts: 0,
+            renderer: { row, key in
+                FirstMountMeasurementHost(row: row, key: key, measuredHeight: 220)
+            }
+        )
+        firstMountAdapter.setViewportSize(NSSize(width: 480, height: 120))
+        _ = firstMountAdapter.apply(.replace(snapshot: TranscriptSurfaceSnapshot(
+            session: session,
+            rows: [firstMountRow],
+            followsLatest: false
+        )))
+        expect(
+            firstMountAdapter.currentHeightIndex.height(at: 0) == 220,
+            "new visible host commits its intrinsic height before painting"
+        )
+        expect(
+            firstMountAdapter.contentHeightMismatchDiagnostics.count == 0,
+            "new visible host cannot draw outside its indexed frame"
+        )
+
+        let overscanRows = [
+            row("overscan-leading", height: 300),
+            row("overscan-entering", height: 24, text: "underestimated rich row")
+        ]
+        let overscanAdapter = AppKitTranscriptSurfaceAdapter(
+            snapshot: TranscriptSurfaceSnapshot(
+                session: session,
+                rows: overscanRows,
+                followsLatest: false
+            ),
+            overscan: 400,
+            maximumMountedRows: 2,
+            maximumReusableHosts: 0,
+            renderer: { row, key in
+                FirstMountMeasurementHost(
+                    row: row,
+                    key: key,
+                    measuredHeight: row.id == "overscan-entering" ? 220 : row.estimatedHeight
+                )
+            }
+        )
+        overscanAdapter.setViewportSize(NSSize(width: 480, height: 120))
+        expect(
+            overscanAdapter.currentHeightIndex.height(at: 1) == 24,
+            "offscreen overscan host keeps its estimate until it becomes visible"
+        )
+        overscanAdapter.setContentOffset(y: 204)
+        expect(
+            overscanAdapter.currentHeightIndex.height(at: 1) == 220,
+            "dirty overscan host is measured synchronously when it enters the viewport"
+        )
+        expect(
+            overscanAdapter.contentHeightMismatchDiagnostics.count == 0,
+            "overscan host cannot overlap after entering the viewport"
+        )
+
+        let shrinkingRows = [
+            row("shrinking-leading", height: 600),
+            row("revealed-after-shrink", height: 80)
+        ]
+        let shrinkingAdapter = AppKitTranscriptSurfaceAdapter(
+            snapshot: TranscriptSurfaceSnapshot(
+                session: session,
+                rows: shrinkingRows,
+                followsLatest: false
+            ),
+            overscan: 0,
+            maximumMountedRows: 2,
+            maximumReusableHosts: 0,
+            renderer: { row, key in
+                FirstMountMeasurementHost(
+                    row: row,
+                    key: key,
+                    measuredHeight: row.id == "shrinking-leading" ? 100 : row.estimatedHeight,
+                    requiresImmediateMeasurement: row.id == "shrinking-leading"
+                )
+            }
+        )
+        shrinkingAdapter.setViewportSize(NSSize(width: 480, height: 120))
+        expect(
+            shrinkingAdapter.currentHeightIndex.height(at: 0) == 100,
+            "visible overestimate shrinks to its measured height"
+        )
+        expect(
+            shrinkingAdapter.mountedRowIDs.contains("revealed-after-shrink"),
+            "height shrink converges and mounts the newly exposed bottom row"
+        )
+        expect(
+            !shrinkingAdapter.visibleMountedRowIDs.isEmpty,
+            "height shrink leaves the viewport physically covered"
+        )
 
         guard let stableID = adapter.mountedRowIDs.dropFirst(adapter.mountedRowIDs.count / 2).first,
               let stableHost = adapter.hostObjectID(rowID: stableID) else {
@@ -355,6 +483,11 @@ private enum AppKitTranscriptSurfaceCheck {
         // Line-based mouse wheels bypass AppKit's delayed smoothing and move
         // the production viewport in the same event. Trackpads still carry
         // precise deltas and remain on AppKit's native momentum path.
+        let discreteWheelMaximumY = max(
+            0,
+            adapter.currentHeightIndex.totalHeight - adapter.scrollView.contentView.bounds.height
+        )
+        adapter.setContentOffset(y: discreteWheelMaximumY / 2)
         if let cgEvent = CGEvent(
             scrollWheelEvent2Source: nil,
             units: .line,
