@@ -4475,7 +4475,9 @@ private final class OverlayTranscriptRowHost: AppKitTranscriptRowHost {
         self.rootFactory = rootFactory
         self.onMeasuredHeight = onMeasuredHeight
         self.shouldMeasure = shouldMeasure
-        self.hostingController = NSHostingController(rootView: rootFactory(row))
+        self.hostingController = NSHostingController(
+            rootView: TranscriptHostingSizingPolicy.root(rootFactory(row))
+        )
         super.init(row: row, key: key)
 
         // The base host retains a plain-text fallback for deterministic
@@ -4484,6 +4486,8 @@ private final class OverlayTranscriptRowHost: AppKitTranscriptRowHost {
         // subclass independent of the base class's private label.
         subviews.first?.isHidden = true
         hostingView.translatesAutoresizingMaskIntoConstraints = true
+        hostingView.frame = bounds
+        hostingView.autoresizingMask = TranscriptHostingSizingPolicy.autoresizingMask
         hostingController.sizingOptions = TranscriptHostingSizingPolicy.options
         hostingView.appearance = NSApp.effectiveAppearance
         addSubview(hostingView)
@@ -4509,7 +4513,7 @@ private final class OverlayTranscriptRowHost: AppKitTranscriptRowHost {
     override func configure(row: TranscriptRowSnapshot, key: AppKitTranscriptRowReuseKey) {
         super.configure(row: row, key: key)
         subviews.first?.isHidden = true
-        hostingController.rootView = rootFactory(row)
+        hostingController.rootView = TranscriptHostingSizingPolicy.root(rootFactory(row))
         hostingView.appearance = NSApp.effectiveAppearance
         lastMeasuredHeight = -.greatestFiniteMagnitude
         lastMeasuredWidth = -.greatestFiniteMagnitude
@@ -4523,7 +4527,7 @@ private final class OverlayTranscriptRowHost: AppKitTranscriptRowHost {
         // Drop the old SwiftUI tree while this pooled cell is detached.  This
         // releases images, Markdown storage, and store-capturing closures
         // across session switches instead of retaining up to 144 stale rows.
-        hostingController.rootView = AnyView(EmptyView())
+        hostingController.rootView = TranscriptHostingSizingPolicy.root(EmptyView())
         lastMeasuredHeight = -.greatestFiniteMagnitude
         lastMeasuredWidth = -.greatestFiniteMagnitude
         measurementDirty = true
@@ -4547,6 +4551,11 @@ private final class OverlayTranscriptRowHost: AppKitTranscriptRowHost {
         guard abs(measuredHeight - lastMeasuredHeight) > 0.5 else { return }
         lastMeasuredHeight = measuredHeight
         onMeasuredHeight(row.id, measuredHeight)
+        // The callback synchronously updates the height index and can resize
+        // this host before this layout pass returns. Refit immediately as a
+        // deterministic fallback in addition to the autoresizing mask.
+        hostingView.frame = bounds
+        hostingView.layoutSubtreeIfNeeded()
     }
 
     override var intrinsicContentSize: NSSize {

@@ -49,7 +49,83 @@ private enum HostingViewSizingCheck {
             fputs("FAIL: block transcript host unconstrained height is \(unconstrainedHeight)\n", stderr)
             exit(1)
         }
+        let disclosureController = NSHostingController(
+            rootView: TranscriptHostingSizingPolicy.root(
+                AnyView(
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Thoughts")
+                    HStack(alignment: .top, spacing: 10) {
+                        Capsule().frame(width: 2)
+                        LazyVStack(alignment: .leading, spacing: 0) {
+                            Text("Expanded reasoning content")
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                )
+            )
+        )
+        disclosureController.sizingOptions = TranscriptHostingSizingPolicy.options
+        disclosureController.view.frame = NSRect(x: 0, y: 0, width: 520, height: 42)
+        disclosureController.view.layoutSubtreeIfNeeded()
+        let disclosureHeight = TranscriptHostingSizingPolicy.contentHeight(
+            of: disclosureController,
+            width: 520
+        )
+        guard disclosureHeight < 1_000 else {
+            fputs("FAIL: expanded disclosure host height is \(disclosureHeight)\n", stderr)
+            exit(1)
+        }
+        let toolOutput = Array(
+            repeating: "tool output line with enough content to exercise wrapping",
+            count: 140
+        ).joined(separator: "\n")
+        let toolController = NSHostingController(
+            rootView: TranscriptHostingSizingPolicy.root(
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Tool bash")
+                    HStack(alignment: .top, spacing: 10) {
+                        Capsule().frame(width: 2)
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Output")
+                            Text(toolOutput)
+                                .font(.system(size: 12, design: .monospaced))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            )
+        )
+        toolController.sizingOptions = TranscriptHostingSizingPolicy.options
+        toolController.view.frame = NSRect(x: 0, y: 0, width: 520, height: 42)
+        toolController.view.layoutSubtreeIfNeeded()
+        let toolHeight = TranscriptHostingSizingPolicy.contentHeight(
+            of: toolController,
+            width: 520
+        )
+        guard toolHeight > 2_000, toolHeight < 5_000 else {
+            fputs("FAIL: expanded tool host height is \(toolHeight)\n", stderr)
+            exit(1)
+        }
+        let rowContainer = NSView(frame: NSRect(x: 0, y: 0, width: 520, height: 42))
+        toolController.view.frame = rowContainer.bounds
+        toolController.view.autoresizingMask = TranscriptHostingSizingPolicy.autoresizingMask
+        rowContainer.addSubview(toolController.view)
+        rowContainer.setFrameSize(NSSize(width: 520, height: toolHeight))
+        guard abs(toolController.view.frame.height - toolHeight) < 0.5 else {
+            fputs(
+                "FAIL: expanded tool surface stayed at collapsed height "
+                    + "\(toolController.view.frame.height) instead of \(toolHeight)\n",
+                stderr
+            )
+            exit(1)
+        }
         print("PASS: multiline transcript host fitting height is \(height)")
         print("PASS: block transcript host unconstrained height is \(unconstrainedHeight)")
+        print("PASS: expanded disclosure host height is \(disclosureHeight)")
+        print("PASS: expanded tool host height is \(toolHeight)")
+        print("PASS: expanded tool surface follows its AppKit row height")
     }
 }
