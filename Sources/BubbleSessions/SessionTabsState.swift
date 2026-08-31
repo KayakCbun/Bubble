@@ -363,6 +363,7 @@ public struct SessionTabLayoutMetrics: Equatable, Sendable {
     public var collapsedWidth: CGFloat
     public var expandedWidth: CGFloat
     public var height: CGFloat
+    /// Negative spacing overlaps tabs into a stacked folder strip.
     public var spacing: CGFloat
     public var topOffset: CGFloat
     public var cornerRadius: CGFloat
@@ -384,10 +385,10 @@ public struct SessionTabLayoutMetrics: Equatable, Sendable {
     }
 
     public static let bubble = SessionTabLayoutMetrics(
-        collapsedWidth: 32,
-        expandedWidth: 36,
-        height: 40,
-        spacing: 0,
+        collapsedWidth: 22,
+        expandedWidth: 26,
+        height: 42,
+        spacing: -10,
         topOffset: 20,
         cornerRadius: 10
     )
@@ -428,12 +429,15 @@ public enum SessionTabLayout {
         trailingX: CGFloat,
         metrics: SessionTabLayoutMetrics = .bubble
     ) -> Int? {
-        hitRegions(
-            count: count,
-            transcriptOriginY: transcriptOriginY,
-            trailingX: trailingX,
-            metrics: metrics
-        ).firstIndex(where: { $0.contains(point) })
+        frontmostIndex(
+            in: hitRegions(
+                count: count,
+                transcriptOriginY: transcriptOriginY,
+                trailingX: trailingX,
+                metrics: metrics
+            ),
+            containing: point
+        )
     }
 
     public static func target(
@@ -443,15 +447,24 @@ public enum SessionTabLayout {
         trailingX: CGFloat,
         metrics: SessionTabLayoutMetrics = .bubble
     ) -> SessionTabHitTarget? {
-        let regions = hitRegions(
+        guard let index = index(
+            at: point,
             count: count,
             transcriptOriginY: transcriptOriginY,
             trailingX: trailingX,
             metrics: metrics
-        )
-        guard let index = regions.firstIndex(where: { $0.contains(point) }) else {
+        ) else {
             return nil
         }
         return .select(index: index)
+    }
+
+    /// Later tabs paint over earlier ones. A click in the overlap belongs to
+    /// the front (later) folder, matching the stacked divider silhouette.
+    public static func frontmostIndex(
+        in regions: [CGRect],
+        containing point: CGPoint
+    ) -> Int? {
+        regions.indices.reversed().first { regions[$0].contains(point) }
     }
 }
