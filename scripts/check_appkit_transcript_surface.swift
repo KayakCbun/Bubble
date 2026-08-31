@@ -49,6 +49,27 @@ private final class FirstMountMeasurementHost: AppKitTranscriptRowHost {
     override var needsImmediateContentMeasurement: Bool { requiresImmediateMeasurement }
 }
 
+/// Models a restored NSHostingView whose first fitting pass still reflects
+/// the previous/empty SwiftUI transaction. The rich content settles on the
+/// next run-loop turn and must be explicitly remeasured even without wheel
+/// input; otherwise historical rows remain permanently clipped.
+private final class RestoredSessionMeasurementHost: AppKitTranscriptRowHost {
+    private let settledHeight: CGFloat
+    private var measuredHeight: CGFloat
+
+    init(row: TranscriptRowSnapshot, key: AppKitTranscriptRowReuseKey, settledHeight: CGFloat) {
+        self.settledHeight = settledHeight
+        self.measuredHeight = row.estimatedHeight
+        super.init(row: row, key: key)
+    }
+
+    override var preferredContentHeight: CGFloat { measuredHeight }
+
+    override func invalidateContentMeasurement() {
+        measuredHeight = settledHeight
+    }
+}
+
 /// A window-addressed event lets the focused harness pass through
 /// `NSApplication.sendEvent` and the production local event monitor without
 /// requiring accessibility permission or posting a global HID event.
@@ -200,6 +221,36 @@ private enum AppKitTranscriptSurfaceCheck {
         expect(
             firstMountAdapter.contentHeightMismatchDiagnostics.count == 0,
             "new visible host cannot draw outside its indexed frame"
+        )
+
+        let restoredRows = [
+            row("restored-tool", height: 24, text: "historical tool"),
+            row("restored-answer", height: 24, text: "historical answer")
+        ]
+        let restoredAdapter = AppKitTranscriptSurfaceAdapter(
+            snapshot: TranscriptSurfaceSnapshot(session: session, rows: [], followsLatest: false),
+            overscan: 0,
+            maximumMountedRows: 2,
+            maximumReusableHosts: 0,
+            renderer: { row, key in
+                RestoredSessionMeasurementHost(row: row, key: key, settledHeight: 96)
+            }
+        )
+        restoredAdapter.setViewportSize(NSSize(width: 480, height: 120))
+        _ = restoredAdapter.apply(.replace(snapshot: TranscriptSurfaceSnapshot(
+            session: session,
+            rows: restoredRows,
+            followsLatest: false
+        )))
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.08))
+        expect(
+            restoredAdapter.currentHeightIndex.height(at: 0) == 96
+                && restoredAdapter.currentHeightIndex.height(at: 1) == 96,
+            "restored historical tool and answer rows remeasure after SwiftUI settles"
+        )
+        expect(
+            restoredAdapter.contentHeightMismatchDiagnostics.count == 0,
+            "restored historical rows cannot remain clipped after the first fitting pass"
         )
 
         let overscanRows = [

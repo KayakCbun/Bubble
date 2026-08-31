@@ -4563,6 +4563,13 @@ private final class OverlayTranscriptRowHost: AppKitTranscriptRowHost {
     override var needsImmediateContentMeasurement: Bool {
         measurementDirty || abs(bounds.width - lastMeasuredWidth) > 0.5
     }
+
+    override func invalidateContentMeasurement() {
+        measurementDirty = true
+        hostingView.invalidateIntrinsicContentSize()
+        hostingView.needsLayout = true
+        needsLayout = true
+    }
 }
 
 private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
@@ -5200,45 +5207,129 @@ private struct InputCaret: View {
     }
 }
 
-struct RunningSweepLabel: View {
+struct RunningSweepLabel: NSViewRepresentable {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    var body: some View {
-        Group {
-            if reduceMotion {
-                Text("running")
-                    .foregroundStyle(Color.secondary.opacity(0.72))
-            } else {
-                TimelineView(
-                    .animation(minimumInterval: RunningSweepPolicy.minimumFrameInterval)
-                ) { context in
-                    let center = RunningSweepPolicy.highlightCenter(
-                        at: context.date.timeIntervalSinceReferenceDate
-                    )
-                    Text("running")
-                        .foregroundStyle(
-                            LinearGradient(
-                                colors: [
-                                    Color.secondary.opacity(0.34),
-                                    Color.primary.opacity(0.84),
-                                    Color.secondary.opacity(0.34),
-                                ],
-                                startPoint: UnitPoint(
-                                    x: center - RunningSweepPolicy.highlightRadius,
-                                    y: 0.5
-                                ),
-                                endPoint: UnitPoint(
-                                    x: center + RunningSweepPolicy.highlightRadius,
-                                    y: 0.5
-                                )
-                            )
-                        )
-                }
-            }
+    func makeNSView(context: Context) -> RunningSweepNSView {
+        RunningSweepNSView(reduceMotion: reduceMotion)
+    }
+
+    func updateNSView(_ view: RunningSweepNSView, context: Context) {
+        view.configure(reduceMotion: reduceMotion)
+    }
+
+    func sizeThatFits(
+        _ proposal: ProposedViewSize,
+        nsView: RunningSweepNSView,
+        context: Context
+    ) -> CGSize {
+        nsView.intrinsicContentSize
+    }
+}
+
+final class RunningSweepNSView: NSView {
+    private static let text = "running"
+    private static let font = NSFont.systemFont(ofSize: 11, weight: .medium)
+    private static let textSize: NSSize = {
+        let measured = (text as NSString).size(withAttributes: [.font: font])
+        return NSSize(width: ceil(measured.width), height: ceil(measured.height))
+    }()
+
+    private let clippedTextLayer = CALayer()
+    private let gradientLayer = CAGradientLayer()
+    private let textMaskLayer = CATextLayer()
+    private var reduceMotion: Bool
+
+    init(reduceMotion: Bool) {
+        self.reduceMotion = reduceMotion
+        super.init(frame: NSRect(origin: .zero, size: Self.textSize))
+        wantsLayer = true
+        setContentHuggingPriority(.required, for: .horizontal)
+        setContentHuggingPriority(.required, for: .vertical)
+        setContentCompressionResistancePriority(.required, for: .horizontal)
+        setContentCompressionResistancePriority(.required, for: .vertical)
+        setAccessibilityElement(true)
+        setAccessibilityRole(.progressIndicator)
+        setAccessibilityLabel("Running")
+
+        textMaskLayer.string = Self.text
+        textMaskLayer.font = Self.font.fontName as CFTypeRef
+        textMaskLayer.fontSize = Self.font.pointSize
+        textMaskLayer.alignmentMode = .left
+        textMaskLayer.truncationMode = .none
+        clippedTextLayer.mask = textMaskLayer
+        clippedTextLayer.addSublayer(gradientLayer)
+        layer?.addSublayer(clippedTextLayer)
+        updateColors()
+        applyMotion()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { nil }
+
+    override var intrinsicContentSize: NSSize { Self.textSize }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        clippedTextLayer.frame = bounds
+        textMaskLayer.frame = clippedTextLayer.bounds
+        textMaskLayer.contentsScale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+        gradientLayer.bounds = NSRect(x: 0, y: 0, width: max(bounds.width * 1.8, 1), height: bounds.height)
+        if gradientLayer.animation(forKey: "running-sweep") == nil {
+            gradientLayer.position = CGPoint(x: bounds.midX, y: bounds.midY)
+        } else {
+            gradientLayer.position.y = bounds.midY
         }
-        .font(.system(size: 11, weight: .medium))
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Running")
+        CATransaction.commit()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        needsLayout = true
+        if window != nil, !reduceMotion, gradientLayer.animation(forKey: "running-sweep") == nil {
+            applyMotion()
+        }
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateColors()
+    }
+
+    func configure(reduceMotion: Bool) {
+        guard self.reduceMotion != reduceMotion else { return }
+        self.reduceMotion = reduceMotion
+        applyMotion()
+    }
+
+    private func updateColors() {
+        let base = NSColor.secondaryLabelColor.withAlphaComponent(0.38).cgColor
+        let highlight = NSColor.labelColor.withAlphaComponent(0.88).cgColor
+        gradientLayer.colors = reduceMotion
+            ? [NSColor.secondaryLabelColor.withAlphaComponent(0.72).cgColor,
+               NSColor.secondaryLabelColor.withAlphaComponent(0.72).cgColor]
+            : [base, base, highlight, base, base]
+        gradientLayer.locations = reduceMotion ? [0, 1] : [0, 0.36, 0.5, 0.64, 1]
+    }
+
+    private func applyMotion() {
+        gradientLayer.removeAnimation(forKey: "running-sweep")
+        updateColors()
+        guard !reduceMotion else {
+            gradientLayer.position = CGPoint(x: bounds.midX, y: bounds.midY)
+            return
+        }
+        let width = max(Self.textSize.width, 1)
+        let animation = CABasicAnimation(keyPath: "position.x")
+        animation.fromValue = -width * 0.45
+        animation.toValue = width * 1.45
+        animation.duration = RunningSweepPolicy.cycleDuration
+        animation.repeatCount = .infinity
+        animation.timingFunction = CAMediaTimingFunction(name: .linear)
+        animation.isRemovedOnCompletion = false
+        gradientLayer.add(animation, forKey: "running-sweep")
     }
 }
 

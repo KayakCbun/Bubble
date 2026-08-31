@@ -122,6 +122,11 @@ class AppKitTranscriptRowHost: NSView {
     /// Newly mounted hosts are measured regardless; this hook also covers an
     /// overscan host that became dirty before it entered the viewport.
     var needsImmediateContentMeasurement: Bool { false }
+
+    /// Marks renderer-owned intrinsic content dirty before a deferred
+    /// reconciliation pass. Plain AppKit fallback rows have no delayed
+    /// renderer transaction, so their default implementation is a no-op.
+    func invalidateContentMeasurement() {}
 }
 
 /// A Fenwick-backed height index.  Prefix offsets and row lookup stay
@@ -956,6 +961,13 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
         } else if let anchor, command.anchorPolicy != .followLatest {
             restore(anchor)
         }
+        if case .replace = command.kind {
+            // Restored NSHostingViews can return the previous/empty fitting
+            // height during their first synchronous SwiftUI transaction.
+            // Confirm visible rows on the next run-loop turn so historical
+            // sessions cannot retain that stale height indefinitely.
+            scheduleSettledMeasurements(after: 0)
+        }
         return events
     }
 
@@ -1205,7 +1217,7 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
         scheduleSettledMeasurements()
     }
 
-    private func scheduleSettledMeasurements() {
+    private func scheduleSettledMeasurements(after delay: TimeInterval = 0.36) {
         settledMeasurementWorkItem?.cancel()
         settledMeasurementGeneration &+= 1
         let generation = settledMeasurementGeneration
@@ -1217,12 +1229,12 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
                 return
             }
             self.measureSettledRows(
-                Array(self.mounted.keys),
+                self.visibleMountedRowIDs,
                 generation: generation
             )
         }
         settledMeasurementWorkItem = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.36, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(0, delay), execute: work)
     }
 
     private func measureSettledRows(_ rowIDs: [String], generation: UInt64) {
@@ -1230,11 +1242,12 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
               !isUserScrollActive,
               !rowIDs.isEmpty else { return }
         let batch = rowIDs.prefix(4)
-        for rowID in batch {
-            mounted[rowID]?.host.needsLayout = true
+        let hosts = batch.compactMap { rowID -> (rowID: String, host: AppKitTranscriptRowHost)? in
+            guard let host = mounted[rowID]?.host else { return nil }
+            host.invalidateContentMeasurement()
+            return (rowID: rowID, host: host)
         }
-        document.needsLayout = true
-        document.layoutSubtreeIfNeeded()
+        _ = synchronouslyMeasureVisibleMounts(hosts)
         let remaining = Array(rowIDs.dropFirst(batch.count))
         guard !remaining.isEmpty else { return }
         DispatchQueue.main.async { [weak self] in
