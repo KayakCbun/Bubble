@@ -50,4 +50,8 @@ _Avoid_: job, task queue
 The main-transcript object for one workspace run. It displays the brief. Opening it reveals only that run's anchored turn and output in the workspace session.
 _Avoid_: subagent card, nested tool group
 
+**Loop**:
+A repeating task bound to one Bubble session. Created with `/loop` or `loop_create`. Hide keeps it firing; closing or quitting the session pauses it; `/resume` that session re-arms it. Ticks wait for the current turn and queued user follow-ups, then fire one due loop as a user-shaped model message rendered as a 定时触发 strip.
+_Avoid_: cron job, alarm, pi-loop
+
 Main sessions persist in `~/.bubble/session-id`. Conversation branch selections persist separately per session so a read-only branch switch survives relaunch.

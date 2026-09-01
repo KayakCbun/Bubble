@@ -91,6 +91,10 @@ enum OverlayPaths {
         root.appendingPathComponent("session-tabs.json")
     }
 
+    static var loopsFile: URL {
+        root.appendingPathComponent("loops.json")
+    }
+
     static var transcriptFile: URL {
         root.appendingPathComponent("transcript.json")
     }

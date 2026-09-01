@@ -125,6 +125,9 @@ swift run SessionTabsChecks
 swiftc -parse-as-library Sources/Bubble/MessageDelivery.swift scripts/check_message_delivery.swift -o /tmp/bubble-check-message-delivery
 /tmp/bubble-check-message-delivery
 
+swiftc -parse-as-library Sources/BubbleSessions/SessionLoops.swift scripts/check_session_loops.swift -o /tmp/bubble-check-session-loops
+/tmp/bubble-check-session-loops
+
 swiftc -parse-as-library Sources/Bubble/PreviewFiles.swift scripts/check_file_preview.swift -o /tmp/bubble-check-file-preview
 /tmp/bubble-check-file-preview
 

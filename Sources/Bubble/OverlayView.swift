@@ -211,12 +211,25 @@ struct OverlayView: View {
                         }
                     }
                     .overlay(alignment: .topTrailing) {
-                        HStack(spacing: 2) {
-                            TranscriptPinButton(pinned: store.overlayPinned) {
-                                store.toggleOverlayPin()
+                        VStack(alignment: .trailing, spacing: 6) {
+                            HStack(spacing: 2) {
+                                if store.hasArmedLoops {
+                                    TranscriptLoopButton(
+                                        due: store.sessionLoops.contains(where: \.due),
+                                        presented: store.loopListPresented
+                                    ) {
+                                        store.toggleLoopList()
+                                    }
+                                }
+                                TranscriptPinButton(pinned: store.overlayPinned) {
+                                    store.toggleOverlayPin()
+                                }
+                                TranscriptWidthButton(wide: store.transcriptWide) {
+                                    onToggleWidth()
+                                }
                             }
-                            TranscriptWidthButton(wide: store.transcriptWide) {
-                                onToggleWidth()
+                            if store.loopListPresented {
+                                SessionLoopListCard(store: store)
                             }
                         }
                         .padding(.trailing, 6)
@@ -1057,6 +1070,7 @@ struct OverlayView: View {
             interactionDisabled: store.isBusy || store.childBusy || store.isSwitchingBranch,
             lastTurnDurationBucket: Int(max(0, store.lastTurnDuration).rounded()),
             resumeSessionID: store.resumeDestination.prompt?.sessionID,
+            loopCloseIntent: store.loopClosePrompt.map { "\($0.intent)-\($0.count)" },
             queuedCount: store.queuedMessages.count,
             queuedLastID: store.queuedMessages.last?.id.uuidString,
             queuedLastText: store.queuedMessages.last?.text
@@ -1341,10 +1355,13 @@ struct OverlayView: View {
         let fingerprint = mutableLiveRow
             ? "\(row.id)-live-r\(store.transcriptRevision)-branch\(row.isAfterBranchPoint)-start\(row.startsAfterBranchPoint)"
             : "\(String(describing: mainRowRenderKey(row)))-branch\(row.isAfterBranchPoint)-start\(row.startsAfterBranchPoint)"
-        let estimatedHeight = mutableLiveRow
+        var estimatedHeight = mutableLiveRow
             ? transcriptSurfaceEntryStore.record(id: row.id)?.source.snapshot.estimatedHeight
                 ?? appKitTranscriptEstimatedHeight(row.text)
             : appKitTranscriptEstimatedHeight(row.text)
+        if case .message(let item) = row.source, item.loopId != nil {
+            estimatedHeight += 22
+        }
         return OverlayTranscriptSurfaceEntry(
             snapshot: appKitTranscriptSnapshot(
                 id: row.id,
@@ -1478,6 +1495,25 @@ struct OverlayView: View {
                     AnyView(ResumeDestinationCard(
                         prompt: prompt,
                         choose: store.resolveResumeDestination
+                    ))
+                }
+            ))
+        }
+        if let prompt = store.loopClosePrompt {
+            entries.append(OverlayTranscriptSurfaceEntry(
+                snapshot: appKitTranscriptSnapshot(
+                    id: "loop-close",
+                    kind: .system,
+                    text: prompt.message,
+                    estimatedHeight: 92,
+                    fingerprint: "\(prompt.intent)-\(prompt.count)",
+                    isCompleted: false
+                ),
+                render: { [self] in
+                    AnyView(SessionLoopCloseCard(
+                        prompt: prompt,
+                        confirm: { store.resolveLoopClosePrompt(true) },
+                        cancel: { store.resolveLoopClosePrompt(false) }
                     ))
                 }
             ))
@@ -2314,6 +2350,7 @@ struct OverlayView: View {
                 imagePlacements: item.assistantImagePlacements,
                 workspaceStatus: item.workspaceStatus,
                 workspaceSummary: item.workspaceSummary,
+                loopLabel: item.loopLabel,
                 live: store.streamingAssistantId == item.id
                     || store.streamingThoughtId == item.id
                     || store.workspacePaneStreamingAssistantId == item.id
@@ -2334,6 +2371,7 @@ struct OverlayView: View {
                 imagePlacements: nil,
                 workspaceStatus: nil,
                 workspaceSummary: nil,
+                loopLabel: nil,
                 live: false,
                 selected: false,
                 interactionDisabled: store.isBusy || store.childBusy || store.isSwitchingBranch
@@ -2351,6 +2389,7 @@ struct OverlayView: View {
                 imagePlacements: nil,
                 workspaceStatus: nil,
                 workspaceSummary: nil,
+                loopLabel: nil,
                 live: false,
                 selected: false,
                 interactionDisabled: store.isBusy || store.childBusy || store.isSwitchingBranch
@@ -2442,7 +2481,11 @@ struct OverlayView: View {
         case .message(let item):
             switch item.kind {
             case .user:
-                userBubble(item, interactive: interactive)
+                if item.loopId != nil {
+                    loopTriggerStrip(item)
+                } else {
+                    userBubble(item, interactive: interactive)
+                }
             case .assistant:
                 assistantBubble(item, interactive: interactive)
             case .thought:
@@ -2498,6 +2541,40 @@ struct OverlayView: View {
                 .fill(OverlaySurface.hairline)
                 .frame(height: 0.5)
         }
+    }
+
+    private func loopTriggerStrip(_ item: ChatItem) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 6) {
+                Image(systemName: "clock")
+                    .font(.system(size: 10, weight: .semibold))
+                Text("定时触发")
+                if let label = item.loopLabel, !label.isEmpty {
+                    Text("·")
+                    Text(label)
+                }
+            }
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(.tertiary)
+            Text(item.text)
+                .font(.system(size: OverlayMetrics.fontSize - 1))
+                .foregroundStyle(.secondary)
+                .lineSpacing(OverlaySurface.proseLineSpacing - 1)
+                .multilineTextAlignment(.leading)
+                .bubbleTextSelection()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.primary.opacity(0.035))
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(OverlaySurface.hairline, lineWidth: 1)
+        }
+        .accessibilityLabel("定时触发 \(item.loopLabel ?? "") \(item.text)")
     }
 
     private func userBubble(_ item: ChatItem, interactive: Bool = true) -> some View {
@@ -3943,6 +4020,153 @@ private struct ResumeDestinationButton: View {
     }
 }
 
+private struct TranscriptLoopButton: View {
+    var due: Bool
+    var presented: Bool
+    var onToggle: () -> Void
+
+    @State private var hovered = false
+
+    var body: some View {
+        Button(action: onToggle) {
+            Image(systemName: due ? "clock.badge.exclamationmark" : "clock")
+                .font(.system(size: 11, weight: .semibold))
+                .frame(width: 28, height: 28)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .opacity(presented || due || hovered ? 1 : 0.55)
+        .animation(OverlayMotion.quick, value: hovered)
+        .animation(OverlayMotion.quick, value: presented)
+        .onHover { hovered = $0 }
+        .help(presented ? "收起定时" : "定时")
+        .accessibilityLabel(presented ? "收起定时列表" : "打开定时列表")
+    }
+}
+
+private struct SessionLoopListCard: View {
+    @Bindable var store: ChatStore
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("定时")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+            ForEach(store.sessionLoops) { loop in
+                SessionLoopListRow(
+                    loop: loop,
+                    pendingDelete: store.pendingLoopDeleteID == loop.id,
+                    due: loop.due,
+                    isBusy: store.isBusy || store.childBusy,
+                    confirm: { store.confirmLoopDelete(loop.id) },
+                    cancel: store.cancelLoopDelete,
+                    requestDelete: { store.requestLoopDelete(loop.id) }
+                )
+            }
+        }
+        .padding(12)
+        .frame(width: 280, alignment: .leading)
+        .background {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(OverlaySurface.userCardFill.opacity(0.96))
+                .shadow(color: .black.opacity(0.18), radius: 16, y: 8)
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+        }
+    }
+}
+
+private struct SessionLoopListRow: View {
+    let loop: SessionLoop
+    let pendingDelete: Bool
+    let due: Bool
+    let isBusy: Bool
+    let confirm: () -> Void
+    let cancel: () -> Void
+    let requestDelete: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(loop.title)
+                        .font(.system(size: 12.5, weight: .medium))
+                        .foregroundStyle(.primary)
+                        .lineLimit(2)
+                    Text(due
+                         ? SessionLoopPolicy.pendingStatus(isBusy: isBusy, hasQueuedUserFollowUp: false)
+                         : SessionLoopPolicy.intervalLabel(loop.schedule))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                }
+                Spacer(minLength: 8)
+                if pendingDelete {
+                    Button("确认", action: confirm)
+                        .buttonStyle(.plain)
+                        .font(.system(size: 11, weight: .semibold))
+                    Button("取消", action: cancel)
+                        .buttonStyle(.plain)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                } else {
+                    Button("停止", action: requestDelete)
+                        .buttonStyle(.plain)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(loop.title) \(SessionLoopPolicy.intervalLabel(loop.schedule))")
+    }
+}
+
+private struct SessionLoopCloseCard: View {
+    let prompt: SessionLoopClosePrompt
+    let confirm: () -> Void
+    let cancel: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(prompt.title)
+                    .font(.system(size: 13, weight: .semibold))
+                Text(prompt.message)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+            }
+            HStack(spacing: 8) {
+                ResumeDestinationButton(
+                    title: prompt.confirmTitle,
+                    symbol: "clock.badge.xmark",
+                    emphasized: true,
+                    action: confirm
+                )
+                Button("取消", action: cancel)
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 6)
+                    .contentShape(Rectangle())
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: 500, alignment: .leading)
+        .background {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(OverlaySurface.userCardFill.opacity(0.82))
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(OverlaySurface.hairline, lineWidth: 1)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(prompt.message)
+    }
+}
+
 private struct TranscriptPinButton: View {
     var pinned: Bool
     var onToggle: () -> Void
@@ -4002,6 +4226,7 @@ private struct RowRenderKey: Equatable {
     var imagePlacements: [AssistantImagePlacement]?
     var workspaceStatus: String?
     var workspaceSummary: String?
+    var loopLabel: String?
     var live: Bool
     var selected: Bool
     var interactionDisabled: Bool
@@ -4404,6 +4629,7 @@ private struct OverlayTranscriptStructureKey: Equatable {
     let interactionDisabled: Bool
     let lastTurnDurationBucket: Int
     let resumeSessionID: String?
+    let loopCloseIntent: String?
     let queuedCount: Int
     let queuedLastID: String?
     let queuedLastText: String?

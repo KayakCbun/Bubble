@@ -141,13 +141,19 @@ enum BubbleConfig {
 
     Skills or the workspace extension not loading usually means this workspace is untrusted. `~/.pi/agent/trust.json` must include `~/.bubble/workspace`. Logs are `~/.bubble/overlay.log`.
 
-    Overlay-local commands: `/clear`, `/new`, `/model`, `/thinking`, `/agents`, `/open`, `/mounts`, `/clipboard`, `/quit`. `/skill:name`, `/compact`, and the rest go to Pi.
+    Overlay-local commands: `/clear`, `/new`, `/loop`, `/model`, `/thinking`, `/agents`, `/open`, `/mounts`, `/clipboard`, `/quit`. `/skill:name`, `/compact`, and the rest go to Pi.
     """
 
     static let controlsSection = """
     ## Bubble controls
 
-    You know how to control Bubble itself. When the user explicitly asks in natural language, call `bubble_action` instead of telling them to type a slash command. Its actions are: \(BubbleNativeAction.toolActionList). Use `mount_workspace` and `unmount_workspace` for direct mount changes, and `workspace_run` for work inside a mount.
+    You know how to control Bubble itself. When the user explicitly asks in natural language, call `bubble_action` instead of telling them to type a slash command. Its actions are: \(BubbleNativeAction.toolActionList). Use `mount_workspace` and `unmount_workspace` for direct mount changes, and `workspace_run` for work inside a mount. For repeating work in this conversation, call `loop_create` / `loop_list` / `loop_delete`. Do not poll, sleep, or call the same tool in a loop yourself.
+    """
+
+    static let loopSection = """
+    ## Loops
+
+    The user can ask you to repeat a task in this conversation, such as checking a deploy every few minutes. Call `loop_create` with an interval (`5m`, `1h`) or a daily time (`09:00`). Call `loop_list` and `loop_delete` to inspect or stop loops. Loops belong to this session: they pause when the session closes and continue when it is opened again. Do not fake a loop by calling tools over and over in one turn.
     """
 
     static let defaultAgentsMarkdown = """
@@ -168,6 +174,8 @@ enum BubbleConfig {
     \(piSection)
 
     \(controlsSection)
+
+    \(loopSection)
     """
 
     static func load() -> BubbleSettings {
@@ -227,6 +235,11 @@ enum BubbleConfig {
             heading: "## Bubble controls",
             contains: "call `bubble_action`",
             body: controlsSection
+        )
+        ensureNamedSection(
+            heading: "## Loops",
+            contains: "loop_create",
+            body: loopSection
         )
     }
 
@@ -570,6 +583,48 @@ export default function (pi: ExtensionAPI) {
     }),
     async execute(_id, params) {
       return textResult("unmount_workspace", params as Record<string, unknown>);
+    },
+  });
+
+  pi.registerTool({
+    name: "loop_create",
+    label: "Create Loop",
+    description: "Create a repeating task bound to this Bubble session. Use when the user wants something done every N minutes/hours or every day at a clock time. Intervals below one minute are raised to one minute. At most 8 loops per session.",
+    promptGuidelines: [
+      "Use this instead of polling, sleeping, or calling the same tool repeatedly.",
+      "Prefer 5m / 1h intervals or a daily HH:mm time.",
+      "The loop stays in this conversation and pauses if the session is closed.",
+    ],
+    parameters: Type.Object({
+      prompt: Type.String({ description: "Task to run each time" }),
+      interval: Type.Optional(Type.String({ description: "e.g. 5m, 1h" })),
+      time: Type.Optional(Type.String({ description: "Daily time, e.g. 09:00" })),
+      title: Type.Optional(Type.String({ description: "Short label" })),
+    }),
+    async execute(_id, params) {
+      return textResult("loop_create", params as Record<string, unknown>);
+    },
+  });
+
+  pi.registerTool({
+    name: "loop_list",
+    label: "List Loops",
+    description: "List repeating tasks in this Bubble session.",
+    parameters: Type.Object({}),
+    async execute() {
+      return textResult("loop_list", {});
+    },
+  });
+
+  pi.registerTool({
+    name: "loop_delete",
+    label: "Delete Loop",
+    description: "Stop a repeating task in this Bubble session.",
+    parameters: Type.Object({
+      id: Type.String({ description: "Loop id from loop_list" }),
+    }),
+    async execute(_id, params) {
+      return textResult("loop_delete", params as Record<string, unknown>);
     },
   });
 }

@@ -14,6 +14,7 @@ final class SessionTabsStore {
 
     var onSelectionChanged: ((ChatStore, ChatStore) -> Void)?
     var onRuntimeCreated: ((ChatStore) -> Void)?
+    var onLoopsChanged: (() -> Void)?
 
     init() {
         if let snapshot = Self.loadSessionTabs(),
@@ -261,6 +262,9 @@ final class SessionTabsStore {
         }
         runtime.onActivityChanged = { [weak self] busy in
             try? self?.state.setBusy(busy, for: id)
+        }
+        runtime.onLoopsChanged = { [weak self] in
+            self?.onLoopsChanged?()
         }
         runtime.onTranscriptUpdated = { [weak self] in
             try? self?.state.markUpdated(id)

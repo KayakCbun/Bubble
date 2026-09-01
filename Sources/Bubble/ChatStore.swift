@@ -39,6 +39,8 @@ struct ChatItem: Identifiable, Codable, Equatable, @unchecked Sendable {
     var deliveryState: MessageDeliveryState?
     var sourceEntryId: String?
     var sourceBranchable: Bool?
+    var loopId: String?
+    var loopLabel: String?
 
     init(
         id: UUID = UUID(),
@@ -65,7 +67,9 @@ struct ChatItem: Identifiable, Codable, Equatable, @unchecked Sendable {
         assistantImagePlacements: [AssistantImagePlacement]? = nil,
         deliveryState: MessageDeliveryState? = nil,
         sourceEntryId: String? = nil,
-        sourceBranchable: Bool? = nil
+        sourceBranchable: Bool? = nil,
+        loopId: String? = nil,
+        loopLabel: String? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -92,6 +96,8 @@ struct ChatItem: Identifiable, Codable, Equatable, @unchecked Sendable {
         self.deliveryState = deliveryState
         self.sourceEntryId = sourceEntryId
         self.sourceBranchable = sourceBranchable
+        self.loopId = loopId
+        self.loopLabel = loopLabel
     }
 }
 
@@ -132,6 +138,9 @@ private struct PendingPrompt {
     var draftText: String = ""
     var draftClips: [DraftClip] = []
     var draftImages: [DraftImage] = []
+    var restoreFocus: Bool = true
+    var loopId: String? = nil
+    var loopLabel: String? = nil
 }
 
 struct ConversationBranchDraft: Equatable {
@@ -276,12 +285,18 @@ final class ChatStore {
     var macEpoch = 0
     var slashHighlight = 0
     var resumeDestination = ResumeDestinationState()
+    var sessionLoops: [SessionLoop] = []
+    var loopListPresented = false
+    var pendingLoopDeleteID: String?
+    var loopClosePrompt: SessionLoopClosePrompt?
+    var hasArmedLoops: Bool { !sessionLoops.isEmpty }
     var onHideOverlay: (() -> Void)?
     var onCreateSideSession: (() -> Void)?
     var onCloseCurrentSession: (() -> Bool)?
     var onResumeInSideSession: ((String) -> Int?)?
     var onSessionIdentityChanged: (() -> Void)?
     var onActivityChanged: ((Bool) -> Void)?
+    var onLoopsChanged: (() -> Void)?
     var onTranscriptUpdated: (() -> Void)?
     var onWorkspacePanePresentationRequested: (() -> Void)?
     var onSideStageChromePresentationRequested: (() -> Void)?
@@ -333,6 +348,8 @@ final class ChatStore {
     private var childChanged: [String] = []
     private var pendingInjection: WorkspaceBrief?
     private var injecting = false
+    private var loopWakeTimer: DispatchSourceTimer?
+    private var isFiringSessionLoop = false
 
     private var hasActiveWork: Bool { isBusy || childBusy }
     private var pendingChildSteer: WorkspaceBrief?
@@ -1421,6 +1438,7 @@ final class ChatStore {
     func prepareToQuit() {
         finishPendingTranscriptRestore()
         closeSideStage(animated: false)
+        disarmSessionLoops(persist: true)
         WorkspaceRegistry.interruptActive(in: &workspaceState)
         if runtimeRole.persistsWorkspaceRegistry {
             persistWorkspaceState()
@@ -1438,6 +1456,7 @@ final class ChatStore {
 
     func shutdownClosedTabRuntime() {
         cancelPendingResumeAction()
+        disarmSessionLoops(persist: true)
         if !transcriptRestorePending {
             writeTranscript()
         }
@@ -2054,6 +2073,7 @@ final class ChatStore {
             refreshCatalog()
             await restoreConversationTree(replacingTranscript: !isBusy && !isStartingSession)
             announceInterruptedWorkspaceIfNeeded()
+            armSessionLoops()
             let readyReport = PiSetup.diagnose()
             if StartupTranscriptPolicy.shouldPresentAfterConnection(hasCredentials: readyReport.hasCredentials) {
                 presentSetup(readyReport, error: "Pi is running, but no provider is signed in.")
@@ -2397,9 +2417,10 @@ final class ChatStore {
             turnStartedAt = nil
             clearSteeringMessages()
             persist(immediate: true)
-            requestFocus()
-            flushPendingInjection()
-            startNextWaitingPrompt()
+            if prompt.restoreFocus {
+                requestFocus()
+            }
+            continueIdleWork()
         }
     }
 
@@ -2429,7 +2450,7 @@ final class ChatStore {
                 items.append(ChatItem(kind: .system, text: friendly(error)))
                 status = "waiting"
                 persist(immediate: true)
-                startNextWaitingPrompt()
+                continueIdleWork()
             }
             requestFocus()
         }
@@ -2451,10 +2472,16 @@ final class ChatStore {
                 kind: .user,
                 text: prompt.display,
                 imageNames: prompt.imageNames.isEmpty ? nil : prompt.imageNames,
-                deliveryState: deliveryState
+                deliveryState: deliveryState,
+                sourceBranchable: prompt.loopId == nil ? nil : false,
+                loopId: prompt.loopId,
+                loopLabel: prompt.loopLabel
             )
         )
         persist(immediate: true)
+        if prompt.loopId != nil {
+            onTranscriptUpdated?()
+        }
     }
 
     private func wrappedText(for prompt: PendingPrompt) -> String {
@@ -2505,7 +2532,7 @@ final class ChatStore {
             activeBranchPrompt = nil
             activeBranchNavigationSucceeded = false
             persist(immediate: true)
-            startNextWaitingPrompt()
+            continueIdleWork()
             return
         }
         Task { @MainActor in
@@ -2534,7 +2561,7 @@ final class ChatStore {
             activeBranchNavigationSucceeded = false
             persist(immediate: true)
             requestFocus()
-            startNextWaitingPrompt()
+            continueIdleWork()
         }
     }
 
@@ -2707,7 +2734,17 @@ final class ChatStore {
             return true
         case "clear", "new":
             draft = ""
+            if SessionLoopPolicy.shouldConfirmClose(loopCount: sessionLoops.count) {
+                loopClosePrompt = SessionLoopClosePrompt(intent: .startFresh, count: sessionLoops.count)
+                persist(immediate: true)
+                requestFocus()
+                return true
+            }
             startFreshConversation()
+            return true
+        case "loop":
+            draft = ""
+            handleLoopCommand(SlashCommand.arguments(in: text))
             return true
         case "side":
             draft = ""
@@ -2716,6 +2753,12 @@ final class ChatStore {
         case "close":
             draft = ""
             if runtimeRole == .side {
+                if SessionLoopPolicy.shouldConfirmClose(loopCount: sessionLoops.count) {
+                    loopClosePrompt = SessionLoopClosePrompt(intent: .closeSideSession, count: sessionLoops.count)
+                    persist(immediate: true)
+                    requestFocus()
+                    return true
+                }
                 if onCloseCurrentSession?() != true {
                     items.append(ChatItem(kind: .system, text: "This side session cannot close while Bubble is switching sessions."))
                     persist(immediate: true)
@@ -2995,6 +3038,7 @@ final class ChatStore {
 
     func resumeReplacingCurrent(_ id: String) {
         finishPendingTranscriptRestore()
+        disarmSessionLoops(persist: true)
         transcriptLoadGeneration &+= 1
         let loadGeneration = transcriptLoadGeneration
         writeTranscript()
@@ -3017,6 +3061,7 @@ final class ChatStore {
                 }
                 _ = try await client.switchToSession(id, persistAsMain: runtimeRole.persistsAsMain)
                 onSessionIdentityChanged?()
+                armSessionLoops()
                 let restored = await Self.loadTranscriptOffMain(sessionID: id)
                 guard transcriptLoadGeneration == loadGeneration else { return }
                 transcriptRestorePending = false
@@ -3106,6 +3151,7 @@ final class ChatStore {
 
     private func startFreshConversation() {
         finishPendingTranscriptRestore()
+        disarmSessionLoops(persist: true)
         transcriptLoadGeneration &+= 1
         writeTranscript()
         isStartingSession = true
@@ -3129,6 +3175,7 @@ final class ChatStore {
                 try resetWorkspaceSessionsForFreshMainSession()
                 isConnected = true
                 status = "ready"
+                armSessionLoops()
                 syncSessionConfig()
                 conversationTree = nil
                 branchDraft = nil
@@ -3693,14 +3740,18 @@ final class ChatStore {
                 var projected = Self.chatItem(record)
                 if let prior = richTranscriptRows[Self.richKey(entryID: record.entryID, kind: projected.kind)] {
                     var rich = prior
-                    rich.text = projected.text
+                    if prior.loopId == nil {
+                        rich.text = projected.text
+                    }
                     rich.toolStatus = projected.toolStatus ?? rich.toolStatus
                     rich.toolKind = projected.toolKind ?? rich.toolKind
                     rich.toolOutput = projected.toolOutput ?? rich.toolOutput
                     rich.imageNames = projected.imageNames ?? rich.imageNames
                     rich.sourceEntryId = record.entryID
-                    rich.sourceBranchable = record.branchable
+                    rich.sourceBranchable = prior.loopId == nil ? record.branchable : false
                     rich.deliveryState = nil
+                    rich.loopId = prior.loopId
+                    rich.loopLabel = prior.loopLabel
                     projected = rich
                 }
                 return projected
@@ -4775,6 +4826,12 @@ final class ChatStore {
             try WorkspaceRegistry.unmount(path: path, in: &workspaceState)
             persistWorkspaceState()
             return BubbleControlResult(["status": "unmounted", "path": path])
+        case "loop_create":
+            return try createLoopFromControl(params)
+        case "loop_list":
+            return BubbleControlResult(listLoopsPayload())
+        case "loop_delete":
+            return try deleteLoopFromControl(params)
         case "bubble_action":
             let action = params.string("action") ?? ""
             let argument = params.string("argument")
@@ -5202,7 +5259,7 @@ final class ChatStore {
             turnStartedAt = nil
             persist(immediate: true)
             requestFocus()
-            flushPendingInjection()
+            continueIdleWork()
         }
     }
 
@@ -5420,6 +5477,324 @@ final class ChatStore {
             workspaceState.active = active
         }
         persist()
+    }
+
+    // MARK: - Session loops
+
+    func toggleLoopList() {
+        guard hasArmedLoops else { return }
+        loopListPresented.toggle()
+        if !loopListPresented {
+            pendingLoopDeleteID = nil
+        }
+    }
+
+    func dismissLoopList() {
+        loopListPresented = false
+        pendingLoopDeleteID = nil
+    }
+
+    func requestLoopDelete(_ id: String) {
+        pendingLoopDeleteID = id
+    }
+
+    func cancelLoopDelete() {
+        pendingLoopDeleteID = nil
+    }
+
+    func confirmLoopDelete(_ id: String) {
+        stopSessionLoop(id: id, announce: true)
+        pendingLoopDeleteID = nil
+        if sessionLoops.isEmpty {
+            loopListPresented = false
+        }
+    }
+
+    func resolveLoopClosePrompt(_ confirm: Bool) {
+        let prompt = loopClosePrompt
+        loopClosePrompt = nil
+        guard confirm, let prompt else { return }
+        switch prompt.intent {
+        case .closeSideSession:
+            if onCloseCurrentSession?() != true {
+                items.append(ChatItem(kind: .system, text: "This side session cannot close while Bubble is switching sessions."))
+                persist(immediate: true)
+            }
+        case .startFresh:
+            startFreshConversation()
+        }
+    }
+
+    private func handleLoopCommand(_ args: String) {
+        switch SessionLoopPolicy.parseCommand(args) {
+        case .success(.help):
+            items.append(ChatItem(kind: .system, text: SessionLoopPolicy.helpText()))
+        case .success(.list):
+            items.append(ChatItem(kind: .system, text: loopListText()))
+        case .success(.stop(let id)):
+            stopSessionLoop(id: id, announce: true)
+        case .success(.create(let schedule, let prompt)):
+            do {
+                let loop = try createSessionLoop(prompt: prompt, schedule: schedule, title: nil)
+                items.append(ChatItem(
+                    kind: .system,
+                    text: "已创建定时：\(SessionLoopPolicy.intervalLabel(loop.schedule))。右上角可以管理。"
+                ))
+            } catch let error as SessionLoopError {
+                items.append(ChatItem(kind: .system, text: SessionLoopPolicy.errorMessage(error)))
+            } catch {
+                items.append(ChatItem(kind: .system, text: friendly(error)))
+            }
+        case .failure(let error):
+            items.append(ChatItem(kind: .system, text: SessionLoopPolicy.errorMessage(error)))
+        }
+        persist(immediate: true)
+        requestFocus()
+    }
+
+    @discardableResult
+    private func createSessionLoop(
+        prompt: String,
+        schedule: SessionLoopSchedule,
+        title: String?
+    ) throws -> SessionLoop {
+        guard currentSessionID != nil else { throw SessionLoopError.noSession }
+        let loop = try SessionLoopPolicy.makeLoop(
+            prompt: prompt,
+            schedule: schedule,
+            now: Date(),
+            calendar: .current,
+            existingCount: sessionLoops.count,
+            title: title
+        )
+        sessionLoops.append(loop)
+        persistLoops()
+        startLoopWakeTimerIfNeeded()
+        onLoopsChanged?()
+        return loop
+    }
+
+    private func stopSessionLoop(id raw: String?, announce: Bool) {
+        if sessionLoops.isEmpty {
+            if announce {
+                items.append(ChatItem(kind: .system, text: "这个对话没有定时。"))
+            }
+            return
+        }
+        if let raw, !raw.isEmpty {
+            switch SessionLoopPolicy.resolveID(raw, in: sessionLoops) {
+            case .success(let loop):
+                sessionLoops.removeAll { $0.id == loop.id }
+                persistLoops()
+                if sessionLoops.isEmpty {
+                    stopLoopWakeTimer()
+                    loopListPresented = false
+                }
+                onLoopsChanged?()
+                if announce {
+                    items.append(ChatItem(kind: .system, text: "已停止定时「\(loop.title)」。"))
+                }
+            case .failure(let error):
+                if announce {
+                    items.append(ChatItem(kind: .system, text: SessionLoopPolicy.errorMessage(error)))
+                }
+            }
+            return
+        }
+        if sessionLoops.count == 1, let loop = sessionLoops.first {
+            sessionLoops = []
+            persistLoops()
+            stopLoopWakeTimer()
+            loopListPresented = false
+            onLoopsChanged?()
+            if announce {
+                items.append(ChatItem(kind: .system, text: "已停止定时「\(loop.title)」。"))
+            }
+            return
+        }
+        if announce {
+            items.append(ChatItem(
+                kind: .system,
+                text: "有多条定时，用 /loop stop <id> 或右上角列表停止。\n\(loopListText())"
+            ))
+        }
+    }
+
+    private func createLoopFromControl(_ params: [String: Any]) throws -> BubbleControlResult {
+        let prompt = params.string("prompt") ?? ""
+        let title = params.string("title")
+        let interval = params.string("interval") ?? ""
+        let time = params.string("time") ?? ""
+        let schedule: SessionLoopSchedule
+        if let parsed = SessionLoopPolicy.parseScheduleToken(interval), !interval.isEmpty {
+            schedule = parsed
+        } else if let parsed = SessionLoopPolicy.parseScheduleToken(time), !time.isEmpty {
+            schedule = parsed
+        } else if let parsed = SessionLoopPolicy.parseScheduleToken("每天 \(time)"), !time.isEmpty {
+            schedule = parsed
+        } else {
+            throw SessionLoopError.invalidSchedule
+        }
+        let loop = try createSessionLoop(prompt: prompt, schedule: schedule, title: title)
+        return BubbleControlResult([
+            "status": "created",
+            "id": SessionLoopPolicy.shortID(loop.id),
+            "label": SessionLoopPolicy.intervalLabel(loop.schedule),
+            "title": loop.title,
+        ])
+    }
+
+    private func deleteLoopFromControl(_ params: [String: Any]) throws -> BubbleControlResult {
+        let id = params.string("id") ?? ""
+        guard !id.isEmpty else { throw SessionLoopError.notFound }
+        switch SessionLoopPolicy.resolveID(id, in: sessionLoops) {
+        case .success(let loop):
+            stopSessionLoop(id: loop.id, announce: false)
+            return BubbleControlResult([
+                "status": "stopped",
+                "id": SessionLoopPolicy.shortID(loop.id),
+                "title": loop.title,
+            ])
+        case .failure(let error):
+            throw error
+        }
+    }
+
+    private func listLoopsPayload() -> [String: Any] {
+        [
+            "loops": sessionLoops.map { loop in
+                [
+                    "id": SessionLoopPolicy.shortID(loop.id),
+                    "title": loop.title,
+                    "prompt": loop.prompt,
+                    "label": SessionLoopPolicy.intervalLabel(loop.schedule),
+                    "due": loop.due,
+                ] as [String: Any]
+            }
+        ]
+    }
+
+    private func loopListText() -> String {
+        if sessionLoops.isEmpty { return "这个对话没有定时。" }
+        let busy = isBusy || injecting || childBusy || isStartingSession || isSwitchingBranch
+        return sessionLoops.map { loop in
+            let status = loop.due
+                ? SessionLoopPolicy.pendingStatus(isBusy: busy, hasQueuedUserFollowUp: !pendingPrompts.isEmpty)
+                : SessionLoopPolicy.intervalLabel(loop.schedule)
+            return "\(SessionLoopPolicy.shortID(loop.id))  \(loop.title)  \(status)"
+        }.joined(separator: "\n")
+    }
+
+    private func armSessionLoops() {
+        guard let sessionID = currentSessionID, !sessionID.isEmpty else {
+            sessionLoops = []
+            stopLoopWakeTimer()
+            onLoopsChanged?()
+            return
+        }
+        let loaded = SessionLoopStoreFile.load(from: OverlayPaths.loopsFile).loops(for: sessionID)
+        sessionLoops = SessionLoopPolicy.rearm(loaded, now: Date())
+        persistLoops()
+        startLoopWakeTimerIfNeeded()
+        onLoopsChanged?()
+    }
+
+    private func disarmSessionLoops(persist: Bool) {
+        stopLoopWakeTimer()
+        if persist {
+            persistLoops()
+        }
+        sessionLoops = []
+        loopListPresented = false
+        pendingLoopDeleteID = nil
+        loopClosePrompt = nil
+        onLoopsChanged?()
+    }
+
+    private func persistLoops() {
+        guard let sessionID = currentSessionID, !sessionID.isEmpty else { return }
+        var file = SessionLoopStoreFile.load(from: OverlayPaths.loopsFile)
+        file.setLoops(sessionLoops, for: sessionID)
+        try? file.save(to: OverlayPaths.loopsFile)
+    }
+
+    private func startLoopWakeTimerIfNeeded() {
+        guard loopWakeTimer == nil, !sessionLoops.isEmpty else { return }
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + 1, repeating: 5, leeway: .seconds(1))
+        timer.setEventHandler { [weak self] in
+            self?.handleLoopWake()
+        }
+        timer.resume()
+        loopWakeTimer = timer
+    }
+
+    private func stopLoopWakeTimer() {
+        loopWakeTimer?.cancel()
+        loopWakeTimer = nil
+    }
+
+    private func handleLoopWake() {
+        guard !sessionLoops.isEmpty else {
+            stopLoopWakeTimer()
+            return
+        }
+        let now = Date()
+        var changed = false
+        for index in sessionLoops.indices {
+            let updated = SessionLoopPolicy.noteTick(sessionLoops[index], now: now)
+            if updated != sessionLoops[index] {
+                sessionLoops[index] = updated
+                changed = true
+            }
+        }
+        if changed {
+            persistLoops()
+        }
+        continueIdleWork()
+    }
+
+    private func continueIdleWork() {
+        guard !isBusy, !injecting, !isStartingSession, !isSwitchingBranch, !isFiringSessionLoop else { return }
+        flushPendingInjection()
+        guard !isBusy, !injecting else { return }
+        startNextWaitingPrompt()
+        guard !isBusy else { return }
+        fireDueSessionLoopIfNeeded()
+    }
+
+    private func fireDueSessionLoopIfNeeded() {
+        guard !isFiringSessionLoop else { return }
+        let decision = SessionLoopPolicy.fireDecision(
+            loops: sessionLoops,
+            isBusy: isBusy || injecting || childBusy || isStartingSession,
+            hasQueuedUserFollowUp: !pendingPrompts.isEmpty,
+            isBranching: isSwitchingBranch || branchDraft != nil
+        )
+        guard case .fire(let loop) = decision,
+              let index = sessionLoops.firstIndex(where: { $0.id == loop.id }) else {
+            return
+        }
+        isFiringSessionLoop = true
+        sessionLoops[index] = SessionLoopPolicy.noteFired(
+            loop,
+            now: Date(),
+            calendar: .current
+        )
+        persistLoops()
+        let prompt = PendingPrompt(
+            itemId: UUID(),
+            display: loop.prompt,
+            imageNames: [],
+            text: SessionLoopPolicy.modelText(loop.prompt),
+            attachments: [],
+            images: [],
+            restoreFocus: false,
+            loopId: loop.id,
+            loopLabel: SessionLoopPolicy.intervalLabel(loop.schedule)
+        )
+        isFiringSessionLoop = false
+        startPrompt(prompt)
     }
 
 }
