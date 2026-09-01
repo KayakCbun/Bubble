@@ -148,6 +148,40 @@ private enum AppKitTranscriptSurfaceCheck {
         // NSScrollView/document-view path used by production.
         _ = NSApplication.shared
 
+        let chromeBounds = NSRect(x: 0, y: 0, width: 480, height: 320)
+        expect(
+            TranscriptChromeHitTestPolicy.containsLoopButton(
+                NSPoint(x: 400, y: 306),
+                in: chromeBounds,
+                flipped: false
+            ),
+            "the native transcript routes the visible top-right loop button"
+        )
+        expect(
+            TranscriptChromeHitTestPolicy.containsLoopButton(
+                NSPoint(x: 400, y: 14),
+                in: chromeBounds,
+                flipped: true
+            ),
+            "the loop hit region is stable in flipped coordinates"
+        )
+        expect(
+            !TranscriptChromeHitTestPolicy.containsLoopButton(
+                NSPoint(x: 460, y: 306),
+                in: chromeBounds,
+                flipped: false
+            ),
+            "the native loop route does not steal the width button"
+        )
+        expect(
+            !TranscriptChromeHitTestPolicy.containsLoopButton(
+                NSPoint(x: 400, y: 250),
+                in: chromeBounds,
+                flipped: false
+            ),
+            "the native loop route does not steal transcript rows"
+        )
+
         // Prefix offsets, row lookup, one-row updates, and prepend all remain
         // deterministic and logarithmic at the height-index seam.
         var index = TranscriptHeightIndex(heights: [20, 30, 40])

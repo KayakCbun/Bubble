@@ -199,42 +199,49 @@ struct OverlayView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: OverlayMetrics.stackSpacing) {
             if isTranscriptPresented {
-                transcriptList
-                    .frame(width: chatWidth, height: transcriptHeight)
-                    .frostedGlass(in: transcriptShape)
-                    .overlay {
-                        if sessionSwitchLoading
-                            || store.isStartingSession
-                            || store.resumeDestination.isPerformingAction {
-                            SessionSwitchLoadingMask()
-                                .clipShape(transcriptShape)
-                        }
+                ZStack(alignment: .topTrailing) {
+                    transcriptList
+                        .frame(width: chatWidth, height: transcriptHeight)
+                        .frostedGlass(in: transcriptShape)
+                        .zIndex(0)
+
+                    if sessionSwitchLoading
+                        || store.isStartingSession
+                        || store.resumeDestination.isPerformingAction {
+                        SessionSwitchLoadingMask()
+                            .clipShape(transcriptShape)
+                            .zIndex(1)
                     }
-                    .overlay(alignment: .topTrailing) {
-                        VStack(alignment: .trailing, spacing: 6) {
-                            HStack(spacing: 2) {
-                                if store.hasArmedLoops {
-                                    TranscriptLoopButton(
-                                        due: store.sessionLoops.contains(where: \.due),
-                                        presented: store.loopListPresented
-                                    ) {
-                                        store.toggleLoopList()
-                                    }
-                                }
-                                TranscriptPinButton(pinned: store.overlayPinned) {
-                                    store.toggleOverlayPin()
-                                }
-                                TranscriptWidthButton(wide: store.transcriptWide) {
-                                    onToggleWidth()
-                                }
+
+                    HStack(spacing: 2) {
+                        if store.hasArmedLoops {
+                            TranscriptLoopButton(
+                                due: store.sessionLoops.contains(where: \.due),
+                                presented: store.loopListPresented
+                            ) {
+                                store.toggleLoopList()
                             }
-                            if store.loopListPresented {
+                            .popover(
+                                isPresented: $store.loopListPresented,
+                                arrowEdge: .top
+                            ) {
                                 SessionLoopListCard(store: store)
+                                    .padding(6)
                             }
                         }
-                        .padding(.trailing, 6)
-                        .padding(.top, 6)
+                        TranscriptPinButton(pinned: store.overlayPinned) {
+                            store.toggleOverlayPin()
+                        }
+                        TranscriptWidthButton(wide: store.transcriptWide) {
+                            onToggleWidth()
+                        }
                     }
+                    .contentShape(Rectangle())
+                    .padding(.trailing, 6)
+                    .padding(.top, 6)
+                    .zIndex(2)
+                }
+                .frame(width: chatWidth, height: transcriptHeight)
             }
             ComposerBar(
                 store: store,
@@ -1133,6 +1140,10 @@ struct OverlayView: View {
             surfaceSignal: surfaceSignal,
             command: transcriptSurfaceCommand,
             commandToken: transcriptSurfaceCommandToken,
+            hasArmedLoops: store.hasArmedLoops,
+            onLoopButtonClicked: {
+                store.toggleLoopList()
+            },
             onOpenFilePreview: { path in
                 store.openFilePreview(path)
             },
@@ -4850,6 +4861,8 @@ private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
     let surfaceSignal: UInt64
     let command: AppKitTranscriptSurfaceOperation?
     let commandToken: UInt64
+    let hasArmedLoops: Bool
+    let onLoopButtonClicked: () -> Void
     let onOpenFilePreview: (String) -> Void
     let onViewportChanged: (_ atEnd: Bool, _ userDriven: Bool) -> Void
     let onUserScrollSequenceStarted: () -> Void
@@ -4952,11 +4965,16 @@ private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
         }
 
         func configureCallbacks(
+            hasArmedLoops: Bool,
+            onLoopButtonClicked: @escaping () -> Void,
             onOpenFilePreview: @escaping (String) -> Void,
             onViewportChanged: @escaping (_ atEnd: Bool, _ userDriven: Bool) -> Void,
             onUserScrollSequenceStarted: @escaping () -> Void,
             onCommandCompleted: @escaping (_ operation: AppKitTranscriptSurfaceOperation, _ atEnd: Bool) -> Void
         ) {
+            adapter.scrollView.onLoopButtonClick = hasArmedLoops
+                ? onLoopButtonClicked
+                : nil
             // The rich row closures already carry the current store's
             // openFilePreview environment.  Keep this callback parameter in
             // the bridge so future extracted rows can use the same seam.
@@ -5017,6 +5035,8 @@ private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
             surfaceSignal: UInt64,
             command: AppKitTranscriptSurfaceOperation?,
             commandToken: UInt64,
+            hasArmedLoops: Bool,
+            onLoopButtonClicked: @escaping () -> Void,
             onOpenFilePreview: @escaping (String) -> Void,
             onViewportChanged: @escaping (_ atEnd: Bool, _ userDriven: Bool) -> Void,
             onUserScrollSequenceStarted: @escaping () -> Void,
@@ -5047,6 +5067,8 @@ private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
             }
             lastLeadingInset = leadingInset
             configureCallbacks(
+                hasArmedLoops: hasArmedLoops,
+                onLoopButtonClicked: onLoopButtonClicked,
                 onOpenFilePreview: onOpenFilePreview,
                 onViewportChanged: onViewportChanged,
                 onUserScrollSequenceStarted: onUserScrollSequenceStarted,
@@ -5277,6 +5299,8 @@ private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
             surfaceSignal: surfaceSignal,
             command: command,
             commandToken: commandToken,
+            hasArmedLoops: hasArmedLoops,
+            onLoopButtonClicked: onLoopButtonClicked,
             onOpenFilePreview: onOpenFilePreview,
             onViewportChanged: onViewportChanged,
             onUserScrollSequenceStarted: onUserScrollSequenceStarted,
@@ -5297,6 +5321,8 @@ private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
             surfaceSignal: surfaceSignal,
             command: command,
             commandToken: commandToken,
+            hasArmedLoops: hasArmedLoops,
+            onLoopButtonClicked: onLoopButtonClicked,
             onOpenFilePreview: onOpenFilePreview,
             onViewportChanged: onViewportChanged,
             onUserScrollSequenceStarted: onUserScrollSequenceStarted,
