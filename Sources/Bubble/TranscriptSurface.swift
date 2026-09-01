@@ -77,6 +77,16 @@ enum TranscriptRowKind: String, Equatable, Hashable, Sendable {
     case other
 }
 
+enum TranscriptRowCompletionPolicy {
+    /// Workspace cards are mutable while a child run is active or waiting for
+    /// input. Marking those rows completed makes the surface reducer reject
+    /// their later status/summary mutation as an immutable-history rewrite.
+    static func workspaceCardIsCompleted(status: String?) -> Bool {
+        guard let status = status?.lowercased(), !status.isEmpty else { return false }
+        return status != "running" && status != "waiting"
+    }
+}
+
 /// Immutable input to the transcript surface.  The body itself is owned by
 /// the session store; the surface only needs a stable content hash and an
 /// estimated height to decide what can be reused without reflowing history.

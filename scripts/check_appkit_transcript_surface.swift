@@ -588,6 +588,44 @@ private enum AppKitTranscriptSurfaceCheck {
             )
         }
 
+        // A workspace card has no transcript text; its running/done state is
+        // represented by producer metadata and therefore only changes the
+        // row content identity. Start with a genuinely mutable row—the exact
+        // production contract—then verify its terminal update reaches the
+        // mounted host instead of being rejected as completed history.
+        let workspaceRowID = "workspace-card"
+        let workspaceSession = TranscriptSessionHandle(
+            sessionID: "workspace-transition",
+            generation: 1,
+            revision: 0
+        )
+        let workspaceAdapter = AppKitTranscriptSurfaceAdapter(
+            snapshot: TranscriptSurfaceSnapshot(
+                session: workspaceSession,
+                rows: [row(workspaceRowID, version: 20, height: 72, completed: false)]
+            ),
+            overscan: 0,
+            maximumMountedRows: 1,
+            maximumReusableHosts: 0
+        )
+        workspaceAdapter.setViewportSize(NSSize(width: 480, height: 120))
+        let configureBeforeWorkspaceDone = workspaceAdapter.hostConfigureCount(
+            rowID: workspaceRowID
+        ) ?? 0
+        _ = workspaceAdapter.apply(.update(
+            row: row(workspaceRowID, version: 21, height: 72, completed: true),
+            session: workspaceAdapter.currentHandle.nextRevision()
+        ))
+        expect(
+            workspaceAdapter.snapshot.row(id: workspaceRowID)?.isCompleted == true,
+            "workspace running-to-done metadata reaches the adapter snapshot"
+        )
+        expect(
+            (workspaceAdapter.hostConfigureCount(rowID: workspaceRowID) ?? 0)
+                > configureBeforeWorkspaceDone,
+            "workspace running-to-done metadata reconfigures its mounted host"
+        )
+
         // Line-based mouse wheels bypass AppKit's delayed smoothing and move
         // the production viewport in the same event. Trackpads still carry
         // precise deltas and remain on AppKit's native momentum path.

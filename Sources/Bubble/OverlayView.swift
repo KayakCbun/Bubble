@@ -1638,6 +1638,11 @@ struct OverlayView: View {
     }
 
     private func appKitTranscriptRowIsCompleted(_ row: MainTranscriptRenderRow) -> Bool {
+        if case .message(let item) = row.source, item.kind == .workspaceRun {
+            return TranscriptRowCompletionPolicy.workspaceCardIsCompleted(
+                status: item.workspaceStatus
+            )
+        }
         if case .tool(let item) = row.source {
             return ["completed", "failed", "cancelled"].contains(item.toolStatus ?? "")
         }
