@@ -200,6 +200,10 @@ private final class WeakChatStoreReference: @unchecked Sendable {
 
 @Observable
 final class ChatStore {
+    private struct PendingWorkspaceInjection {
+        var brief: WorkspaceBrief
+        var finalResponse: String
+    }
     var items: [ChatItem] = []
     var draft: String = "" {
         didSet {
@@ -346,7 +350,7 @@ final class ChatStore {
     private var mountSkillNames: [String: [String]] = [:]
     private var childAssistant = ""
     private var childChanged: [String] = []
-    private var pendingInjection: WorkspaceBrief?
+    private var pendingInjection: PendingWorkspaceInjection?
     private var injecting = false
     private var loopWakeTimer: DispatchSourceTimer?
     private var isFiringSessionLoop = false
@@ -5013,9 +5017,18 @@ final class ChatStore {
     ) async {
         do {
             let stop = try await client.prompt(prompt, sessionId: sessionId)
+            let finalResponse = try? await client.conversationTree(sessionId: sessionId)
+                .activePath
+                .reversed()
+                .first(where: {
+                    $0.role == "assistant"
+                        && !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                })?
+                .text
             finishChildRun(
                 stopReason: stop,
                 mount: mount,
+                finalResponse: finalResponse,
                 generation: generation,
                 runId: runId
             )
@@ -5035,6 +5048,7 @@ final class ChatStore {
         stopReason: String,
         mount: WorkspaceMount,
         error: String? = nil,
+        finalResponse: String? = nil,
         generation: Int,
         runId: String
     ) {
@@ -5103,6 +5117,8 @@ final class ChatStore {
             return
         }
         pendingChildSteer = nil
+        let completeChildResponse = (finalResponse ?? childAssistant)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         var brief = workspaceState.active ?? WorkspaceBrief(
             path: mount.path,
             name: mount.name,
@@ -5163,7 +5179,8 @@ final class ChatStore {
             OverlayLog.write("ending parent turn after workspace result")
             cancel()
         }
-        enqueueInjection(brief)
+        let finalResponse = completeChildResponse.isEmpty ? brief.summary : completeChildResponse
+        enqueueInjection(brief, finalResponse: finalResponse)
     }
 
     @discardableResult
@@ -5188,21 +5205,24 @@ final class ChatStore {
         OverlayLog.write("stopped workspace run from UI")
     }
 
-    private func enqueueInjection(_ brief: WorkspaceBrief) {
+    private func enqueueInjection(_ brief: WorkspaceBrief, finalResponse: String) {
+        let injection = PendingWorkspaceInjection(brief: brief, finalResponse: finalResponse)
         if isBusy || injecting {
-            pendingInjection = brief
+            pendingInjection = injection
             return
         }
-        injectBrief(brief)
+        injectWorkspaceResult(injection)
     }
 
     private func flushPendingInjection() {
-        guard let brief = pendingInjection else { return }
+        guard let injection = pendingInjection else { return }
         pendingInjection = nil
-        injectBrief(brief)
+        injectWorkspaceResult(injection)
     }
 
-    private func injectBrief(_ brief: WorkspaceBrief) {
+    private func injectWorkspaceResult(_ injection: PendingWorkspaceInjection) {
+        let brief = injection.brief
+        let finalResponse = WorkspaceRegistry.directResultText(injection.finalResponse, fallback: brief)
         injecting = true
         injectSpoke = false
         hushMainAssistant = false
@@ -5220,22 +5240,23 @@ final class ChatStore {
                 let card = items.last(where: {
                     $0.kind == .workspaceRun && $0.workspaceRunId == brief.runId
                 })
-                let text = WorkspaceRegistry.injectionPrompt(
-                    brief,
-                    home: OverlayPaths.home.path,
-                    sessionId: card?.workspaceSessionId ?? childSessionId,
-                    anchorEntryId: card?.workspaceAnchorEntryId
-                )
-                _ = try await client.prompt(text)
+                var details: [String: Any] = [
+                    "runId": brief.runId ?? "",
+                    "workspacePath": brief.path,
+                    "workspaceName": brief.name,
+                    "status": brief.status.rawValue,
+                ]
+                if let workspaceSessionId = card?.workspaceSessionId ?? childSessionId {
+                    details["workspaceSessionId"] = workspaceSessionId
+                }
+                if let anchorEntryId = card?.workspaceAnchorEntryId {
+                    details["anchorEntryId"] = anchorEntryId
+                }
+                let snapshot = try await client.appendWorkspaceResult(finalResponse, details: details)
                 guard nonce == self.runNonce else { return }
                 status = "ready"
-                // The relay is a real continuation of the main Pi session.
-                // Refresh its leaf before persisting so a later restore cannot
-                // stop at the preceding workspace tool call.
-                await refreshConversationTree(
-                    expectedRunNonce: nonce,
-                    expectedSessionID: relaySessionID
-                )
+                guard relaySessionID == client.sessionId else { return }
+                applyConversationTree(snapshot, replacingTranscript: true)
             } catch {
                 guard nonce == self.runNonce else { return }
                 items.append(ChatItem(kind: .system, text: friendly(error)))
@@ -5244,7 +5265,9 @@ final class ChatStore {
             }
             guard nonce == self.runNonce else { return }
             if !injectSpoke {
-                let fallback = brief.summary.trimmingCharacters(in: .whitespacesAndNewlines)
+                let fallback = finalResponse.isEmpty
+                    ? brief.summary.trimmingCharacters(in: .whitespacesAndNewlines)
+                    : finalResponse
                 if !fallback.isEmpty {
                     appendAssistant(fallback)
                 }

@@ -4,6 +4,7 @@ enum BubblePiAcpPatch {
     static let packageVersion = "0.0.33"
     static let packageSpec = "pi-acp@\(packageVersion)"
     static let marker = "_bubble/session/select_leaf"
+    static let workspaceResultMarker = "_bubble/session/append_workspace_result"
     static let recoveryMarker = "_bubble/session/recover_dead_rpc"
     static let customImageMarker = "_bubble/forward_custom_images"
 
@@ -16,9 +17,11 @@ enum BubblePiAcpPatch {
     static func patch(source: String) throws -> String {
         var source = source
         let branchPatchApplied = source.contains(marker)
+            && source.contains(workspaceResultMarker)
             && source.contains("async getEntries()")
             && source.contains("async getTree()")
             && source.contains("async selectLeaf(targetId)")
+            && source.contains("async appendWorkspaceResult(text, details)")
 
         if !branchPatchApplied {
             if source.contains("_bubble/session/navigate_tree") {
@@ -48,12 +51,17 @@ enum BubblePiAcpPatch {
     if (!res.success) throw new Error(`pi select leaf failed: ${res.error ?? JSON.stringify(res.data)}`);
     return res.data;
   }
+  async appendWorkspaceResult(text, details) {
+    const res = await this.request({ type: "bubble_append_workspace_result", text, details });
+    if (!res.success) throw new Error(`pi append workspace result failed: ${res.error ?? JSON.stringify(res.data)}`);
+    return res.data;
+  }
 
 """#
 
         let extensionBridge = #"""
   async extMethod(method, params) {
-    if (method !== "_bubble/session/tree" && method !== "_bubble/session/navigate_tree" && method !== "_bubble/session/select_leaf") {
+    if (method !== "_bubble/session/tree" && method !== "_bubble/session/navigate_tree" && method !== "_bubble/session/select_leaf" && method !== "_bubble/session/append_workspace_result") {
       throw RequestError3.methodNotFound(method);
     }
     const sessionId = typeof params.sessionId === "string" ? params.sessionId : "";
@@ -68,6 +76,12 @@ enum BubblePiAcpPatch {
       const targetId = typeof params.targetId === "string" ? params.targetId : "";
       if (!targetId) throw RequestError3.invalidParams("targetId is required");
       await session.proc.selectLeaf(targetId);
+    }
+    if (method === "_bubble/session/append_workspace_result") {
+      const text = typeof params.text === "string" ? params.text : "";
+      if (!text.trim()) throw RequestError3.invalidParams("text is required");
+      const details = params.details && typeof params.details === "object" ? params.details : undefined;
+      await session.proc.appendWorkspaceResult(text, details);
     }
     const [entries, tree] = await Promise.all([session.proc.getEntries(), session.proc.getTree()]);
     return { entries, tree };
@@ -246,6 +260,8 @@ function bubbleDisplayContentBlocks(content) {
             && source.contains("async getEntries()")
             && source.contains("async getTree()")
             && source.contains("async selectLeaf(targetId)")
+            && source.contains(workspaceResultMarker)
+            && source.contains("async appendWorkspaceResult(text, details)")
             && source.contains(recoveryMarker)
             && source.contains("existing?.proc?.isAlive?.()")
             && source.contains("this.sessions.close(sessionId)")
@@ -259,6 +275,8 @@ enum BubblePiRuntimePatch {
     static let packageSpec = "@earendil-works/pi-coding-agent@\(packageVersion)"
     static let marker = "session.bubbleSelectLeaf(targetId)"
     static let agentMarker = "async bubbleSelectLeaf(targetId)"
+    static let workspaceResultMarker = "session.bubbleAppendWorkspaceResult(text, details)"
+    static let agentWorkspaceResultMarker = "async bubbleAppendWorkspaceResult(text, details)"
 
     enum Error: Swift.Error, Equatable {
         case unsupportedSource
@@ -267,7 +285,7 @@ enum BubblePiRuntimePatch {
     }
 
     static func patch(source: String) throws -> String {
-        if source.contains(marker) { return source }
+        if source.contains(marker), source.contains(workspaceResultMarker) { return source }
         var source = source
         if let legacyStart = source.range(of: "            case \"bubble_select_leaf\": {")?.lowerBound,
            let anchorStart = source.range(of: #"            case "get_tree": {"#)?.lowerBound,
@@ -277,6 +295,15 @@ enum BubblePiRuntimePatch {
         let anchor = #"            case "get_tree": {"#
         guard source.contains(anchor) else { throw Error.unsupportedSource }
         let bridge = #"""
+            case "bubble_append_workspace_result": {
+                const text = command.text;
+                const details = command.details;
+                if (typeof text !== "string" || !text.trim()) {
+                    return error(id, "bubble_append_workspace_result", "Workspace result text is required");
+                }
+                const result = await session.bubbleAppendWorkspaceResult(text, details);
+                return success(id, "bubble_append_workspace_result", result);
+            }
             case "bubble_select_leaf": {
                 const targetId = command.targetId;
                 if (typeof targetId !== "string") {
@@ -293,10 +320,30 @@ enum BubblePiRuntimePatch {
     }
 
     static func patchAgentSession(source: String) throws -> String {
-        if source.contains(agentMarker) { return source }
+        if source.contains(agentMarker), source.contains(agentWorkspaceResultMarker) { return source }
         let anchor = "    async navigateTree(targetId, options = {}) {"
         guard source.contains(anchor) else { throw Error.unsupportedSource }
-        let bridge = #"""
+        var workspaceBridge = ""
+        if !source.contains(agentWorkspaceResultMarker) {
+            workspaceBridge = #"""
+    async bubbleAppendWorkspaceResult(text, details) {
+        if (this.isStreaming) {
+            throw new Error("Wait for the current response to finish before appending a workspace result.");
+        }
+        await this.sendCustomMessage({
+            customType: "bubble_workspace_result",
+            content: [{ type: "text", text }],
+            display: true,
+            details,
+        }, { triggerTurn: false });
+        return { entryId: this.sessionManager.getLeafId() };
+    }
+
+"""#
+        }
+        var selectionBridge = ""
+        if !source.contains(agentMarker) {
+            selectionBridge = #"""
     async bubbleSelectLeaf(targetId) {
         if (this.isStreaming) {
             throw new Error("Wait for the current response to finish before navigating the session tree.");
@@ -342,7 +389,8 @@ enum BubblePiRuntimePatch {
     }
 
 """#
-        return source.replacingOccurrences(of: anchor, with: bridge + anchor)
+        }
+        return source.replacingOccurrences(of: anchor, with: workspaceBridge + selectionBridge + anchor)
     }
 
     static func apply(runtime: URL) throws {
@@ -378,6 +426,9 @@ enum BubblePiRuntimePatch {
               manifest["version"] as? String == packageVersion,
               let source = try? String(contentsOf: rpcMode, encoding: .utf8),
               let agentSource = try? String(contentsOf: agentSession, encoding: .utf8) else { return false }
-        return source.contains(marker) && agentSource.contains(agentMarker)
+        return source.contains(marker)
+            && source.contains(workspaceResultMarker)
+            && agentSource.contains(agentMarker)
+            && agentSource.contains(agentWorkspaceResultMarker)
     }
 }

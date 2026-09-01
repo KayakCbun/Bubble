@@ -537,6 +537,12 @@ public enum WorkspaceRegistry {
         return lines.joined(separator: "\n")
     }
 
+    public static func directResultText(_ finalResponse: String, fallback brief: WorkspaceBrief) -> String {
+        let complete = finalResponse.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !complete.isEmpty { return complete }
+        return brief.summary.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     public static func parseInjectionPrompt(_ prompt: String, home: String) -> WorkspaceRelayRecord? {
         let signature = """
         The workspace run already finished. Summarize the result for the user in your own voice, then stop.

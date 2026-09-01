@@ -39,8 +39,12 @@ The ACP child session for one mount within one main session. cwd is the mount pa
 _Avoid_: subagent (not a Pi subagent package), worker
 
 **Brief**:
-The only workspace state that may enter the main session. A small replaceable record: path, name, status, goal, summary, optional question, capped changed paths. No diffs, file bodies, or tool logs.
+The small replaceable state shown by a workspace run card: path, name, status, goal, summary, optional question, capped changed paths. No diffs, file bodies, or tool logs.
 _Avoid_: summary (too vague), transcript
+
+**Workspace result**:
+The workspace session's complete final assistant reply. When a run finishes, Bubble appends this reply directly to the main session as a displayed context message; it does not ask the main model to summarize or reproduce it in a second turn.
+_Avoid_: relay summary, injection brief
 
 **Workspace run**:
 The one in-flight child turn. Many mounts may exist; at most one run is active.

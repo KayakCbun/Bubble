@@ -21,6 +21,7 @@ struct WorkspaceMountsCheck {
         try statusBlock()
         interruptActive()
         injectionRoundTrip()
+        completedRunRelaysFinalResponseDirectly()
         inferWaiting()
         paletteBrowseLast()
         try paletteDrillDown()
@@ -204,6 +205,28 @@ struct WorkspaceMountsCheck {
                 structuredRelayRunIds: ["modern-run"]
             ),
             "a legacy relay cannot consume a card reserved by a structured relay"
+        )
+    }
+
+    static func completedRunRelaysFinalResponseDirectly() {
+        let finalResponse = "WORKSPACE_FINAL_BEGIN\n" + String(repeating: "完整子会话结论。", count: 180) + "\nWORKSPACE_FINAL_END"
+        let brief = WorkspaceBrief(
+            runId: "run-direct-final",
+            path: "/Users/ada/Documents/work",
+            name: "work",
+            status: .done,
+            goal: "finish the task",
+            summary: finalResponse
+        )
+        let result = WorkspaceRegistry.directResultText(finalResponse, fallback: brief)
+
+        expect(
+            result == finalResponse,
+            "a completed workspace run must relay its complete final response without summary clipping"
+        )
+        expect(
+            WorkspaceRegistry.directResultText("  ", fallback: brief) == finalResponse,
+            "an empty live buffer falls back to the persisted workspace result"
         )
     }
 
