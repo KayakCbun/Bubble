@@ -141,6 +141,25 @@ enum WorkspaceRunLifecyclePolicy {
     }
 }
 
+struct WorkspaceRunOutputAccumulator: Equatable {
+    private(set) var complete = ""
+    private(set) var finalAssistant = ""
+
+    mutating func reset() {
+        complete = ""
+        finalAssistant = ""
+    }
+
+    mutating func appendAssistantText(_ text: String) {
+        complete += text
+        finalAssistant += text
+    }
+
+    mutating func beginToolCall() {
+        finalAssistant = ""
+    }
+}
+
 enum WorkspaceTurnRowKind: Equatable {
     case user
     case assistant

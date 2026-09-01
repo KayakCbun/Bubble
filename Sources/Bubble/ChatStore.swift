@@ -348,7 +348,7 @@ final class ChatStore {
     private var hushMainAssistant = false
     private var injectSpoke = false
     private var mountSkillNames: [String: [String]] = [:]
-    private var childAssistant = ""
+    private var childOutput = WorkspaceRunOutputAccumulator()
     private var childChanged: [String] = []
     private var pendingInjection: PendingWorkspaceInjection?
     private var injecting = false
@@ -4896,7 +4896,7 @@ final class ChatStore {
         persistWorkspaceState()
         upsertWorkspaceCard(brief)
         childBusy = true
-        childAssistant = ""
+        childOutput.reset()
         childChanged = []
         followOpenWorkspaceStageIfNeeded(brief)
         Task { @MainActor in
@@ -5017,18 +5017,10 @@ final class ChatStore {
     ) async {
         do {
             let stop = try await client.prompt(prompt, sessionId: sessionId)
-            let finalResponse = try? await client.conversationTree(sessionId: sessionId)
-                .activePath
-                .reversed()
-                .first(where: {
-                    $0.role == "assistant"
-                        && !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                })?
-                .text
             finishChildRun(
                 stopReason: stop,
                 mount: mount,
-                finalResponse: finalResponse,
+                finalResponse: childOutput.finalAssistant,
                 generation: generation,
                 runId: runId
             )
@@ -5083,7 +5075,7 @@ final class ChatStore {
         if stopReason != "cancelled", error == nil, let next = pendingChildSteer {
             pendingChildSteer = nil
             childBusy = true
-            childAssistant = ""
+            childOutput.reset()
             childChanged = []
             if let childSessionId {
                 invalidateWorkspacePaneSession(childSessionId)
@@ -5117,7 +5109,7 @@ final class ChatStore {
             return
         }
         pendingChildSteer = nil
-        let completeChildResponse = (finalResponse ?? childAssistant)
+        let completeChildResponse = (finalResponse ?? childOutput.complete)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         var brief = workspaceState.active ?? WorkspaceBrief(
             path: mount.path,
@@ -5127,12 +5119,12 @@ final class ChatStore {
         )
         if stopReason == "cancelled" {
             brief.status = .interrupted
-            brief.summary = WorkspaceRegistry.clip(childAssistant.isEmpty ? "Cancelled." : childAssistant, WorkspaceRegistry.maxSummaryChars)
+            brief.summary = WorkspaceRegistry.clip(childOutput.complete.isEmpty ? "Cancelled." : childOutput.complete, WorkspaceRegistry.maxSummaryChars)
         } else if error != nil || stopReason == "failed" {
             brief.status = .failed
-            brief.summary = WorkspaceRegistry.clip(error ?? childAssistant, WorkspaceRegistry.maxSummaryChars)
+            brief.summary = WorkspaceRegistry.clip(error ?? childOutput.complete, WorkspaceRegistry.maxSummaryChars)
         } else {
-            brief.summary = WorkspaceRegistry.clip(childAssistant, WorkspaceRegistry.maxSummaryChars)
+            brief.summary = WorkspaceRegistry.clip(childOutput.complete, WorkspaceRegistry.maxSummaryChars)
             brief.changedPaths = Array(
                 FileChangeSummaryPolicy.uniqueDisplayPaths(
                     childChanged,
@@ -5322,8 +5314,8 @@ final class ChatStore {
             if let content = AssistantMessageContent.parse(update["content"]) {
                 switch content {
                 case .text(let text):
-                    childAssistant += text
-                    patchActiveSummary(childAssistant)
+                    childOutput.appendAssistantText(text)
+                    patchActiveSummary(childOutput.complete)
                     appendWorkspacePaneAssistant(
                         text,
                         path: path,
@@ -5351,6 +5343,9 @@ final class ChatStore {
                 appendWorkspaceThought(text)
             }
         case "tool_call", "tool_call_update":
+            if kind == "tool_call" {
+                childOutput.beginToolCall()
+            }
             upsertWorkspacePaneTool(
                 update,
                 isUpdate: kind == "tool_call_update",
@@ -5408,6 +5403,7 @@ final class ChatStore {
                 if items[index].workspaceStartedAt == nil {
                     items[index].workspaceStartedAt = Date().timeIntervalSince1970
                 }
+                markTranscriptDelta(.update(items[index]))
                 persist()
                 return
             }
@@ -5418,10 +5414,10 @@ final class ChatStore {
                 let hasSummary = !(items[index].workspaceSummary ?? "")
                     .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 items[index].workspaceStatus = hasSummary ? "done" : "interrupted"
+                markTranscriptDelta(.update(items[index]))
             }
         }
-        items.append(
-            ChatItem(
+        let item = ChatItem(
                 kind: .workspaceRun,
                 text: brief.name,
                 workspacePath: brief.path,
@@ -5439,7 +5435,8 @@ final class ChatStore {
                     in: workspaceState
                 )
             )
-        )
+        items.append(item)
+        markTranscriptDelta(.append([item]))
         persist()
     }
 
