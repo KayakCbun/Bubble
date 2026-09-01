@@ -74,6 +74,7 @@ struct SlashCommand: Identifiable, Equatable {
         .init(name: "new", description: "Start a fresh session", local: true),
         .init(name: "side", description: "Open a parallel side session", local: true),
         .init(name: "close", description: "Close this side session, or hide Bubble from the main session", local: true),
+        .init(name: "loop", description: "Create a session-bound repeating task", hint: "5m 检查部署", local: true),
         .init(name: "compact", description: "Compact older conversation turns now", hint: "instructions", local: false),
         .init(name: "autocompact", description: "Toggle automatic compaction", hint: "on|off|toggle", local: false),
         .init(name: "session", description: "Show session stats", local: false),

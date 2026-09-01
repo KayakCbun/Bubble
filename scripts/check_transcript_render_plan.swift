@@ -255,6 +255,35 @@ private enum TranscriptRenderPlanCheck {
             thoughtDelta?.changedUnits.count == 1,
             "thought/COT text uses the same single-row delta path"
         )
+        let workspaceStatusPlanner = TranscriptRenderPlanner()
+        var workspaceStatusSeeds = [
+            TranscriptRenderSeed(id: "workspace-user", kind: .user, text: "Question"),
+            TranscriptRenderSeed(
+                id: "workspace-card",
+                kind: .other,
+                text: "",
+                contentVersion: 1,
+                isChunkable: false
+            ),
+            TranscriptRenderSeed(id: "workspace-answer", kind: .assistant, text: "Final answer")
+        ]
+        _ = workspaceStatusPlanner.plan(
+            seeds: workspaceStatusSeeds,
+            branchSourceID: nil,
+            streamingSeedIDs: []
+        )
+        workspaceStatusSeeds[1].contentVersion &+= 1
+        let workspaceStatusDelta = workspaceStatusPlanner.applyStreamingUpdate(
+            seedIndex: 1,
+            seed: workspaceStatusSeeds[1],
+            streaming: false,
+            branchSourceID: nil
+        )
+        expect(
+            workspaceStatusDelta?.changedSeedIndex == 1
+                && workspaceStatusDelta?.changedUnits.count == 1,
+            "a completed middle workspace card refreshes its mounted metadata-only row"
+        )
         let coalescedPlanner = TranscriptRenderPlanner()
         var coalescedSeeds = [
             TranscriptRenderSeed(id: "coalesced-user", kind: .user, text: "Question"),

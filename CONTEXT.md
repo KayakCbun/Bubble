@@ -39,8 +39,12 @@ The ACP child session for one mount within one main session. cwd is the mount pa
 _Avoid_: subagent (not a Pi subagent package), worker
 
 **Brief**:
-The only workspace state that may enter the main session. A small replaceable record: path, name, status, goal, summary, optional question, capped changed paths. No diffs, file bodies, or tool logs.
+The small replaceable state shown by a workspace run card: path, name, status, goal, summary, optional question, capped changed paths. No diffs, file bodies, or tool logs.
 _Avoid_: summary (too vague), transcript
+
+**Workspace result**:
+The workspace session's complete final assistant reply. When a run finishes, Bubble appends this reply directly to the main session as a displayed context message; it does not ask the main model to summarize or reproduce it in a second turn.
+_Avoid_: relay summary, injection brief
 
 **Workspace run**:
 The one in-flight child turn. Many mounts may exist; at most one run is active.
@@ -49,5 +53,9 @@ _Avoid_: job, task queue
 **Run card**:
 The main-transcript object for one workspace run. It displays the brief. Opening it reveals only that run's anchored turn and output in the workspace session.
 _Avoid_: subagent card, nested tool group
+
+**Loop**:
+A repeating task bound to one Bubble session. Created with `/loop` or `loop_create`. Hide keeps it firing; closing or quitting the session pauses it; `/resume` that session re-arms it. Ticks wait for the current turn and queued user follow-ups, then fire one due loop as a user-shaped model message rendered as a 定时触发 strip.
+_Avoid_: cron job, alarm, pi-loop
 
 Main sessions persist in `~/.bubble/session-id`. Conversation branch selections persist separately per session so a read-only branch switch survives relaunch.

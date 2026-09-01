@@ -349,27 +349,72 @@ struct AppKitTranscriptSurfaceMetrics {
 /// event must detach from the tail before the next streamed token arrives.
 /// Keep this hook at the physical input boundary and let the adapter decide
 /// whether the event is user-driven or programmatic.
+enum TranscriptChromeHitTestPolicy {
+    private static let buttonSize: CGFloat = 28
+    private static let buttonSpacing: CGFloat = 2
+    private static let edgePadding: CGFloat = 6
+
+    static func containsLoopButton(
+        _ point: NSPoint,
+        in bounds: NSRect,
+        flipped: Bool
+    ) -> Bool {
+        guard bounds.contains(point) else { return false }
+        let distanceFromRight = bounds.maxX - point.x
+        let distanceFromTop = flipped
+            ? point.y - bounds.minY
+            : bounds.maxY - point.y
+        let loopMinimumX = edgePadding + 2 * (buttonSize + buttonSpacing)
+        return distanceFromRight >= loopMinimumX
+            && distanceFromRight <= loopMinimumX + buttonSize
+            && distanceFromTop >= edgePadding
+            && distanceFromTop <= edgePadding + buttonSize
+    }
+}
+
 final class AppKitTranscriptScrollView: NSScrollView {
     var onUserScroll: ((NSEvent) -> Void)?
     var onUserScrollDidApply: (() -> Void)?
     var onDiscreteWheel: ((NSEvent) -> Bool)?
     var onPreciseWheelBegan: ((NSEvent) -> Bool)?
+    var onLoopButtonClick: (() -> Void)?
     var isDiagnosticOverscanReady: (() -> Bool)?
     private var localWheelMonitor: Any?
+    private var localMouseMonitor: Any?
     private(set) var localWheelHandlerGeneration: UInt64 = 0
     private(set) var lastLocalWheelHandlerDuration: TimeInterval = 0
 
     deinit {
         removeLocalWheelMonitor()
+        removeLocalMouseMonitor()
     }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         removeLocalWheelMonitor()
+        removeLocalMouseMonitor()
         guard window != nil else { return }
         localWheelMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
             self?.handleLocalWheelEvent(event) ?? event
         }
+        localMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
+            self?.handleLocalMouseDown(event) ?? event
+        }
+    }
+
+    private func handleLocalMouseDown(_ event: NSEvent) -> NSEvent? {
+        guard let window,
+              window.isVisible,
+              event.windowNumber == window.windowNumber,
+              let onLoopButtonClick else { return event }
+        let point = convert(event.locationInWindow, from: nil)
+        guard TranscriptChromeHitTestPolicy.containsLoopButton(
+            point,
+            in: bounds,
+            flipped: isFlipped
+        ) else { return event }
+        onLoopButtonClick()
+        return nil
     }
 
     private func handleLocalWheelEvent(_ event: NSEvent) -> NSEvent? {
@@ -410,6 +455,12 @@ final class AppKitTranscriptScrollView: NSScrollView {
         guard let localWheelMonitor else { return }
         NSEvent.removeMonitor(localWheelMonitor)
         self.localWheelMonitor = nil
+    }
+
+    private func removeLocalMouseMonitor() {
+        guard let localMouseMonitor else { return }
+        NSEvent.removeMonitor(localMouseMonitor)
+        self.localMouseMonitor = nil
     }
 
     override func scrollWheel(with event: NSEvent) {

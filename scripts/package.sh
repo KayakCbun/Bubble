@@ -125,6 +125,9 @@ swift run SessionTabsChecks
 swiftc -parse-as-library Sources/Bubble/MessageDelivery.swift scripts/check_message_delivery.swift -o /tmp/bubble-check-message-delivery
 /tmp/bubble-check-message-delivery
 
+swiftc -parse-as-library Sources/BubbleSessions/SessionLoops.swift scripts/check_session_loops.swift -o /tmp/bubble-check-session-loops
+/tmp/bubble-check-session-loops
+
 swiftc -parse-as-library Sources/Bubble/PreviewFiles.swift scripts/check_file_preview.swift -o /tmp/bubble-check-file-preview
 /tmp/bubble-check-file-preview
 
@@ -139,6 +142,9 @@ swiftc -parse-as-library Sources/Bubble/BubblePiAcpPatch.swift scripts/check_pi_
 
 swiftc -parse-as-library Sources/BubbleMounts/WorkspaceMounts.swift scripts/check_workspace_mounts.swift -o /tmp/bubble-check-mounts
 /tmp/bubble-check-mounts
+
+swiftc -parse-as-library scripts/check_workspace_completion_order.swift -o /tmp/bubble-check-workspace-completion-order
+/tmp/bubble-check-workspace-completion-order
 
 swiftc -parse-as-library \
   Sources/Bubble/BubbleNativeAction.swift \

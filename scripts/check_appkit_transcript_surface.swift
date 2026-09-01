@@ -148,6 +148,40 @@ private enum AppKitTranscriptSurfaceCheck {
         // NSScrollView/document-view path used by production.
         _ = NSApplication.shared
 
+        let chromeBounds = NSRect(x: 0, y: 0, width: 480, height: 320)
+        expect(
+            TranscriptChromeHitTestPolicy.containsLoopButton(
+                NSPoint(x: 400, y: 306),
+                in: chromeBounds,
+                flipped: false
+            ),
+            "the native transcript routes the visible top-right loop button"
+        )
+        expect(
+            TranscriptChromeHitTestPolicy.containsLoopButton(
+                NSPoint(x: 400, y: 14),
+                in: chromeBounds,
+                flipped: true
+            ),
+            "the loop hit region is stable in flipped coordinates"
+        )
+        expect(
+            !TranscriptChromeHitTestPolicy.containsLoopButton(
+                NSPoint(x: 460, y: 306),
+                in: chromeBounds,
+                flipped: false
+            ),
+            "the native loop route does not steal the width button"
+        )
+        expect(
+            !TranscriptChromeHitTestPolicy.containsLoopButton(
+                NSPoint(x: 400, y: 250),
+                in: chromeBounds,
+                flipped: false
+            ),
+            "the native loop route does not steal transcript rows"
+        )
+
         // Prefix offsets, row lookup, one-row updates, and prepend all remain
         // deterministic and logarithmic at the height-index seam.
         var index = TranscriptHeightIndex(heights: [20, 30, 40])
@@ -587,6 +621,44 @@ private enum AppKitTranscriptSurfaceCheck {
                 "direct row update persists layout-only changes"
             )
         }
+
+        // A workspace card has no transcript text; its running/done state is
+        // represented by producer metadata and therefore only changes the
+        // row content identity. Start with a genuinely mutable row—the exact
+        // production contract—then verify its terminal update reaches the
+        // mounted host instead of being rejected as completed history.
+        let workspaceRowID = "workspace-card"
+        let workspaceSession = TranscriptSessionHandle(
+            sessionID: "workspace-transition",
+            generation: 1,
+            revision: 0
+        )
+        let workspaceAdapter = AppKitTranscriptSurfaceAdapter(
+            snapshot: TranscriptSurfaceSnapshot(
+                session: workspaceSession,
+                rows: [row(workspaceRowID, version: 20, height: 72, completed: false)]
+            ),
+            overscan: 0,
+            maximumMountedRows: 1,
+            maximumReusableHosts: 0
+        )
+        workspaceAdapter.setViewportSize(NSSize(width: 480, height: 120))
+        let configureBeforeWorkspaceDone = workspaceAdapter.hostConfigureCount(
+            rowID: workspaceRowID
+        ) ?? 0
+        _ = workspaceAdapter.apply(.update(
+            row: row(workspaceRowID, version: 21, height: 72, completed: true),
+            session: workspaceAdapter.currentHandle.nextRevision()
+        ))
+        expect(
+            workspaceAdapter.snapshot.row(id: workspaceRowID)?.isCompleted == true,
+            "workspace running-to-done metadata reaches the adapter snapshot"
+        )
+        expect(
+            (workspaceAdapter.hostConfigureCount(rowID: workspaceRowID) ?? 0)
+                > configureBeforeWorkspaceDone,
+            "workspace running-to-done metadata reconfigures its mounted host"
+        )
 
         // Line-based mouse wheels bypass AppKit's delayed smoothing and move
         // the production viewport in the same event. Trackpads still carry

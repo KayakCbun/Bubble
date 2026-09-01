@@ -308,6 +308,25 @@ final class AcpClient: @unchecked Sendable {
         return snapshot
     }
 
+    func appendWorkspaceResult(
+        _ text: String,
+        details: [String: Any] = [:],
+        sessionId override: String? = nil
+    ) async throws -> ConversationTreeSnapshot {
+        guard let sessionId = override ?? sessionId else {
+            throw RPCError(code: -4, message: "no session")
+        }
+        let result = try await request("_bubble/session/append_workspace_result", params: [
+            "sessionId": sessionId,
+            "text": text,
+            "details": details,
+        ])
+        guard let snapshot = ConversationTreeSnapshot(response: result) else {
+            throw RPCError(code: -7, message: "Pi returned an unreadable conversation tree.")
+        }
+        return snapshot
+    }
+
     func cancel(sessionId override: String? = nil) {
         guard let sessionId = override ?? sessionId else { return }
         queue.async { [weak self] in

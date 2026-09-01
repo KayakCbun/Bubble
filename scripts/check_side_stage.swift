@@ -374,6 +374,12 @@ struct SideStageCheck {
             ),
             "the active child session continues streaming into its run"
         )
+        var output = WorkspaceRunOutputAccumulator()
+        output.appendAssistantText("先检查配置。")
+        output.beginToolCall()
+        output.appendAssistantText("最终结论。")
+        expect(output.complete == "先检查配置。最终结论。", "workspace card summary keeps the complete child narration")
+        expect(output.finalAssistant == "最终结论。", "workspace relay uses only the assistant text after the final tool call")
         expect(
             SideStagePolicy.scrollTarget(
                 followLatest: false,

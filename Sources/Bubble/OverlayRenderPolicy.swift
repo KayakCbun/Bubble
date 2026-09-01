@@ -125,6 +125,8 @@ enum ComposerReturnKeyPolicy {
 enum OverlayEscapeAction: Equatable {
     case dismissSlashMenu
     case dismissAvatarPicker
+    case dismissLoopList
+    case dismissLoopClosePrompt
     case cancelTurn
     case hideOverlay
 }
@@ -133,10 +135,14 @@ enum OverlayEscapePolicy {
     static func action(
         slashMenuVisible: Bool,
         avatarPickerVisible: Bool,
-        isBusy: Bool
+        isBusy: Bool,
+        loopListVisible: Bool = false,
+        loopClosePromptVisible: Bool = false
     ) -> OverlayEscapeAction {
         if slashMenuVisible { return .dismissSlashMenu }
         if avatarPickerVisible { return .dismissAvatarPicker }
+        if loopListVisible { return .dismissLoopList }
+        if loopClosePromptVisible { return .dismissLoopClosePrompt }
         if isBusy { return .cancelTurn }
         return .hideOverlay
     }

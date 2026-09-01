@@ -25,6 +25,17 @@ private func row(
 @main
 private enum TranscriptSurfaceCheck {
     static func main() {
+        expect(
+            !TranscriptRowCompletionPolicy.workspaceCardIsCompleted(status: "running")
+                && !TranscriptRowCompletionPolicy.workspaceCardIsCompleted(status: "waiting"),
+            "active workspace cards stay mutable at the surface boundary"
+        )
+        expect(
+            TranscriptRowCompletionPolicy.workspaceCardIsCompleted(status: "done")
+                && TranscriptRowCompletionPolicy.workspaceCardIsCompleted(status: "failed")
+                && TranscriptRowCompletionPolicy.workspaceCardIsCompleted(status: "interrupted"),
+            "terminal workspace cards become immutable surface rows"
+        )
         let session = TranscriptSessionHandle(sessionID: "main", generation: 1, revision: 0)
         let anchor = TranscriptSurfaceAnchor(rowID: "assistant-1", offset: 18.5)
         let initial = TranscriptSurfaceSnapshot(

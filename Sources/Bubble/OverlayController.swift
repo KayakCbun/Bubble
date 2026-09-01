@@ -43,6 +43,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
     private var pendingShowCompletion: (() -> Void)?
     private var deferredPresentationWorkGeneration = 0
     private var foregroundPerformanceActivity: NSObjectProtocol?
+    private var loopPerformanceActivity: NSObjectProtocol?
 
     private let positionCenterXKey = "bubble.position.centerX"
     private let positionBottomYKey = "bubble.position.bottomY"
@@ -152,7 +153,11 @@ final class OverlayController: NSObject, NSWindowDelegate {
             }
             return event
         }
+        sessions.onLoopsChanged = { [weak self] in
+            self?.syncLoopActivity()
+        }
         connectAllIfNeeded()
+        syncLoopActivity()
     }
 
     func stop() {
@@ -161,6 +166,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         if let localMouseMonitor { NSEvent.removeMonitor(localMouseMonitor) }
         if let localKeys { NSEvent.removeMonitor(localKeys) }
         sessions.prepareToQuit()
+        endLoopActivity()
         frameAnimator.cancel()
         presentationAnimator.cancel(resetVisible: true)
         hide(animated: false)
@@ -329,6 +335,29 @@ final class OverlayController: NSObject, NSWindowDelegate {
     private func endForegroundPerformanceActivity() {
         guard let activity = foregroundPerformanceActivity else { return }
         foregroundPerformanceActivity = nil
+        ProcessInfo.processInfo.endActivity(activity)
+    }
+
+    private func syncLoopActivity() {
+        let armed = sessions.allRuntimes.contains(where: \.hasArmedLoops)
+        if armed {
+            beginLoopActivity()
+        } else {
+            endLoopActivity()
+        }
+    }
+
+    private func beginLoopActivity() {
+        guard loopPerformanceActivity == nil else { return }
+        loopPerformanceActivity = ProcessInfo.processInfo.beginActivity(
+            options: [.userInitiatedAllowingIdleSystemSleep],
+            reason: "Bubble session loops are armed"
+        )
+    }
+
+    private func endLoopActivity() {
+        guard let activity = loopPerformanceActivity else { return }
+        loopPerformanceActivity = nil
         ProcessInfo.processInfo.endActivity(activity)
     }
 
@@ -1230,13 +1259,19 @@ final class OverlayController: NSObject, NSWindowDelegate {
         let action = OverlayEscapePolicy.action(
             slashMenuVisible: store.slashMenuVisible,
             avatarPickerVisible: store.showAvatarPicker,
-            isBusy: store.isBusy
+            isBusy: store.isBusy,
+            loopListVisible: store.loopListPresented,
+            loopClosePromptVisible: store.loopClosePrompt != nil
         )
         switch action {
         case .dismissSlashMenu:
             store.dismissSlashMenu()
         case .dismissAvatarPicker:
             store.showAvatarPicker = false
+        case .dismissLoopList:
+            store.dismissLoopList()
+        case .dismissLoopClosePrompt:
+            store.resolveLoopClosePrompt(false)
         case .cancelTurn:
             store.cancel()
             ComposerEditorLocator.releaseFieldEditor(in: panel)
