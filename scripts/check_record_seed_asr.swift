@@ -43,6 +43,11 @@ enum RecordSeedAsrCheck {
         let compressed = try RecordSeedAsrCodec.gzip(source)
         let restored = try RecordSeedAsrCodec.gunzip(compressed)
         expect(restored == source, "gzip round-trips")
+
+        let emptyGzip = try RecordSeedAsrCodec.gzip(Data())
+        let emptyRestored = try RecordSeedAsrCodec.gunzip(emptyGzip)
+        expect(!emptyGzip.isEmpty, "the last empty audio packet still has a gzip header")
+        expect(emptyRestored.isEmpty, "empty gzip round-trips to empty audio")
     }
 
     private static func testFullRequestFrame() throws {
@@ -50,6 +55,17 @@ enum RecordSeedAsrCheck {
         expect(frame.count > 12, "full client request has header, sequence, and payload")
         expect(frame[1] >> 4 == RecordSeedAsrCodec.clientFullRequest, "first client packet is a full request")
         expect(frame[2] & 0x0F == RecordSeedAsrCodec.compressionGzip, "client packets are gzipped")
+        let size = Int(UInt32(bigEndian: frame.subdata(in: 8..<12).withUnsafeBytes { $0.load(as: UInt32.self) }))
+        let payload = try RecordSeedAsrCodec.gunzip(frame.subdata(in: 12..<(12 + size)))
+        let json = try JSONSerialization.jsonObject(with: payload) as? [String: Any]
+        let request = json?["request"] as? [String: Any]
+        expect(request?["show_utterances"] as? Bool == true, "Seed ASR requests utterance timestamps")
+        expect(request?["enable_speaker_info"] as? Bool == true, "Seed ASR requests speaker labels")
+        expect(request?["result_type"] as? String == "single", "incremental utterances keep live captions")
+        expect(request?["enable_nonstream"] as? Bool == true, "speaker labels need dual-pass on the async endpoint")
+        expect(request?["ssd_version"] as? String == "200", "speaker labels use the Seed ASR 2.0 SSD")
+        let audio = json?["audio"] as? [String: Any]
+        expect(audio?["language"] == nil, "language stays unpinned so Cantonese still transcribes")
     }
 
     private static func testAudioLastSequence() throws {
@@ -60,21 +76,55 @@ enum RecordSeedAsrCheck {
     }
 
     private static func testApplyCaptions() {
+        let parsed = RecordSeedAsrCodec.parseUtterance([
+            "text": "你好世界",
+            "definite": true,
+            "start_time": 1200,
+            "end_time": 3400,
+            "additions": ["speaker": "1"],
+        ])
+        expect(parsed?.speaker == "1", "utterances keep the speaker id")
+        expect(parsed?.startMs == 1200, "utterances keep the start time")
+        expect(parsed?.endMs == 3400, "utterances keep the end time")
+        expect(
+            RecordSeedAsrCodec.parseUtterance([
+                "text": "你好",
+                "definite": true,
+                "speaker_id": 2,
+            ])?.speaker == "2",
+            "numeric speaker_id still labels the line"
+        )
+        expect(
+            RecordSeedAsrCodec.parseUtterance([
+                "text": "你好",
+                "definite": true,
+                "words": [["text": "你", "additions": ["speaker": "3"]]],
+            ])?.speaker == "3",
+            "speaker labels on words still lift to the utterance"
+        )
+
         let first = RecordSeedAsrCodec.apply(
             RecordSeedAsrCodec.Response(
                 messageType: RecordSeedAsrCodec.serverFullResponse,
                 sequence: 1,
                 isLast: false,
                 text: "你好",
-                utterances: [RecordSeedAsrCodec.Utterance(text: "你好", definite: false)],
+                utterances: [
+                    RecordSeedAsrCodec.Utterance(
+                        text: "你好",
+                        definite: false,
+                        startMs: 0,
+                        endMs: 1_500,
+                        speaker: "1"
+                    ),
+                ],
                 code: 0,
                 errorMessage: nil
             ),
-            finals: "",
-            volatile: ""
+            committed: []
         )
-        expect(first.volatile == "你好", "indefinite utterances are live captions")
-        expect(first.finals.isEmpty, "indefinite utterances are not flushed yet")
+        expect(first.preview == "[0:00–0:01] 说话人1 你好", "indefinite utterances are live captions with time and speaker")
+        expect(first.committed.isEmpty, "indefinite utterances are not flushed yet")
 
         let second = RecordSeedAsrCodec.apply(
             RecordSeedAsrCodec.Response(
@@ -82,14 +132,59 @@ enum RecordSeedAsrCheck {
                 sequence: 2,
                 isLast: false,
                 text: "你好世界",
-                utterances: [RecordSeedAsrCodec.Utterance(text: "你好世界", definite: true)],
+                utterances: [
+                    RecordSeedAsrCodec.Utterance(
+                        text: "你好世界",
+                        definite: true,
+                        startMs: 0,
+                        endMs: 1800,
+                        speaker: "1"
+                    ),
+                ],
                 code: 0,
                 errorMessage: nil
             ),
-            finals: first.finals,
-            volatile: first.volatile
+            committed: first.committed
         )
-        expect(second.finals == "你好世界", "definite utterances become Record notes")
+        expect(
+            second.preview == "[0:00–0:01] 说话人1 你好世界",
+            "definite utterances become Record notes with a time range"
+        )
+        expect(second.committed.count == 1, "definite utterances stay committed")
+
+        let relabeled = RecordSeedAsrCodec.apply(
+            RecordSeedAsrCodec.Response(
+                messageType: RecordSeedAsrCodec.serverFullResponse,
+                sequence: 3,
+                isLast: false,
+                text: "你好世界 下一位",
+                utterances: [
+                    RecordSeedAsrCodec.Utterance(
+                        text: "你好世界",
+                        definite: true,
+                        startMs: 0,
+                        endMs: 1800,
+                        speaker: "2"
+                    ),
+                    RecordSeedAsrCodec.Utterance(
+                        text: "下一位",
+                        definite: true,
+                        startMs: 2_000,
+                        endMs: 3_100,
+                        speaker: "1"
+                    ),
+                ],
+                code: 0,
+                errorMessage: nil
+            ),
+            committed: second.committed
+        )
+        expect(relabeled.committed.count == 2, "a full result list keeps earlier utterances")
+        expect(relabeled.committed.first?.speaker == "2", "later clustering can update the speaker")
+        expect(
+            relabeled.preview.contains("说话人1 下一位") == true,
+            "a second speaker is labeled on its own line"
+        )
     }
 
     private static func testCredentialsStore() {

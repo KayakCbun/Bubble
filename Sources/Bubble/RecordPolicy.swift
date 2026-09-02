@@ -79,6 +79,42 @@ enum RecordNotesAssembler {
         if volatile.hasPrefix(final) { return volatile }
         return final + (final.hasSuffix(" ") || volatile.hasPrefix(" ") ? "" : " ") + volatile
     }
+
+    static func captionLine(
+        text: String,
+        speaker: String? = nil,
+        startMs: Int? = nil,
+        endMs: Int? = nil
+    ) -> String {
+        let body = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !body.isEmpty else { return "" }
+        var parts: [String] = []
+        if let range = timeRangeLabel(startMs: startMs, endMs: endMs) {
+            parts.append("[\(range)]")
+        }
+        if let speaker, !speaker.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            parts.append("说话人\(speaker.trimmingCharacters(in: .whitespacesAndNewlines))")
+        }
+        parts.append(body)
+        return parts.joined(separator: " ")
+    }
+
+    static func captionNotes(_ lines: [String]) -> String {
+        lines
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+    }
+
+    static func timeRangeLabel(startMs: Int?, endMs: Int?) -> String? {
+        guard let startMs else { return nil }
+        let start = RecordPolicy.elapsedClockLabel(seconds: startMs / 1000)
+        if let endMs, endMs > startMs {
+            let end = RecordPolicy.elapsedClockLabel(seconds: endMs / 1000)
+            if end != start { return "\(start)–\(end)" }
+        }
+        return start
+    }
 }
 
 enum RecordToggleAction: Equatable, Sendable {

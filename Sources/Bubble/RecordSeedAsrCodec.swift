@@ -21,6 +21,9 @@ enum RecordSeedAsrCodec {
     struct Utterance: Equatable {
         var text: String
         var definite: Bool
+        var startMs: Int?
+        var endMs: Int?
+        var speaker: String?
     }
 
     struct Response: Equatable {
@@ -64,6 +67,7 @@ enum RecordSeedAsrCodec {
                 "enable_itn": true,
                 "enable_punc": true,
                 "enable_ddc": true,
+                "enable_speaker_info": true,
                 "show_utterances": true,
                 "result_type": "single",
                 "enable_nonstream": true,
@@ -155,10 +159,12 @@ enum RecordSeedAsrCodec {
         let json = (try? JSONSerialization.jsonObject(with: payload) as? [String: Any]) ?? [:]
         let result = json["result"] as? [String: Any]
         let text = result?["text"] as? String
+        let resultSpeaker = speakerValue(in: result) ?? speakerValue(in: json)
         let rawUtterances = result?["utterances"] as? [[String: Any]] ?? []
         let utterances = rawUtterances.compactMap { item -> Utterance? in
-            guard let text = item["text"] as? String else { return nil }
-            return Utterance(text: text, definite: item["definite"] as? Bool ?? false)
+            guard var utterance = parseUtterance(item) else { return nil }
+            if utterance.speaker == nil { utterance.speaker = resultSpeaker }
+            return utterance
         }
         return Response(
             messageType: messageType,
@@ -171,24 +177,129 @@ enum RecordSeedAsrCodec {
         )
     }
 
-    static func apply(_ response: Response, finals: String, volatile: String) -> (finals: String, volatile: String) {
-        var nextFinals = finals
-        var nextVolatile = volatile
+    static func apply(
+        _ response: Response,
+        committed: [Utterance]
+    ) -> (committed: [Utterance], preview: String) {
+        var next = committed
+        var volatile: Utterance?
         if !response.utterances.isEmpty {
             for utterance in response.utterances {
-                if utterance.definite {
-                    nextFinals = RecordNotesAssembler.appendFinal(existing: nextFinals, incoming: utterance.text)
-                    nextVolatile = nextFinals
+                let text = utterance.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !text.isEmpty else { continue }
+                var item = utterance
+                item.text = text
+                if item.definite {
+                    next = upsert(next, item)
                 } else {
-                    nextVolatile = RecordNotesAssembler.merge(final: nextFinals, volatile: utterance.text)
+                    volatile = item
                 }
             }
-            return (nextFinals, nextVolatile)
+        } else if let text = response.text?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
+            volatile = Utterance(text: text, definite: false)
         }
-        if let text = response.text?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
-            nextVolatile = RecordNotesAssembler.merge(final: nextFinals, volatile: text)
+        let preview = RecordNotesAssembler.captionNotes(
+            (next + [volatile].compactMap { $0 }).map {
+                RecordNotesAssembler.captionLine(
+                    text: $0.text,
+                    speaker: $0.speaker,
+                    startMs: $0.startMs,
+                    endMs: $0.endMs
+                )
+            }
+        )
+        return (next, preview)
+    }
+
+    static func parseUtterance(_ item: [String: Any]) -> Utterance? {
+        guard let text = item["text"] as? String else { return nil }
+        return Utterance(
+            text: text,
+            definite: boolValue(item["definite"]),
+            startMs: intValue(item["start_time"]),
+            endMs: intValue(item["end_time"]),
+            speaker: speakerValue(in: item)
+        )
+    }
+
+    static func upsert(_ committed: [Utterance], _ item: Utterance) -> [Utterance] {
+        if let start = item.startMs,
+           let index = committed.firstIndex(where: { abs(($0.startMs ?? -10_000) - start) < 250 }) {
+            var merged = item
+            if merged.speaker == nil { merged.speaker = committed[index].speaker }
+            var next = committed
+            next[index] = merged
+            return next
         }
-        return (nextFinals, nextVolatile)
+        if let last = committed.last, last.text == item.text {
+            var merged = item
+            if merged.speaker == nil { merged.speaker = last.speaker }
+            var next = committed
+            next[next.count - 1] = merged
+            return next
+        }
+        return committed + [item]
+    }
+
+    static func speakerValue(in object: [String: Any]?) -> String? {
+        guard let object else { return nil }
+        let keys = ["speaker", "speaker_id", "spk", "spk_id", "speakerId"]
+        for key in keys {
+            if let value = stringValue(object[key]) { return value }
+        }
+        if let additions = object["additions"] as? [String: Any] {
+            for key in keys {
+                if let value = stringValue(additions[key]) { return value }
+            }
+        }
+        if let additions = object["additions"] as? String,
+           let data = additions.data(using: .utf8),
+           let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            for key in keys {
+                if let value = stringValue(parsed[key]) { return value }
+            }
+        }
+        if let words = object["words"] as? [[String: Any]] {
+            let speakers = words.compactMap { speakerValue(in: $0) }
+            if let majority = majority(speakers) { return majority }
+        }
+        return nil
+    }
+
+    private static func majority(_ values: [String]) -> String? {
+        guard !values.isEmpty else { return nil }
+        var counts: [String: Int] = [:]
+        for value in values { counts[value, default: 0] += 1 }
+        return counts.max { $0.value < $1.value }?.key
+    }
+
+    private static func boolValue(_ value: Any?) -> Bool {
+        if let flag = value as? Bool { return flag }
+        if let number = value as? NSNumber { return number.boolValue }
+        if let text = value as? String {
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            return trimmed == "true" || trimmed == "1"
+        }
+        return false
+    }
+
+    private static func stringValue(_ value: Any?) -> String? {
+        if let text = value as? String {
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        if let number = value as? NSNumber {
+            return number.stringValue
+        }
+        return nil
+    }
+
+    private static func intValue(_ value: Any?) -> Int? {
+        if let number = value as? Int { return number }
+        if let number = value as? NSNumber { return number.intValue }
+        if let number = value as? Double { return Int(number) }
+        if let text = value as? String { return Int(text) }
+        return nil
     }
 
     private static func frame(
@@ -229,8 +340,8 @@ enum RecordSeedAsrCodec {
     }
 
     private static func zlib(_ data: Data, windowBits: Int32, decompressing: Bool) throws -> Data {
-        if data.isEmpty { return Data() }
-        var input = [UInt8](data)
+        if data.isEmpty, decompressing { return Data() }
+        var input = data.isEmpty ? [UInt8](repeating: 0, count: 1) : [UInt8](data)
         var stream = z_stream()
         let initStatus: Int32 = {
             if decompressing {
@@ -256,7 +367,7 @@ enum RecordSeedAsrCodec {
             }
         }
         var output = Data()
-        var buffer = [UInt8](repeating: 0, count: max(512, data.count * 2))
+        var buffer = [UInt8](repeating: 0, count: max(64, data.count * 2))
         try input.withUnsafeMutableBytes { inRaw in
             stream.next_in = inRaw.bindMemory(to: Bytef.self).baseAddress
             stream.avail_in = uInt(data.count)
