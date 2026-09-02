@@ -63,7 +63,7 @@ A mixed-audio capture bound to one Bubble session. Overlay shows live captions w
 _Avoid_: recording session, transcript, loop, workspace run
 
 **Record notes**:
-The transcribed text. Overlay-only while the Record is running. On stop, Bubble keeps them on a Record card and in model context without starting a model turn or duplicating them as an assistant message.
+The transcribed text. Overlay-only while the Record is running. Seed ASR notes keep utterance time ranges, and speaker labels when the stream returns them. On stop, Bubble keeps them on a Record card and in model context without starting a model turn or duplicating them as an assistant message.
 _Avoid_: transcript, summary, injection brief
 
 **Slot**:

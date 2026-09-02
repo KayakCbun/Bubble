@@ -7,11 +7,11 @@ final class RecordSeedAsrTranscriber: NSObject, RecordTranscriber, URLSessionWeb
     private var onCaptions: ((String) -> Void)?
     private var session: URLSession?
     private var task: URLSessionWebSocketTask?
-    private let queue = DispatchQueue(label: "local.bubble.record-seed-asr")
-    private var sequence: Int32 = 1
+    private let sender = RecordSeedAsrSender()
     private var ready = false
-    private var finals = ""
-    private var volatile = ""
+    private var committed: [RecordSeedAsrCodec.Utterance] = []
+    private var lastPreview = ""
+    private var loggedSpeakerShape = false
     private var receiveTask: Task<Void, Never>?
 
     init(credentials: RecordSeedAsrCredentials, onCaptions: ((String) -> Void)? = nil) {
@@ -25,9 +25,8 @@ final class RecordSeedAsrTranscriber: NSObject, RecordTranscriber, URLSessionWeb
             throw RecordCaptureError.converter
         }
         inputFormat = format
-        finals = ""
-        volatile = ""
-        sequence = 1
+        committed = []
+        lastPreview = ""
         let requestID = UUID().uuidString
         let connectID = UUID().uuidString
         let endpoint = credentials.endpoint.isEmpty ? RecordSeedAsrCodec.defaultEndpoint : credentials.endpoint
@@ -46,10 +45,10 @@ final class RecordSeedAsrTranscriber: NSObject, RecordTranscriber, URLSessionWeb
         let task = session.webSocketTask(with: request)
         self.session = session
         self.task = task
+        await sender.attach(task)
         task.resume()
         let hello = try RecordSeedAsrCodec.fullClientRequest(uid: "bubble-record")
-        try await sendFrame(hello)
-        sequence = 2
+        try await sender.sendHello(hello)
         ready = true
         OverlayLog.write("record transcriber ready engine=seed-asr format=16000Hz ch=1")
         receiveTask = Task { [weak self] in
@@ -59,40 +58,26 @@ final class RecordSeedAsrTranscriber: NSObject, RecordTranscriber, URLSessionWeb
 
     func send(_ buffer: AVAudioPCMBuffer) {
         guard ready, let pcm = RecordAudioConvert.pcmInt16LE(buffer), !pcm.isEmpty else { return }
-        queue.async { [weak self] in
-            guard let self, self.ready else { return }
-            let sequence = self.sequence
-            self.sequence += 1
-            Task {
-                do {
-                    let frame = try RecordSeedAsrCodec.audioRequest(pcm, sequence: sequence, isLast: false)
-                    try await self.sendFrame(frame)
-                } catch {
-                    OverlayLog.write("record seed-asr send failed: \(error.localizedDescription)")
-                }
-            }
+        Task { [weak self] in
+            guard let self else { return }
+            let sent = await self.sender.sendPCM(pcm)
+            if !sent { self.ready = false }
         }
     }
 
     func finalize() async -> String {
         ready = false
-        let lastSequence = sequence
-        do {
-            let frame = try RecordSeedAsrCodec.audioRequest(Data(), sequence: lastSequence, isLast: true)
-            try await sendFrame(frame)
-        } catch {
-            OverlayLog.write("record seed-asr last packet failed: \(error.localizedDescription)")
-        }
+        await sender.sendLast()
         try? await Task.sleep(nanoseconds: 400_000_000)
         receiveTask?.cancel()
         receiveTask = nil
+        await sender.stop()
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
         session?.invalidateAndCancel()
         session = nil
         inputFormat = nil
-        let notes = volatile.trimmingCharacters(in: .whitespacesAndNewlines)
-        let finished = notes.isEmpty ? finals : notes
+        let finished = lastPreview.trimmingCharacters(in: .whitespacesAndNewlines)
         OverlayLog.write("record transcriber finished engine=seed-asr notes=\(finished.count)")
         return finished
     }
@@ -110,11 +95,8 @@ final class RecordSeedAsrTranscriber: NSObject, RecordTranscriber, URLSessionWeb
         reason: Data?
     ) {
         OverlayLog.write("record seed-asr closed code=\(closeCode.rawValue)")
-    }
-
-    private func sendFrame(_ data: Data) async throws {
-        guard let task else { throw RecordSeedAsrError.connect("not connected") }
-        try await task.send(.data(data))
+        ready = false
+        Task { await sender.markDead() }
     }
 
     private func receiveLoop() async {
@@ -135,6 +117,8 @@ final class RecordSeedAsrTranscriber: NSObject, RecordTranscriber, URLSessionWeb
             } catch {
                 if !Task.isCancelled {
                     OverlayLog.write("record seed-asr receive failed: \(error.localizedDescription)")
+                    ready = false
+                    await sender.markDead()
                 }
                 return
             }
@@ -146,18 +130,86 @@ final class RecordSeedAsrTranscriber: NSObject, RecordTranscriber, URLSessionWeb
             let response = try RecordSeedAsrCodec.parse(data)
             if let message = response.errorMessage, response.messageType == RecordSeedAsrCodec.serverError {
                 OverlayLog.write("record seed-asr error: \(message)")
+                ready = false
+                Task { await sender.markDead() }
                 return
             }
-            let applied = RecordSeedAsrCodec.apply(response, finals: finals, volatile: volatile)
-            finals = applied.finals
-            volatile = applied.volatile
-            let captions = applied.volatile
+            let applied = RecordSeedAsrCodec.apply(response, committed: committed)
+            committed = applied.committed
+            lastPreview = applied.preview
+            if !loggedSpeakerShape, let sample = response.utterances.first(where: { $0.definite }) {
+                loggedSpeakerShape = true
+                OverlayLog.write(
+                    "record seed-asr definite speaker=\(sample.speaker ?? "nil") start=\(sample.startMs.map(String.init) ?? "nil")"
+                )
+            }
+            let captions = applied.preview
             DispatchQueue.main.async { [weak self] in
                 self?.onCaptions?(captions)
             }
         } catch {
             OverlayLog.write("record seed-asr parse failed: \(error.localizedDescription)")
         }
+    }
+}
+
+/// Seed ASR rejects a stream if websocket audio frames arrive out of sequence.
+private actor RecordSeedAsrSender {
+    private var task: URLSessionWebSocketTask?
+    private var sequence: Int32 = 1
+    private var alive = false
+    private var loggedFailure = false
+
+    func attach(_ task: URLSessionWebSocketTask) {
+        self.task = task
+        sequence = 1
+        alive = true
+        loggedFailure = false
+    }
+
+    func sendHello(_ data: Data) async throws {
+        guard let task else { throw RecordSeedAsrError.connect("not connected") }
+        try await task.send(.data(data))
+        sequence = 2
+    }
+
+    func sendPCM(_ pcm: Data) async -> Bool {
+        guard alive, let task else { return false }
+        let seq = sequence
+        sequence += 1
+        do {
+            let frame = try RecordSeedAsrCodec.audioRequest(pcm, sequence: seq, isLast: false)
+            try await task.send(.data(frame))
+            return true
+        } catch {
+            alive = false
+            if !loggedFailure {
+                loggedFailure = true
+                OverlayLog.write("record seed-asr send failed: \(error.localizedDescription)")
+            }
+            return false
+        }
+    }
+
+    func sendLast() async {
+        guard let task else { return }
+        let seq = sequence
+        alive = false
+        do {
+            let frame = try RecordSeedAsrCodec.audioRequest(Data(), sequence: seq, isLast: true)
+            try await task.send(.data(frame))
+        } catch {
+            OverlayLog.write("record seed-asr last packet failed: \(error.localizedDescription)")
+        }
+    }
+
+    func markDead() {
+        alive = false
+    }
+
+    func stop() {
+        alive = false
+        task = nil
     }
 }
 

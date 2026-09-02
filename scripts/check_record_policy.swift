@@ -236,6 +236,24 @@ struct RecordPolicyCheck {
 
     private static func testNotesAssembler() {
         expect(
+            RecordNotesAssembler.captionLine(
+                text: "开箱",
+                speaker: "1",
+                startMs: 0,
+                endMs: 4_200
+            ) == "[0:00–0:04] 说话人1 开箱",
+            "Seed ASR notes keep speaker and time range"
+        )
+        expect(
+            RecordNotesAssembler.captionLine(text: "开箱", startMs: 1_000) == "[0:01] 开箱",
+            "a timestamp without a speaker still labels the line"
+        )
+        expect(
+            RecordNotesAssembler.captionNotes(["[0:00] 说话人1 你好", "", "[0:03] 说话人2 世界"])
+                == "[0:00] 说话人1 你好\n[0:03] 说话人2 世界",
+            "caption notes keep one line per utterance"
+        )
+        expect(
             RecordNotesAssembler.appendFinal(existing: "", incoming: "hello") == "hello",
             "first final becomes the notes"
         )
