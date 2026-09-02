@@ -262,7 +262,7 @@ enum RecordPolicy {
         /record — 再输入一次停止，并把录音笔记写进对话。
         /record stop — 停止录音。
         隐藏 Bubble 不会停止录音。关掉或新开对话会先停下并写入笔记。
-        已配置豆包 Seed ASR 时用云端流式识别做直播字幕；否则用本机 Apple Speech。
+        云端字幕：在 ~/.bubble/record.json 的 apiKey 写入火山方舟密钥。空着则用本机 Apple Speech。
         """
     }
 
