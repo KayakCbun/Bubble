@@ -47,6 +47,12 @@ let package = Package(
                 .linkedFramework("ApplicationServices"),
                 .linkedFramework("WebKit"),
                 .linkedFramework("Network"),
+                .linkedFramework("Speech"),
+                .linkedFramework("AVFoundation"),
+                .linkedFramework("AudioToolbox"),
+                .linkedFramework("CoreAudio"),
+                .linkedFramework("CoreMedia"),
+                .linkedLibrary("z"),
             ]
         ),
         .executableTarget(

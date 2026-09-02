@@ -193,9 +193,28 @@ enum TranscriptWheelCapturePolicy {
     /// SwiftUI rich rows can contain their own horizontal scroll views. Those
     /// views are allowed to own horizontal gestures, but a vertical wheel
     /// gesture anywhere inside the transcript must reach the transcript's
-    /// AppKit scroll view instead of dying at a nested scroll boundary.
+    /// AppKit scroll view instead of dying at a nested scroll boundary —
+    /// unless a nested vertical scroller is under the pointer and actually
+    /// owns that axis (Record notes, long file-change lists).
     static func shouldCapture(deltaX: CGFloat, deltaY: CGFloat) -> Bool {
         abs(deltaY) > 0.01 && abs(deltaY) > abs(deltaX)
+    }
+}
+
+enum TranscriptNestedVerticalScrollPolicy {
+    static let recordNotesIdentifier = "bubble.record.notes"
+    static let overflowSlop: CGFloat = 0.5
+
+    /// Record notes always keep the wheel while the pointer is over them.
+    /// Other nested scrollers keep it only when their document is taller
+    /// than the clip, so horizontal code/table scrollers still fall through.
+    static func shouldDeferToNestedScroller(
+        documentHeight: CGFloat,
+        clipHeight: CGFloat,
+        identifier: String?
+    ) -> Bool {
+        if identifier == recordNotesIdentifier { return true }
+        return documentHeight > clipHeight + overflowSlop
     }
 }
 

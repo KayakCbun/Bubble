@@ -49,10 +49,10 @@ final class AcpClient: @unchecked Sendable {
             if process?.isRunning == true { return }
             OverlayPaths.bootstrap()
 
-            guard BubblePiRuntimePatch.isApplied(runtime: OverlayPaths.runtime) else {
+            guard BubblePiRuntimePatch.ensureApplied(runtime: OverlayPaths.runtime) else {
                 throw RPCError(code: -1, message: "pi not found. Type /setup to install it into ~/.bubble/runtime.")
             }
-            guard BubblePiAcpPatch.isApplied(runtime: OverlayPaths.runtime) else {
+            guard BubblePiAcpPatch.ensureApplied(runtime: OverlayPaths.runtime) else {
                 throw RPCError(code: -1, message: "Bubble's branch adapter is missing. Type /setup to install it into ~/.bubble/runtime.")
             }
             guard let launch = OverlayPaths.resolveAgentLaunch() else {
@@ -301,6 +301,25 @@ final class AcpClient: @unchecked Sendable {
         let result = try await request("_bubble/session/select_leaf", params: [
             "sessionId": sessionId,
             "targetId": targetID,
+        ])
+        guard let snapshot = ConversationTreeSnapshot(response: result) else {
+            throw RPCError(code: -7, message: "Pi returned an unreadable conversation tree.")
+        }
+        return snapshot
+    }
+
+    func appendRecordNotes(
+        _ text: String,
+        details: [String: Any] = [:],
+        sessionId override: String? = nil
+    ) async throws -> ConversationTreeSnapshot {
+        guard let sessionId = override ?? sessionId else {
+            throw RPCError(code: -4, message: "no session")
+        }
+        let result = try await request("_bubble/session/append_record_notes", params: [
+            "sessionId": sessionId,
+            "text": text,
+            "details": details,
         ])
         guard let snapshot = ConversationTreeSnapshot(response: result) else {
             throw RPCError(code: -7, message: "Pi returned an unreadable conversation tree.")

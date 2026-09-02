@@ -127,6 +127,7 @@ enum OverlayEscapeAction: Equatable {
     case dismissAvatarPicker
     case dismissLoopList
     case dismissLoopClosePrompt
+    case dismissRecordClosePrompt
     case cancelTurn
     case hideOverlay
 }
@@ -137,12 +138,14 @@ enum OverlayEscapePolicy {
         avatarPickerVisible: Bool,
         isBusy: Bool,
         loopListVisible: Bool = false,
-        loopClosePromptVisible: Bool = false
+        loopClosePromptVisible: Bool = false,
+        recordClosePromptVisible: Bool = false
     ) -> OverlayEscapeAction {
         if slashMenuVisible { return .dismissSlashMenu }
         if avatarPickerVisible { return .dismissAvatarPicker }
         if loopListVisible { return .dismissLoopList }
         if loopClosePromptVisible { return .dismissLoopClosePrompt }
+        if recordClosePromptVisible { return .dismissRecordClosePrompt }
         if isBusy { return .cancelTurn }
         return .hideOverlay
     }

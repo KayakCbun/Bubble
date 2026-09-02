@@ -16,6 +16,7 @@ struct ConversationEntry: Equatable, Sendable {
     var hasStructuredContent: Bool
     var images: [AssistantMessageImage] = []
     var imageOffsets: [Int] = []
+    var customType: String?
     var order: Int
 
     var isUserMessage: Bool { type == "message" && role == "user" }
@@ -36,6 +37,7 @@ struct ConversationTranscriptRecord: Equatable, Sendable {
         case thought
         case tool
         case workspaceRelay
+        case recordNotes
     }
 
     var kind: Kind
@@ -116,6 +118,10 @@ struct ConversationTreeSnapshot: Equatable, Sendable {
                     branchable: !entry.hasStructuredContent
                 )]
             case "assistant":
+                if entry.customType == "bubble_record_notes" {
+                    guard !entry.text.isEmpty else { return [] }
+                    return [Self.record(.recordNotes, entry: entry, text: entry.text, branchable: false)]
+                }
                 var records: [ConversationTranscriptRecord] = []
                 if !entry.thinking.isEmpty {
                     records.append(Self.record(.thought, entry: entry, text: entry.thinking, branchable: true))
@@ -239,14 +245,14 @@ struct ConversationTreeSnapshot: Equatable, Sendable {
               let id = string(object["id"]),
               let type = string(object["type"]) else { return nil }
         let message = object["message"] as? [String: Any] ?? [:]
-        let isDisplayedCustomMessage = type == "custom_message" && bool(object["display"])
-        let content = isDisplayedCustomMessage ? object["content"] : message["content"]
+        let isCustomMessage = type == "custom_message"
+        let content = isCustomMessage ? (object["content"] ?? message["content"]) : message["content"]
         let imageProjection = imageContent(content)
         return ConversationEntry(
             id: id,
             parentID: string(object["parentId"]),
             type: type,
-            role: isDisplayedCustomMessage ? "assistant" : string(message["role"]),
+            role: isCustomMessage ? "assistant" : string(message["role"]),
             text: contentText(content),
             thinking: thinkingText(content),
             toolName: string(message["toolName"]) ?? string(message["command"]),
@@ -255,6 +261,7 @@ struct ConversationTreeSnapshot: Equatable, Sendable {
             hasStructuredContent: hasStructuredContent(content),
             images: imageProjection.images,
             imageOffsets: imageProjection.offsets,
+            customType: string(object["customType"]),
             order: order
         )
     }

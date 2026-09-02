@@ -5,6 +5,7 @@ enum BubblePiAcpPatch {
     static let packageSpec = "pi-acp@\(packageVersion)"
     static let marker = "_bubble/session/select_leaf"
     static let workspaceResultMarker = "_bubble/session/append_workspace_result"
+    static let recordNotesMarker = "_bubble/session/append_record_notes"
     static let recoveryMarker = "_bubble/session/recover_dead_rpc"
     static let customImageMarker = "_bubble/forward_custom_images"
 
@@ -56,12 +57,17 @@ enum BubblePiAcpPatch {
     if (!res.success) throw new Error(`pi append workspace result failed: ${res.error ?? JSON.stringify(res.data)}`);
     return res.data;
   }
+  async appendRecordNotes(text, details) {
+    const res = await this.request({ type: "bubble_append_record_notes", text, details });
+    if (!res.success) throw new Error(`pi append record notes failed: ${res.error ?? JSON.stringify(res.data)}`);
+    return res.data;
+  }
 
 """#
 
         let extensionBridge = #"""
   async extMethod(method, params) {
-    if (method !== "_bubble/session/tree" && method !== "_bubble/session/navigate_tree" && method !== "_bubble/session/select_leaf" && method !== "_bubble/session/append_workspace_result") {
+    if (method !== "_bubble/session/tree" && method !== "_bubble/session/navigate_tree" && method !== "_bubble/session/select_leaf" && method !== "_bubble/session/append_workspace_result" && method !== "_bubble/session/append_record_notes") {
       throw RequestError3.methodNotFound(method);
     }
     const sessionId = typeof params.sessionId === "string" ? params.sessionId : "";
@@ -83,6 +89,12 @@ enum BubblePiAcpPatch {
       const details = params.details && typeof params.details === "object" ? params.details : undefined;
       await session.proc.appendWorkspaceResult(text, details);
     }
+    if (method === "_bubble/session/append_record_notes") {
+      const text = typeof params.text === "string" ? params.text : "";
+      if (!text.trim()) throw RequestError3.invalidParams("text is required");
+      const details = params.details && typeof params.details === "object" ? params.details : undefined;
+      await session.proc.appendRecordNotes(text, details);
+    }
     const [entries, tree] = await Promise.all([session.proc.getEntries(), session.proc.getTree()]);
     return { entries, tree };
   }
@@ -101,8 +113,62 @@ enum BubblePiAcpPatch {
             source = patched
         }
 
-        let recovered = try patchDeadSessionRecovery(source: source)
-        return try patchCustomMessageImages(source: recovered)
+        let withRecordNotes = try patchRecordNotes(source: source)
+        let recovered = try patchDeadSessionRecovery(source: withRecordNotes)
+        let withImages = try patchCustomMessageImages(source: recovered)
+        return hideRecordNotesFromAcpAssistantChunks(withImages)
+    }
+
+    private static func patchRecordNotes(source: String) throws -> String {
+        var source = source
+        if !source.contains("async appendRecordNotes(text, details)") {
+            let anchor = "  async appendWorkspaceResult(text, details) {"
+            guard source.contains(anchor) else { throw Error.unsupportedSource }
+            let bridge = #"""
+  async appendRecordNotes(text, details) {
+    const res = await this.request({ type: "bubble_append_record_notes", text, details });
+    if (!res.success) throw new Error(`pi append record notes failed: ${res.error ?? JSON.stringify(res.data)}`);
+    return res.data;
+  }
+
+"""#
+            source = source.replacingOccurrences(of: anchor, with: bridge + anchor)
+        }
+        if !source.contains(#"method !== "_bubble/session/append_record_notes""#) {
+            let allowlist = #"method !== "_bubble/session/append_workspace_result""#
+            guard source.contains(allowlist) else { throw Error.unsupportedSource }
+            source = source.replacingOccurrences(
+                of: allowlist,
+                with: allowlist + #" && method !== "_bubble/session/append_record_notes""#
+            )
+        }
+        if !source.contains(#"method === "_bubble/session/append_record_notes""#) {
+            let handler = #"""
+    if (method === "_bubble/session/append_workspace_result") {
+      const text = typeof params.text === "string" ? params.text : "";
+      if (!text.trim()) throw RequestError3.invalidParams("text is required");
+      const details = params.details && typeof params.details === "object" ? params.details : undefined;
+      await session.proc.appendWorkspaceResult(text, details);
+    }
+"""#
+            guard source.contains(handler) else { throw Error.unsupportedSource }
+            let extra = #"""
+    if (method === "_bubble/session/append_workspace_result") {
+      const text = typeof params.text === "string" ? params.text : "";
+      if (!text.trim()) throw RequestError3.invalidParams("text is required");
+      const details = params.details && typeof params.details === "object" ? params.details : undefined;
+      await session.proc.appendWorkspaceResult(text, details);
+    }
+    if (method === "_bubble/session/append_record_notes") {
+      const text = typeof params.text === "string" ? params.text : "";
+      if (!text.trim()) throw RequestError3.invalidParams("text is required");
+      const details = params.details && typeof params.details === "object" ? params.details : undefined;
+      await session.proc.appendRecordNotes(text, details);
+    }
+"""#
+            source = source.replacingOccurrences(of: handler, with: extra)
+        }
+        return source
     }
 
     private static func patchCustomMessageImages(source: String) throws -> String {
@@ -141,7 +207,7 @@ function bubbleDisplayContentBlocks(content) {
         let eventBridge = #"""
       case "message_end": {
         const message = ev.message;
-        if (message?.role !== "custom" || message.display !== true) break;
+        if (message?.role !== "custom" || message.display !== true || message.customType === "bubble_record_notes") break;
         const blocks = bubbleDisplayContentBlocks(message.content);
         for (const [index, content] of blocks.entries()) {
           this.emit({
@@ -155,7 +221,7 @@ function bubbleDisplayContentBlocks(content) {
       }
 """#
         let replayBridge = #"""
-      if (role === "custom" && m?.display === true) {
+      if (role === "custom" && m?.display === true && m?.customType !== "bubble_record_notes") {
         const blocks = bubbleDisplayContentBlocks(m?.content);
         for (const [index, content] of blocks.entries()) {
           await this.conn.sessionUpdate({
@@ -262,11 +328,42 @@ function bubbleDisplayContentBlocks(content) {
             && source.contains("async selectLeaf(targetId)")
             && source.contains(workspaceResultMarker)
             && source.contains("async appendWorkspaceResult(text, details)")
+            && source.contains(recordNotesMarker)
+            && source.contains("async appendRecordNotes(text, details)")
             && source.contains(recoveryMarker)
             && source.contains("existing?.proc?.isAlive?.()")
             && source.contains("this.sessions.close(sessionId)")
             && source.contains(customImageMarker)
             && source.contains("bubbleDisplayContentBlocks")
+            && source.contains(#"message.customType === "bubble_record_notes""#)
+            && source.contains(#"m?.customType !== "bubble_record_notes""#)
+    }
+
+    /// Record notes already have a Bubble card. Skip the ACP assistant-chunk
+    /// path so live flush and session replay do not also paint the same text
+    /// as a regular message. Rewrites adapters that still forward them.
+    private static func hideRecordNotesFromAcpAssistantChunks(_ source: String) -> String {
+        source
+            .replacingOccurrences(
+                of: #"if (message?.role !== "custom" || message.display !== true) break;"#,
+                with: #"if (message?.role !== "custom" || message.display !== true || message.customType === "bubble_record_notes") break;"#
+            )
+            .replacingOccurrences(
+                of: #"if (role === "custom" && m?.display === true) {"#,
+                with: #"if (role === "custom" && m?.display === true && m?.customType !== "bubble_record_notes") {"#
+            )
+    }
+
+    /// Re-patch an already-installed adapter when Bubble adds new ACP methods.
+    /// Returns false only when the package is missing or the wrong version.
+    @discardableResult
+    static func ensureApplied(runtime: URL) -> Bool {
+        do {
+            try apply(runtime: runtime)
+            return isApplied(runtime: runtime)
+        } catch {
+            return false
+        }
     }
 }
 
@@ -277,6 +374,8 @@ enum BubblePiRuntimePatch {
     static let agentMarker = "async bubbleSelectLeaf(targetId)"
     static let workspaceResultMarker = "session.bubbleAppendWorkspaceResult(text, details)"
     static let agentWorkspaceResultMarker = "async bubbleAppendWorkspaceResult(text, details)"
+    static let recordNotesMarker = "session.bubbleAppendRecordNotes(text, details)"
+    static let agentRecordNotesMarker = "async bubbleAppendRecordNotes(text, details)"
 
     enum Error: Swift.Error, Equatable {
         case unsupportedSource
@@ -285,8 +384,27 @@ enum BubblePiRuntimePatch {
     }
 
     static func patch(source: String) throws -> String {
-        if source.contains(marker), source.contains(workspaceResultMarker) { return source }
+        if source.contains(marker),
+           source.contains(workspaceResultMarker),
+           source.contains(recordNotesMarker) { return source }
         var source = source
+        if source.contains(workspaceResultMarker), !source.contains(recordNotesMarker) {
+            let workspaceCase = #"            case "bubble_append_workspace_result": {"#
+            guard source.contains(workspaceCase) else { throw Error.unsupportedSource }
+            let recordOnly = #"""
+            case "bubble_append_record_notes": {
+                const text = command.text;
+                const details = command.details;
+                if (typeof text !== "string" || !text.trim()) {
+                    return error(id, "bubble_append_record_notes", "Record notes text is required");
+                }
+                const result = await session.bubbleAppendRecordNotes(text, details);
+                return success(id, "bubble_append_record_notes", result);
+            }
+
+"""#
+            return source.replacingOccurrences(of: workspaceCase, with: recordOnly + workspaceCase)
+        }
         if let legacyStart = source.range(of: "            case \"bubble_select_leaf\": {")?.lowerBound,
            let anchorStart = source.range(of: #"            case "get_tree": {"#)?.lowerBound,
            legacyStart < anchorStart {
@@ -295,6 +413,15 @@ enum BubblePiRuntimePatch {
         let anchor = #"            case "get_tree": {"#
         guard source.contains(anchor) else { throw Error.unsupportedSource }
         let bridge = #"""
+            case "bubble_append_record_notes": {
+                const text = command.text;
+                const details = command.details;
+                if (typeof text !== "string" || !text.trim()) {
+                    return error(id, "bubble_append_record_notes", "Record notes text is required");
+                }
+                const result = await session.bubbleAppendRecordNotes(text, details);
+                return success(id, "bubble_append_record_notes", result);
+            }
             case "bubble_append_workspace_result": {
                 const text = command.text;
                 const details = command.details;
@@ -320,7 +447,32 @@ enum BubblePiRuntimePatch {
     }
 
     static func patchAgentSession(source: String) throws -> String {
-        if source.contains(agentMarker), source.contains(agentWorkspaceResultMarker) { return source }
+        let source = hideRecordNotesFromAssistantTranscript(source)
+        if source.contains(agentMarker),
+           source.contains(agentWorkspaceResultMarker),
+           source.contains(agentRecordNotesMarker) { return source }
+        if source.contains(agentWorkspaceResultMarker), !source.contains(agentRecordNotesMarker) {
+            let workspaceMethod = "    async bubbleAppendWorkspaceResult(text, details) {"
+            guard let range = source.range(of: workspaceMethod) else { throw Error.unsupportedSource }
+            let recordMethod = #"""
+    async bubbleAppendRecordNotes(text, details) {
+        if (this.isStreaming) {
+            throw new Error("Wait for the current response to finish before appending record notes.");
+        }
+        await this.sendCustomMessage({
+            customType: "bubble_record_notes",
+            content: [{ type: "text", text }],
+            display: false,
+            details,
+        }, { triggerTurn: false });
+        return { entryId: this.sessionManager.getLeafId() };
+    }
+
+"""#
+            var migrated = source
+            migrated.insert(contentsOf: recordMethod, at: range.lowerBound)
+            return migrated
+        }
         let anchor = "    async navigateTree(targetId, options = {}) {"
         guard source.contains(anchor) else { throw Error.unsupportedSource }
         var workspaceBridge = ""
@@ -334,6 +486,18 @@ enum BubblePiRuntimePatch {
             customType: "bubble_workspace_result",
             content: [{ type: "text", text }],
             display: true,
+            details,
+        }, { triggerTurn: false });
+        return { entryId: this.sessionManager.getLeafId() };
+    }
+    async bubbleAppendRecordNotes(text, details) {
+        if (this.isStreaming) {
+            throw new Error("Wait for the current response to finish before appending record notes.");
+        }
+        await this.sendCustomMessage({
+            customType: "bubble_record_notes",
+            content: [{ type: "text", text }],
+            display: false,
             details,
         }, { triggerTurn: false });
         return { entryId: this.sessionManager.getLeafId() };
@@ -393,6 +557,21 @@ enum BubblePiRuntimePatch {
         return source.replacingOccurrences(of: anchor, with: workspaceBridge + selectionBridge + anchor)
     }
 
+    private static func hideRecordNotesFromAssistantTranscript(_ source: String) -> String {
+        source.replacingOccurrences(
+            of: """
+            customType: "bubble_record_notes",
+            content: [{ type: "text", text }],
+            display: true,
+""",
+            with: """
+            customType: "bubble_record_notes",
+            content: [{ type: "text", text }],
+            display: false,
+"""
+        )
+    }
+
     static func apply(runtime: URL) throws {
         let base = runtime.appendingPathComponent("node_modules/@earendil-works/pi-coding-agent")
         let package = base.appendingPathComponent("package.json")
@@ -428,7 +607,24 @@ enum BubblePiRuntimePatch {
               let agentSource = try? String(contentsOf: agentSession, encoding: .utf8) else { return false }
         return source.contains(marker)
             && source.contains(workspaceResultMarker)
+            && source.contains(recordNotesMarker)
             && agentSource.contains(agentMarker)
             && agentSource.contains(agentWorkspaceResultMarker)
+            && agentSource.contains(agentRecordNotesMarker)
+            && agentSource.contains("""
+            customType: "bubble_record_notes",
+            content: [{ type: "text", text }],
+            display: false,
+""")
+    }
+
+    @discardableResult
+    static func ensureApplied(runtime: URL) -> Bool {
+        do {
+            try apply(runtime: runtime)
+            return isApplied(runtime: runtime)
+        } catch {
+            return false
+        }
     }
 }

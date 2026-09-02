@@ -1261,7 +1261,8 @@ final class OverlayController: NSObject, NSWindowDelegate {
             avatarPickerVisible: store.showAvatarPicker,
             isBusy: store.isBusy,
             loopListVisible: store.loopListPresented,
-            loopClosePromptVisible: store.loopClosePrompt != nil
+            loopClosePromptVisible: store.loopClosePrompt != nil,
+            recordClosePromptVisible: store.recordClosePrompt != nil
         )
         switch action {
         case .dismissSlashMenu:
@@ -1272,6 +1273,8 @@ final class OverlayController: NSObject, NSWindowDelegate {
             store.dismissLoopList()
         case .dismissLoopClosePrompt:
             store.resolveLoopClosePrompt(false)
+        case .dismissRecordClosePrompt:
+            store.resolveRecordClosePrompt(false)
         case .cancelTurn:
             store.cancel()
             ComposerEditorLocator.releaseFieldEditor(in: panel)

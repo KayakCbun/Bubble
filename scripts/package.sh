@@ -128,6 +128,50 @@ swiftc -parse-as-library Sources/Bubble/MessageDelivery.swift scripts/check_mess
 swiftc -parse-as-library Sources/BubbleSessions/SessionLoops.swift scripts/check_session_loops.swift -o /tmp/bubble-check-session-loops
 /tmp/bubble-check-session-loops
 
+swiftc -parse-as-library Sources/Bubble/RecordPolicy.swift scripts/check_record_policy.swift -o /tmp/bubble-check-record-policy
+/tmp/bubble-check-record-policy
+
+swiftc -parse-as-library -framework AVFoundation \
+  Sources/Bubble/RecordAudioConvert.swift \
+  scripts/check_record_audio.swift \
+  -o /tmp/bubble-check-record-audio
+/tmp/bubble-check-record-audio
+
+swiftc -parse-as-library -lz \
+  Sources/Bubble/RecordPolicy.swift \
+  Sources/Bubble/RecordSeedAsrCodec.swift \
+  Sources/Bubble/RecordSeedAsrCredentialsStore.swift \
+  scripts/check_record_seed_asr.swift \
+  -o /tmp/bubble-check-record-seed-asr
+/tmp/bubble-check-record-seed-asr
+
+python3 - <<'PY'
+from pathlib import Path
+
+src = Path("Sources/Bubble/RecordCapture.swift").read_text()
+auth = Path("Sources/Bubble/RecordAudioCaptureAuthorization.swift").read_text()
+plist = Path("Resources/Info.plist").read_text()
+for token in ("ScreenCaptureKit", "SCContentFilter", "SCStream", "SCShareableContent"):
+    if token in src:
+        raise SystemExit(
+            f"FAIL: RecordCapture must not use {token}; Record captures system audio via Core Audio taps"
+        )
+for token in ("AudioHardwareCreateProcessTap", "CATapDescription", "stereoGlobalTapButExcludeProcesses"):
+    if token not in src:
+        raise SystemExit(f"FAIL: RecordCapture must create a Core Audio process tap ({token})")
+if "kTCCServiceAudioCapture" not in auth:
+    raise SystemExit("FAIL: Record must request kTCCServiceAudioCapture; Screen Recording TCC leaves the tap silent")
+if "NSAudioCaptureUsageDescription" not in plist:
+    raise SystemExit("FAIL: Info.plist needs NSAudioCaptureUsageDescription for system-audio-only TCC")
+print("record capture path checks passed")
+PY
+
+swiftc -parse-as-library \
+  Sources/Bubble/RecordAudioCaptureAuthorization.swift \
+  scripts/check_system_tap.swift \
+  -o /tmp/bubble-check-system-tap
+/tmp/bubble-check-system-tap
+
 swiftc -parse-as-library Sources/Bubble/PreviewFiles.swift scripts/check_file_preview.swift -o /tmp/bubble-check-file-preview
 /tmp/bubble-check-file-preview
 

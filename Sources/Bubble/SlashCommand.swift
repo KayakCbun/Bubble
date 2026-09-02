@@ -75,6 +75,7 @@ struct SlashCommand: Identifiable, Equatable {
         .init(name: "side", description: "Open a parallel side session", local: true),
         .init(name: "close", description: "Close this side session, or hide Bubble from the main session", local: true),
         .init(name: "loop", description: "Create a session-bound repeating task", hint: "5m 检查部署", local: true),
+        .init(name: "record", description: "Start or stop mixed-audio captions for this conversation", local: true),
         .init(name: "compact", description: "Compact older conversation turns now", hint: "instructions", local: false),
         .init(name: "autocompact", description: "Toggle automatic compaction", hint: "on|off|toggle", local: false),
         .init(name: "session", description: "Show session stats", local: false),
@@ -106,6 +107,7 @@ struct SlashCommand: Identifiable, Equatable {
         Type /setup to install Pi and pi-acp into ~/.bubble/runtime.
         Type /login to sign in a provider. Type /resume to switch sessions.
         Type /close to close the current side session. In the main session it hides Bubble.
+        Type /record to caption a meeting on this Mac into the conversation.
         Type $ or /skill:name to pick a skill.
 
         Slash commands

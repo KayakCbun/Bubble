@@ -19,6 +19,8 @@ enum BubbleNativeAction: String, CaseIterable {
     case closeSession = "close_session"
     case copyLastResponse = "copy_last_response"
     case hideWindow = "hide_window"
+    case startRecord = "start_record"
+    case stopRecord = "stop_record"
 
     static var supported: [String] { allCases.map(\.rawValue) }
     static var toolActionList: String { supported.joined(separator: ", ") }
@@ -43,6 +45,8 @@ enum BubbleNativeAction: String, CaseIterable {
         case .closeSession: "close"
         case .copyLastResponse: "copy"
         case .hideWindow: "quit"
+        case .startRecord: "record start"
+        case .stopRecord: "record stop"
         }
     }
 
