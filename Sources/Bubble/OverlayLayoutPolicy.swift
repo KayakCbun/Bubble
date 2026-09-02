@@ -250,14 +250,79 @@ enum TranscriptChunkBoundaryPolicy {
 
 enum RecordCardLayoutPolicy {
     static let liveLineLimit = 4
+    static let flushedBodyMaxHeight: CGFloat = 180
     static let chromeHeight: CGFloat = 36
     static let lineHeight: CGFloat = 18
     static let padding: CGFloat = 24
+    static let scrollerWidth: CGFloat = 10
+    static let scrollerKnobWidth: CGFloat = 7
+    static let scrollerTrailingInset: CGFloat = 3
+
+    static func scrollerKnobHeight(contentHeight: CGFloat, viewportHeight: CGFloat) -> CGFloat {
+        guard viewportHeight > 0, contentHeight > viewportHeight + 0.5 else { return 0 }
+        let proportional = viewportHeight * (viewportHeight / contentHeight)
+        return min(viewportHeight, max(scrollerKnobWidth, proportional))
+    }
+
+    static func scrollerKnobOffset(
+        contentOffset: CGFloat,
+        contentHeight: CGFloat,
+        viewportHeight: CGFloat,
+        knobHeight: CGFloat
+    ) -> CGFloat {
+        let travel = max(contentHeight - viewportHeight, 1)
+        let track = max(viewportHeight - knobHeight, 0)
+        let progress = min(1, max(0, contentOffset / travel))
+        return progress * track
+    }
+
+    static func scrollerKnobFrame(in suggested: CGRect) -> CGRect {
+        CGRect(
+            x: suggested.midX - scrollerKnobWidth / 2,
+            y: suggested.minY,
+            width: scrollerKnobWidth,
+            height: max(scrollerKnobWidth, suggested.height)
+        )
+    }
+
+    /// A stadium: semicircle caps and a rectangular body. `NSBezierPath`
+    /// rounded-rect corners shrink at this size, so the knob is built from arcs.
+    static func scrollerKnobCapsulePath(in rect: CGRect) -> CGPath {
+        let path = CGMutablePath()
+        guard rect.width > 0, rect.height > 0 else { return path }
+        let radius = min(rect.width, rect.height) / 2
+        if rect.height <= rect.width + 0.5 {
+            path.addEllipse(in: rect)
+            return path
+        }
+        let midX = rect.midX
+        path.move(to: CGPoint(x: rect.minX, y: rect.minY + radius))
+        path.addArc(
+            center: CGPoint(x: midX, y: rect.minY + radius),
+            radius: radius,
+            startAngle: .pi,
+            endAngle: 2 * .pi,
+            clockwise: false
+        )
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY - radius))
+        path.addArc(
+            center: CGPoint(x: midX, y: rect.maxY - radius),
+            radius: radius,
+            startAngle: 0,
+            endAngle: .pi,
+            clockwise: false
+        )
+        path.closeSubpath()
+        return path
+    }
 
     static func height(text: String, live: Bool) -> CGFloat {
         let lines = max(1, text.split(whereSeparator: \.isNewline).count)
-        let visible = live ? min(lines, liveLineLimit) : min(lines, 18)
-        return chromeHeight + CGFloat(visible) * lineHeight + padding
+        if live {
+            return chromeHeight + CGFloat(min(lines, liveLineLimit)) * lineHeight + padding
+        }
+        let body = min(CGFloat(lines) * lineHeight, flushedBodyMaxHeight)
+        return chromeHeight + body + padding
     }
 }
 

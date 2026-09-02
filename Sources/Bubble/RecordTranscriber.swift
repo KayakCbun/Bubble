@@ -64,9 +64,17 @@ final class SpeechAnalyzerTranscriber: RecordTranscriber {
                     self.resultCount += 1
                     await MainActor.run {
                         if result.isFinal {
-                            self.appendFinal(text)
+                            self.finalizedNotes = RecordNotesAssembler.appendFinal(
+                                existing: self.finalizedNotes,
+                                incoming: text
+                            )
+                            self.volatileNotes = self.finalizedNotes
+                            self.onCaptions?(self.volatileNotes)
                         } else {
-                            self.volatileNotes = Self.merge(final: self.finalizedNotes, volatile: text)
+                            self.volatileNotes = RecordNotesAssembler.merge(
+                                final: self.finalizedNotes,
+                                volatile: text
+                            )
                             self.onCaptions?(self.volatileNotes)
                         }
                     }
@@ -111,23 +119,6 @@ final class SpeechAnalyzerTranscriber: RecordTranscriber {
             "record transcriber finished notes=\(finished.count) sent=\(sentBuffers) results=\(resultCount) dropped=\(droppedFormat)"
         )
         return finished
-    }
-
-    private func appendFinal(_ text: String) {
-        if finalizedNotes.isEmpty {
-            finalizedNotes = text
-        } else if !finalizedNotes.hasSuffix(text) {
-            finalizedNotes += finalizedNotes.hasSuffix(" ") || text.hasPrefix(" ") ? text : " " + text
-        }
-        volatileNotes = finalizedNotes
-        onCaptions?(volatileNotes)
-    }
-
-    private static func merge(final: String, volatile: String) -> String {
-        if final.isEmpty { return volatile }
-        if volatile.isEmpty { return final }
-        if volatile.hasPrefix(final) { return volatile }
-        return final + (final.hasSuffix(" ") || volatile.hasPrefix(" ") ? "" : " ") + volatile
     }
 
     private static func resolvedLocale(_ preferred: Locale) async throws -> Locale {

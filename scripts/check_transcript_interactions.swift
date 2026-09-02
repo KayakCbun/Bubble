@@ -201,6 +201,30 @@ private enum TranscriptInteractionCheck {
             "a zero-delta wheel packet is not consumed"
         )
         expect(
+            TranscriptNestedVerticalScrollPolicy.shouldDeferToNestedScroller(
+                documentHeight: 400,
+                clipHeight: 180,
+                identifier: nil
+            ),
+            "an overflowing nested vertical scroller keeps the wheel"
+        )
+        expect(
+            !TranscriptNestedVerticalScrollPolicy.shouldDeferToNestedScroller(
+                documentHeight: 80,
+                clipHeight: 180,
+                identifier: nil
+            ),
+            "a nested scroller that fits still falls through to the transcript"
+        )
+        expect(
+            TranscriptNestedVerticalScrollPolicy.shouldDeferToNestedScroller(
+                documentHeight: 80,
+                clipHeight: 180,
+                identifier: TranscriptNestedVerticalScrollPolicy.recordNotesIdentifier
+            ),
+            "Record notes keep the wheel while the pointer is over the card"
+        )
+        expect(
             !TranscriptCommandCompletionPolicy.shouldApply(
                 isScrollToEnd: true,
                 issuedUserScrollGeneration: 4,

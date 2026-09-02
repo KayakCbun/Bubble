@@ -59,11 +59,11 @@ A repeating task bound to one Bubble session. Created with `/loop` or `loop_crea
 _Avoid_: cron job, alarm, pi-loop
 
 **Record**:
-A mixed-audio capture bound to one Bubble session. Overlay shows live captions while it runs. One Record at a time on the Mac. Hide keeps it running; closing or quitting that session stops it and flushes notes. `/record` starts; `/record` again or `/record stop` stops.
+A mixed-audio capture bound to one Bubble session. Overlay shows live captions while it runs. One Record at a time on the Mac. Hide keeps it running; closing or quitting that session stops it and flushes notes. `/record` starts; `/record` again or `/record stop` stops. When Seed ASR credentials exist, live captions stream from Doubao Seed ASR 2.0; otherwise Apple Speech.
 _Avoid_: recording session, transcript, loop, workspace run
 
 **Record notes**:
-The transcribed text. Overlay-only while the Record is running. On stop, Bubble appends them as a displayed context message and does not ask the model to reply.
+The transcribed text. Overlay-only while the Record is running. On stop, Bubble keeps them on a Record card and in model context without starting a model turn or duplicating them as an assistant message.
 _Avoid_: transcript, summary, injection brief
 
 Main sessions persist in `~/.bubble/session-id`. Conversation branch selections persist separately per session so a read-only branch switch survives relaunch.

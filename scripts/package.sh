@@ -137,6 +137,14 @@ swiftc -parse-as-library -framework AVFoundation \
   -o /tmp/bubble-check-record-audio
 /tmp/bubble-check-record-audio
 
+swiftc -parse-as-library -lz \
+  Sources/Bubble/RecordPolicy.swift \
+  Sources/Bubble/RecordSeedAsrCodec.swift \
+  Sources/Bubble/RecordSeedAsrCredentialsStore.swift \
+  scripts/check_record_seed_asr.swift \
+  -o /tmp/bubble-check-record-seed-asr
+/tmp/bubble-check-record-seed-asr
+
 python3 - <<'PY'
 from pathlib import Path
 

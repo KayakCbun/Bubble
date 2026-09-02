@@ -245,14 +245,14 @@ struct ConversationTreeSnapshot: Equatable, Sendable {
               let id = string(object["id"]),
               let type = string(object["type"]) else { return nil }
         let message = object["message"] as? [String: Any] ?? [:]
-        let isDisplayedCustomMessage = type == "custom_message" && bool(object["display"])
-        let content = isDisplayedCustomMessage ? object["content"] : message["content"]
+        let isCustomMessage = type == "custom_message"
+        let content = isCustomMessage ? (object["content"] ?? message["content"]) : message["content"]
         let imageProjection = imageContent(content)
         return ConversationEntry(
             id: id,
             parentID: string(object["parentId"]),
             type: type,
-            role: isDisplayedCustomMessage ? "assistant" : string(message["role"]),
+            role: isCustomMessage ? "assistant" : string(message["role"]),
             text: contentText(content),
             thinking: thinkingText(content),
             toolName: string(message["toolName"]) ?? string(message["command"]),

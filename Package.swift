@@ -52,6 +52,7 @@ let package = Package(
                 .linkedFramework("AudioToolbox"),
                 .linkedFramework("CoreAudio"),
                 .linkedFramework("CoreMedia"),
+                .linkedLibrary("z"),
             ]
         ),
         .executableTarget(

@@ -9,6 +9,35 @@ enum RecordAudioConvert {
             && a.isInterleaved == b.isInterleaved
     }
 
+    static func seedAsrInputFormat() -> AVAudioFormat? {
+        AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16_000, channels: 1, interleaved: false)
+    }
+
+    static func pcmInt16LE(_ buffer: AVAudioPCMBuffer) -> Data? {
+        let frames = Int(buffer.frameLength)
+        guard frames > 0 else { return Data() }
+        var samples = [Int16](repeating: 0, count: frames)
+        if buffer.format.commonFormat == .pcmFormatFloat32, let channels = buffer.floatChannelData {
+            for frame in 0..<frames {
+                let clipped = max(-1, min(1, channels[0][frame]))
+                samples[frame] = Int16((clipped * 32767).rounded())
+            }
+        } else {
+            let abl = UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList)
+            guard let data = abl.first?.mData else { return nil }
+            if buffer.format.commonFormat == .pcmFormatInt16 {
+                memcpy(&samples, data, frames * MemoryLayout<Int16>.size)
+            } else {
+                let floats = data.assumingMemoryBound(to: Float.self)
+                for frame in 0..<frames {
+                    let clipped = max(-1, min(1, floats[frame]))
+                    samples[frame] = Int16((clipped * 32767).rounded())
+                }
+            }
+        }
+        return samples.withUnsafeBytes { Data($0) }
+    }
+
     static func converter(from input: AVAudioFormat, to output: AVAudioFormat) -> AVAudioConverter? {
         AVAudioConverter(from: input, to: output)
     }

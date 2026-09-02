@@ -156,7 +156,7 @@ let recordNotesResponse: [String: Any] = [
                 "id": "record-notes",
                 "parentId": "record-root",
                 "customType": "bubble_record_notes",
-                "display": true,
+                "display": false,
                 "content": [
                     ["type": "text", "text": "录音笔记（12 秒）\n\nhello meeting"],
                 ],
@@ -173,6 +173,24 @@ guard let recordSnapshot = ConversationTreeSnapshot(response: recordNotesRespons
 require(recordRow.kind == .recordNotes, "record notes project as a Record notes row")
 require(recordRow.text.contains("hello meeting"), "record notes body survives history restore")
 require(recordRow.branchable == false, "record notes are not branch points")
+require(recordSnapshot.transcript.count == 1, "record notes do not also project as an assistant row")
+
+var visibleRecordNotes = recordNotesResponse
+if var entries = visibleRecordNotes["entries"] as? [String: Any],
+   var list = entries["entries"] as? [[String: Any]],
+   list.indices.contains(1) {
+    list[1]["display"] = true
+    entries["entries"] = list
+    visibleRecordNotes["entries"] = entries
+}
+guard let visibleRecordSnapshot = ConversationTreeSnapshot(response: visibleRecordNotes) else {
+    fputs("conversation tree check failed: displayed record notes were omitted\n", stderr)
+    exit(1)
+}
+require(
+    visibleRecordSnapshot.transcript.map(\.kind) == [.recordNotes],
+    "legacy display:true record notes still render only as a Record card"
+)
 
 let oldBranch = snapshot.selecting(leafID: "a2a")
 require(oldBranch.activePath.map(\.id) == ["model", "u1", "a1", "u2a", "a2a"], "selecting an older leaf is deterministic")

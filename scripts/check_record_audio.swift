@@ -68,8 +68,20 @@ enum RecordAudioCheck {
         )
         expect(
             !RecordAudioConvert.formatsMatch(inputFormat, outputFormat),
-            "48 kHz stereo does not match 16 kHz mono"
+            "48 kHz stereo does not match 16 kHz stereo"
         )
+        guard let seedFormat = RecordAudioConvert.seedAsrInputFormat(),
+              let seedBuffer = AVAudioPCMBuffer(pcmFormat: seedFormat, frameCapacity: 4) else {
+            FileHandle.standardError.write(Data("FAIL: seed ASR format missing\n".utf8))
+            exit(1)
+        }
+        seedBuffer.frameLength = 4
+        seedBuffer.floatChannelData?[0][0] = 0.5
+        seedBuffer.floatChannelData?[0][1] = -0.5
+        seedBuffer.floatChannelData?[0][2] = 0
+        seedBuffer.floatChannelData?[0][3] = 1
+        let pcm = RecordAudioConvert.pcmInt16LE(seedBuffer)
+        expect(pcm?.count == 8, "Seed ASR PCM is 16-bit little-endian mono")
         print("record audio convert checks passed packets=\(produced) lastFrames=\(lastFrames)")
     }
 }

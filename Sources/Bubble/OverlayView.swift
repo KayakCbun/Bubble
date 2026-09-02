@@ -2624,13 +2624,21 @@ struct OverlayView: View {
                 }
             }
             if !item.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                Text(item.text)
+                let body = Text(item.text)
                     .font(.system(size: OverlayMetrics.fontSize - 1))
                     .foregroundStyle(.secondary)
                     .lineSpacing(OverlaySurface.proseLineSpacing - 1)
                     .multilineTextAlignment(.leading)
-                    .lineLimit(live ? RecordPolicy.liveCaptionLineLimit : nil)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .bubbleTextSelection()
+                if live {
+                    body.lineLimit(RecordPolicy.liveCaptionLineLimit)
+                } else {
+                    RecordNotesBodyScroll {
+                        body
+                    }
+                    .frame(maxHeight: RecordCardLayoutPolicy.flushedBodyMaxHeight, alignment: .top)
+                }
             } else if live {
                 Text("正在听系统声音和麦克风…")
                     .font(.system(size: OverlayMetrics.fontSize - 1))

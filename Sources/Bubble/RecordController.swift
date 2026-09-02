@@ -9,7 +9,8 @@ final class RecordController: RecordCaptureDelegate {
     private(set) var startedAt: Date?
     private(set) var liveNotes = ""
     private var capture: RecordCapture?
-    private var transcriber: SpeechAnalyzerTranscriber?
+    private var transcriber: RecordTranscriber?
+    private var recordEngine: RecordEngineChoice?
     private var recordID: String?
     private weak var ownerStore: ChatStore?
 
@@ -28,13 +29,15 @@ final class RecordController: RecordCaptureDelegate {
         liveNotes = ""
         store.beginLiveRecord()
         do {
-            try await requestPermissions()
-            let transcriber = SpeechAnalyzerTranscriber { [weak self] notes in
+            let transcriber = try RecordTranscriberFactory.make { [weak self] notes in
                 DispatchQueue.main.async {
                     self?.liveNotes = notes
                     self?.ownerStore?.updateLiveRecordNotes(notes)
                 }
             }
+            let usingSeed = transcriber is RecordSeedAsrTranscriber
+            recordEngine = usingSeed ? .seedAsr : .speechAnalyzer
+            try await requestPermissions(usingSeedASR: usingSeed)
             let locale = Locale.preferredLanguages.first.map(Locale.init(identifier:)) ?? .current
             try await transcriber.start(locale: locale)
             let capture = RecordCapture()
@@ -50,6 +53,7 @@ final class RecordController: RecordCaptureDelegate {
             ownerStore = nil
             startedAt = nil
             recordID = nil
+            recordEngine = nil
             throw error
         }
     }
@@ -64,6 +68,7 @@ final class RecordController: RecordCaptureDelegate {
         capture = nil
         let notes = await transcriber?.finalize() ?? liveNotes
         transcriber = nil
+        recordEngine = nil
         ownerRuntimeID = nil
         ownerStore = nil
         self.startedAt = nil
@@ -100,7 +105,7 @@ final class RecordController: RecordCaptureDelegate {
         return await stop(store: ownerStore)
     }
 
-    private func requestPermissions() async throws {
+    private func requestPermissions(usingSeedASR: Bool) async throws {
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .authorized:
             break
@@ -110,6 +115,7 @@ final class RecordController: RecordCaptureDelegate {
         default:
             throw RecordPermissionError.microphone
         }
+        guard !usingSeedASR else { return }
         switch SFSpeechRecognizer.authorizationStatus() {
         case .authorized:
             break

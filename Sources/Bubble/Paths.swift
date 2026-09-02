@@ -30,6 +30,10 @@ enum OverlayPaths {
         root.appendingPathComponent("config.json")
     }
 
+    static var recordFile: URL {
+        root.appendingPathComponent("record.json")
+    }
+
     static var mountsFile: URL {
         root.appendingPathComponent("mounts.json")
     }

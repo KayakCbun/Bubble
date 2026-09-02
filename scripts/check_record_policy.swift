@@ -17,6 +17,8 @@ struct RecordPolicyCheck {
         testLivePreview()
         testElapsedClock()
         testLiveElapsedTicksInOverlay()
+        testEngine()
+        testNotesAssembler()
         print("record policy checks passed")
     }
 
@@ -182,6 +184,64 @@ struct RecordPolicyCheck {
         expect(
             !body.contains("Date().timeIntervalSince"),
             "live Record elapsed does not sample Date() only at first render"
+        )
+        expect(
+            body.contains("RecordNotesBodyScroll"),
+            "flushed Record notes use a nested scroller the transcript will not steal from"
+        )
+        let notesScroll = try! String(contentsOfFile: "Sources/Bubble/RecordNotesScroll.swift", encoding: .utf8)
+        expect(
+            notesScroll.contains(".scrollIndicators(.hidden)"),
+            "system Record notes indicators stay hidden so the stadium knob is the only bar"
+        )
+        expect(
+            notesScroll.contains("Capsule(style: .circular)"),
+            "the Record notes knob is a circular capsule, not a rounded rectangle"
+        )
+    }
+
+    private static func testEngine() {
+        expect(RecordEngine.parse(nil) == .auto, "missing engine is auto")
+        expect(RecordEngine.parse("seed-asr") == .seedAsr, "seed-asr is Seed ASR")
+        expect(RecordEngine.parse("speech-analyzer") == .speechAnalyzer, "speech-analyzer is Apple Speech")
+        expect(
+            RecordEnginePolicy.resolve(configured: .auto, seedAvailable: true) == .seedAsr,
+            "auto prefers Seed ASR when credentials exist"
+        )
+        expect(
+            RecordEnginePolicy.resolve(configured: .auto, seedAvailable: false) == .speechAnalyzer,
+            "auto falls back to Apple Speech without credentials"
+        )
+        expect(
+            RecordEnginePolicy.resolve(configured: .seedAsr, seedAvailable: false) == .seedAsr,
+            "an explicit Seed ASR choice is not silently swapped"
+        )
+        expect(
+            RecordSeedAsrCredentials(apiKey: "k").isUsable,
+            "an API key is enough for Seed ASR"
+        )
+        expect(
+            !RecordSeedAsrCredentials(appId: "a").isUsable,
+            "app id without access token is not enough"
+        )
+        expect(
+            RecordSeedAsrCredentials(appId: "a", accessToken: "t").isUsable,
+            "app id plus access token is enough"
+        )
+    }
+
+    private static func testNotesAssembler() {
+        expect(
+            RecordNotesAssembler.appendFinal(existing: "", incoming: "hello") == "hello",
+            "first final becomes the notes"
+        )
+        expect(
+            RecordNotesAssembler.appendFinal(existing: "hello", incoming: "world") == "hello world",
+            "later finals join with a space"
+        )
+        expect(
+            RecordNotesAssembler.merge(final: "hello", volatile: "hello there") == "hello there",
+            "volatile extends the current finals"
         )
     }
 }

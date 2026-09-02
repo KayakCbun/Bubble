@@ -844,6 +844,41 @@ private enum AppKitTranscriptSurfaceCheck {
             "the production local monitor reports finite app-owned work"
         )
 
+        adapter.setContentOffset(y: 0)
+        let nested = NSScrollView(frame: NSRect(x: 24, y: 8, width: 220, height: 72))
+        nested.hasVerticalScroller = true
+        nested.drawsBackground = false
+        nested.documentView = NSView(frame: NSRect(x: 0, y: 0, width: 220, height: 420))
+        nested.identifier = NSUserInterfaceItemIdentifier(
+            TranscriptNestedVerticalScrollPolicy.recordNotesIdentifier
+        )
+        adapter.scrollView.documentView?.addSubview(nested)
+        nested.layoutSubtreeIfNeeded()
+        let nestedPoint = nested.convert(
+            NSPoint(x: nested.bounds.midX, y: nested.bounds.midY),
+            to: nil
+        )
+        expect(
+            adapter.scrollView.nestedVerticalScroller(atWindowPoint: nestedPoint) === nested,
+            "the transcript defers to a Record notes scroller under the pointer"
+        )
+        let transcriptBeforeNestedWheel = adapter.contentOffsetY
+        let generationBeforeNestedWheel = adapter.scrollView.localWheelHandlerGeneration
+        NSApp.sendEvent(WindowRoutedWheelEvent(
+            windowNumber: window.windowNumber,
+            location: nestedPoint,
+            deltaY: -3
+        ))
+        expect(
+            adapter.scrollView.localWheelHandlerGeneration == generationBeforeNestedWheel + 1,
+            "a wheel over Record notes is still consumed by the local monitor"
+        )
+        expect(
+            abs(adapter.contentOffsetY - transcriptBeforeNestedWheel) < 0.5,
+            "a wheel over Record notes does not move the transcript"
+        )
+        nested.removeFromSuperview()
+
         // A precise mouse packet without AppKit phase metadata is applied by
         // NSScrollView asynchronously. The immediate post-super callback must
         // not report that the user is still at the end and re-arm following

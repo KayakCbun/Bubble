@@ -425,29 +425,51 @@ final class AppKitTranscriptScrollView: NSScrollView {
                   deltaX: event.scrollingDeltaX,
                   deltaY: event.scrollingDeltaY
               ) else { return event }
-        let location: NSPoint
+        let windowPoint: NSPoint
         if event.windowNumber == window.windowNumber {
-            location = convert(event.locationInWindow, from: nil)
+            windowPoint = event.locationInWindow
         } else if event.windowNumber == 0 {
-            location = convert(
-                window.convertPoint(fromScreen: event.locationInWindow),
-                from: nil
-            )
+            windowPoint = window.convertPoint(fromScreen: event.locationInWindow)
         } else {
             return event
         }
+        let location = convert(windowPoint, from: nil)
         guard bounds.contains(location) else { return event }
 
         // Capture before hit testing reaches an embedded SwiftUI table,
-        // code scroller, or web view. Returning nil prevents the same
+        // code scroller, or web view. Nested vertical overflow (Record
+        // notes) keeps the packet. Returning nil prevents the same
         // physical packet from being dispatched a second time.
         let started = transcriptThreadCPUTime()
-        scrollWheel(with: event)
+        if let nested = nestedVerticalScroller(atWindowPoint: windowPoint) {
+            nested.scrollWheel(with: event)
+        } else {
+            scrollWheel(with: event)
+        }
         lastLocalWheelHandlerDuration = max(
             0,
             transcriptThreadCPUTime() - started
         )
         localWheelHandlerGeneration &+= 1
+        return nil
+    }
+
+    func nestedVerticalScroller(atWindowPoint point: NSPoint) -> NSScrollView? {
+        var view: NSView? = window?.contentView?.hitTest(point) ?? hitTest(convert(point, from: nil))
+        while let current = view, current !== self {
+            if let scroll = current as? NSScrollView, scroll !== self {
+                let documentHeight = scroll.documentView?.frame.height ?? 0
+                let clipHeight = scroll.contentView.bounds.height
+                if TranscriptNestedVerticalScrollPolicy.shouldDeferToNestedScroller(
+                    documentHeight: documentHeight,
+                    clipHeight: clipHeight,
+                    identifier: scroll.identifier?.rawValue
+                ) {
+                    return scroll
+                }
+            }
+            view = current.superview
+        }
         return nil
     }
 

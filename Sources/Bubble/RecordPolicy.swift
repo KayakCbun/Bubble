@@ -12,6 +12,75 @@ enum RecordError: Error, Equatable, Sendable {
     case notRecording
 }
 
+enum RecordEngine: String, Equatable, Sendable {
+    case auto
+    case seedAsr = "seed-asr"
+    case speechAnalyzer = "speech-analyzer"
+
+    static func parse(_ raw: String?) -> RecordEngine {
+        switch raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "seed-asr", "seedasr", "doubao", "volc":
+            return .seedAsr
+        case "speech-analyzer", "speech", "apple", "local":
+            return .speechAnalyzer
+        default:
+            return .auto
+        }
+    }
+}
+
+enum RecordEngineChoice: Equatable, Sendable {
+    case seedAsr
+    case speechAnalyzer
+}
+
+struct RecordSeedAsrCredentials: Equatable, Sendable {
+    var apiKey: String = ""
+    var appId: String = ""
+    var accessToken: String = ""
+    var resourceId: String = "volc.seedasr.sauc.duration"
+    var endpoint: String = "wss://openspeech.bytedance.com/api/v3/plan/sauc/bigmodel_async"
+
+    var isUsable: Bool {
+        !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || (!appId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                && !accessToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+    }
+}
+
+enum RecordEnginePolicy {
+    static func resolve(configured: RecordEngine, seedAvailable: Bool) -> RecordEngineChoice {
+        switch configured {
+        case .speechAnalyzer:
+            return .speechAnalyzer
+        case .seedAsr:
+            return .seedAsr
+        case .auto:
+            return seedAvailable ? .seedAsr : .speechAnalyzer
+        }
+    }
+}
+
+enum RecordNotesAssembler {
+    static func appendFinal(existing: String, incoming: String) -> String {
+        let text = incoming.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return existing }
+        if existing.isEmpty { return text }
+        if existing.hasSuffix(text) { return existing }
+        if existing.hasSuffix(" ") || text.hasPrefix(" ") {
+            return existing + text
+        }
+        return existing + " " + text
+    }
+
+    static func merge(final: String, volatile: String) -> String {
+        if final.isEmpty { return volatile }
+        if volatile.isEmpty { return final }
+        if volatile.hasPrefix(final) { return volatile }
+        return final + (final.hasSuffix(" ") || volatile.hasPrefix(" ") ? "" : " ") + volatile
+    }
+}
+
 enum RecordToggleAction: Equatable, Sendable {
     case start
     case stop
@@ -193,6 +262,7 @@ enum RecordPolicy {
         /record — 再输入一次停止，并把录音笔记写进对话。
         /record stop — 停止录音。
         隐藏 Bubble 不会停止录音。关掉或新开对话会先停下并写入笔记。
+        已配置豆包 Seed ASR 时用云端流式识别做直播字幕；否则用本机 Apple Speech。
         """
     }
 

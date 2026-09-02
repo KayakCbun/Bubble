@@ -115,7 +115,8 @@ enum BubblePiAcpPatch {
 
         let withRecordNotes = try patchRecordNotes(source: source)
         let recovered = try patchDeadSessionRecovery(source: withRecordNotes)
-        return try patchCustomMessageImages(source: recovered)
+        let withImages = try patchCustomMessageImages(source: recovered)
+        return hideRecordNotesFromAcpAssistantChunks(withImages)
     }
 
     private static func patchRecordNotes(source: String) throws -> String {
@@ -206,7 +207,7 @@ function bubbleDisplayContentBlocks(content) {
         let eventBridge = #"""
       case "message_end": {
         const message = ev.message;
-        if (message?.role !== "custom" || message.display !== true) break;
+        if (message?.role !== "custom" || message.display !== true || message.customType === "bubble_record_notes") break;
         const blocks = bubbleDisplayContentBlocks(message.content);
         for (const [index, content] of blocks.entries()) {
           this.emit({
@@ -220,7 +221,7 @@ function bubbleDisplayContentBlocks(content) {
       }
 """#
         let replayBridge = #"""
-      if (role === "custom" && m?.display === true) {
+      if (role === "custom" && m?.display === true && m?.customType !== "bubble_record_notes") {
         const blocks = bubbleDisplayContentBlocks(m?.content);
         for (const [index, content] of blocks.entries()) {
           await this.conn.sessionUpdate({
@@ -334,6 +335,23 @@ function bubbleDisplayContentBlocks(content) {
             && source.contains("this.sessions.close(sessionId)")
             && source.contains(customImageMarker)
             && source.contains("bubbleDisplayContentBlocks")
+            && source.contains(#"message.customType === "bubble_record_notes""#)
+            && source.contains(#"m?.customType !== "bubble_record_notes""#)
+    }
+
+    /// Record notes already have a Bubble card. Skip the ACP assistant-chunk
+    /// path so live flush and session replay do not also paint the same text
+    /// as a regular message. Rewrites adapters that still forward them.
+    private static func hideRecordNotesFromAcpAssistantChunks(_ source: String) -> String {
+        source
+            .replacingOccurrences(
+                of: #"if (message?.role !== "custom" || message.display !== true) break;"#,
+                with: #"if (message?.role !== "custom" || message.display !== true || message.customType === "bubble_record_notes") break;"#
+            )
+            .replacingOccurrences(
+                of: #"if (role === "custom" && m?.display === true) {"#,
+                with: #"if (role === "custom" && m?.display === true && m?.customType !== "bubble_record_notes") {"#
+            )
     }
 
     /// Re-patch an already-installed adapter when Bubble adds new ACP methods.
@@ -429,6 +447,7 @@ enum BubblePiRuntimePatch {
     }
 
     static func patchAgentSession(source: String) throws -> String {
+        let source = hideRecordNotesFromAssistantTranscript(source)
         if source.contains(agentMarker),
            source.contains(agentWorkspaceResultMarker),
            source.contains(agentRecordNotesMarker) { return source }
@@ -443,7 +462,7 @@ enum BubblePiRuntimePatch {
         await this.sendCustomMessage({
             customType: "bubble_record_notes",
             content: [{ type: "text", text }],
-            display: true,
+            display: false,
             details,
         }, { triggerTurn: false });
         return { entryId: this.sessionManager.getLeafId() };
@@ -478,7 +497,7 @@ enum BubblePiRuntimePatch {
         await this.sendCustomMessage({
             customType: "bubble_record_notes",
             content: [{ type: "text", text }],
-            display: true,
+            display: false,
             details,
         }, { triggerTurn: false });
         return { entryId: this.sessionManager.getLeafId() };
@@ -538,6 +557,21 @@ enum BubblePiRuntimePatch {
         return source.replacingOccurrences(of: anchor, with: workspaceBridge + selectionBridge + anchor)
     }
 
+    private static func hideRecordNotesFromAssistantTranscript(_ source: String) -> String {
+        source.replacingOccurrences(
+            of: """
+            customType: "bubble_record_notes",
+            content: [{ type: "text", text }],
+            display: true,
+""",
+            with: """
+            customType: "bubble_record_notes",
+            content: [{ type: "text", text }],
+            display: false,
+"""
+        )
+    }
+
     static func apply(runtime: URL) throws {
         let base = runtime.appendingPathComponent("node_modules/@earendil-works/pi-coding-agent")
         let package = base.appendingPathComponent("package.json")
@@ -577,6 +611,11 @@ enum BubblePiRuntimePatch {
             && agentSource.contains(agentMarker)
             && agentSource.contains(agentWorkspaceResultMarker)
             && agentSource.contains(agentRecordNotesMarker)
+            && agentSource.contains("""
+            customType: "bubble_record_notes",
+            content: [{ type: "text", text }],
+            display: false,
+""")
     }
 
     @discardableResult

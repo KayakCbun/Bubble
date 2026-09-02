@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
@@ -657,6 +658,79 @@ struct OverlayLayoutCheck {
         expect(
             RecordCardLayoutPolicy.height(text: "one\ntwo", live: true) > 36,
             "live Record cards include chrome and caption lines"
+        )
+        expect(
+            RecordCardLayoutPolicy.height(
+                text: String(repeating: "line\n", count: 40),
+                live: false
+            ) == RecordCardLayoutPolicy.chromeHeight
+                + RecordCardLayoutPolicy.flushedBodyMaxHeight
+                + RecordCardLayoutPolicy.padding,
+            "flushed Record cards cap height and scroll the rest"
+        )
+        expect(
+            RecordCardLayoutPolicy.scrollerWidth == 10,
+            "Record notes use a 10pt overlay scroller slot"
+        )
+        expect(
+            RecordCardLayoutPolicy.scrollerKnobWidth == 7,
+            "Record notes draw a 7pt overlay knob"
+        )
+        expect(
+            RecordCardLayoutPolicy.scrollerKnobWidth < RecordCardLayoutPolicy.scrollerWidth,
+            "the Record notes knob is thinner than its slot"
+        )
+        let suggested = CGRect(x: 0, y: 12, width: 10, height: 80)
+        let knob = RecordCardLayoutPolicy.scrollerKnobFrame(in: suggested)
+        expect(knob.width == 7, "the Record notes knob is exactly the configured width")
+        expect(knob.height == 80, "the Record notes knob uses the full suggested height")
+        expect(abs(knob.midX - suggested.midX) < 0.01, "the Record notes knob is centered in its slot")
+        let capsule = RecordCardLayoutPolicy.scrollerKnobCapsulePath(in: knob)
+        expect(
+            capsule.contains(CGPoint(x: knob.midX, y: knob.minY + 0.6), using: .winding, transform: .identity),
+            "the Record notes knob includes the bottom semicircle"
+        )
+        expect(
+            capsule.contains(CGPoint(x: knob.midX, y: knob.maxY - 0.6), using: .winding, transform: .identity),
+            "the Record notes knob includes the top semicircle"
+        )
+        expect(
+            capsule.contains(CGPoint(x: knob.minX + 0.6, y: knob.midY), using: .winding, transform: .identity),
+            "the Record notes knob includes the rectangular body"
+        )
+        expect(
+            !capsule.contains(CGPoint(x: knob.minX, y: knob.minY), using: .winding, transform: .identity),
+            "the Record notes knob is a stadium, not a rounded rectangle"
+        )
+        expect(
+            !capsule.contains(CGPoint(x: knob.maxX, y: knob.maxY), using: .winding, transform: .identity),
+            "the Record notes knob caps are true semicircles"
+        )
+        expect(
+            RecordCardLayoutPolicy.scrollerKnobHeight(contentHeight: 80, viewportHeight: 180) == 0,
+            "a Record notes body that fits has no overlay knob"
+        )
+        expect(
+            RecordCardLayoutPolicy.scrollerKnobHeight(contentHeight: 360, viewportHeight: 180) == 90,
+            "the overlay knob scales with the visible fraction of the notes"
+        )
+        expect(
+            RecordCardLayoutPolicy.scrollerKnobOffset(
+                contentOffset: 0,
+                contentHeight: 360,
+                viewportHeight: 180,
+                knobHeight: 90
+            ) == 0,
+            "the overlay knob starts at the top of the card"
+        )
+        expect(
+            RecordCardLayoutPolicy.scrollerKnobOffset(
+                contentOffset: 180,
+                contentHeight: 360,
+                viewportHeight: 180,
+                knobHeight: 90
+            ) == 90,
+            "the overlay knob travels the remaining track"
         )
 
         print("PASS: overlay layout policy")
