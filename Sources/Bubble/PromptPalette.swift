@@ -86,15 +86,17 @@ enum PromptPalette {
         if q.isEmpty { return items }
         let prefixed = items.filter { item in
             item.title.lowercased().hasPrefix(q)
+                || item.title.lowercased().hasPrefix("/" + q)
                 || searchableName(item.title).lowercased().hasPrefix(q)
         }
         if !prefixed.isEmpty { return prefixed }
+        let named = items.filter { item in
+            item.title.lowercased().contains(q)
+                || searchableName(item.title).lowercased().contains(q)
+        }
+        if !named.isEmpty { return named }
         return items.filter { item in
-            let title = item.title.lowercased()
-            let name = searchableName(item.title).lowercased()
-            return title.contains(q)
-                || name.contains(q)
-                || item.subtitle.lowercased().contains(q)
+            item.kind != .skill && item.subtitle.lowercased().contains(q)
         }
     }
 

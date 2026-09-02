@@ -147,6 +147,33 @@ require(customImageRecord.images.first?.mimeType == "image/png", "custom image M
 require(customImageRecord.images.first?.data == Data(base64Encoded: "aW1hZ2U="), "custom image data survives history restore")
 require(customImageRecord.imageOffsets == ["Generated preview".count], "custom image ordering survives history restore")
 
+let recordNotesResponse: [String: Any] = [
+    "entries": [
+        "entries": [
+            ["type": "model_change", "id": "record-root", "parentId": NSNull()],
+            [
+                "type": "custom_message",
+                "id": "record-notes",
+                "parentId": "record-root",
+                "customType": "bubble_record_notes",
+                "display": true,
+                "content": [
+                    ["type": "text", "text": "录音笔记（12 秒）\n\nhello meeting"],
+                ],
+            ],
+        ],
+        "leafId": "record-notes",
+    ],
+]
+guard let recordSnapshot = ConversationTreeSnapshot(response: recordNotesResponse),
+      let recordRow = recordSnapshot.transcript.first else {
+    fputs("conversation tree check failed: displayed record notes were omitted\n", stderr)
+    exit(1)
+}
+require(recordRow.kind == .recordNotes, "record notes project as a Record notes row")
+require(recordRow.text.contains("hello meeting"), "record notes body survives history restore")
+require(recordRow.branchable == false, "record notes are not branch points")
+
 let oldBranch = snapshot.selecting(leafID: "a2a")
 require(oldBranch.activePath.map(\.id) == ["model", "u1", "a1", "u2a", "a2a"], "selecting an older leaf is deterministic")
 require(oldBranch.variants(around: "u2a").map(\.isCurrent) == [true, false], "variant selection follows restored leaf")

@@ -12,6 +12,7 @@ struct ChatItem: Identifiable, Codable, Equatable, @unchecked Sendable {
         case tool
         case system
         case workspaceRun
+        case record
     }
 
     var id: UUID
@@ -355,7 +356,11 @@ final class ChatStore {
     private var loopWakeTimer: DispatchSourceTimer?
     private var isFiringSessionLoop = false
 
-    private var hasActiveWork: Bool { isBusy || childBusy }
+    private var hasActiveWork: Bool { isBusy || childBusy || isRecording }
+    var isRecording: Bool { RecordController.shared.owns(runtimeID) }
+    var recordClosePrompt: RecordClosePrompt?
+    private var liveRecordItemID: UUID?
+    private var pendingRecordFlush: RecordFlushPlan?
     private var pendingChildSteer: WorkspaceBrief?
     private var pendingPrompts: [PendingPrompt] = []
     private var steeringMessageIds: Set<UUID> = []
@@ -1014,7 +1019,7 @@ final class ChatStore {
         case .assistant: .assistant
         case .thought: .thought
         case .tool: .tool
-        case .system, .workspaceRun: .other
+        case .system, .workspaceRun, .record: .other
         }
     }
 
@@ -1454,6 +1459,11 @@ final class ChatStore {
 
     func shutdown() {
         cancelPendingResumeAction()
+        if RecordController.shared.owns(runtimeID) {
+            Task { @MainActor in
+                _ = await RecordController.shared.stop(store: self)
+            }
+        }
         prepareToQuit()
         client.stop()
     }
@@ -2744,11 +2754,24 @@ final class ChatStore {
                 requestFocus()
                 return true
             }
+            if RecordPolicy.shouldConfirmClose(
+                isRecording: isRecording,
+                hasNotes: !RecordController.shared.liveNotes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ) {
+                recordClosePrompt = RecordClosePrompt(intent: .startFresh)
+                persist(immediate: true)
+                requestFocus()
+                return true
+            }
             startFreshConversation()
             return true
         case "loop":
             draft = ""
             handleLoopCommand(SlashCommand.arguments(in: text))
+            return true
+        case "record":
+            draft = ""
+            handleRecordCommand(SlashCommand.arguments(in: text))
             return true
         case "side":
             draft = ""
@@ -2759,6 +2782,15 @@ final class ChatStore {
             if runtimeRole == .side {
                 if SessionLoopPolicy.shouldConfirmClose(loopCount: sessionLoops.count) {
                     loopClosePrompt = SessionLoopClosePrompt(intent: .closeSideSession, count: sessionLoops.count)
+                    persist(immediate: true)
+                    requestFocus()
+                    return true
+                }
+                if RecordPolicy.shouldConfirmClose(
+                    isRecording: isRecording,
+                    hasNotes: !RecordController.shared.liveNotes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ) {
+                    recordClosePrompt = RecordClosePrompt(intent: .closeSideSession)
                     persist(immediate: true)
                     requestFocus()
                     return true
@@ -3154,6 +3186,18 @@ final class ChatStore {
     }
 
     private func startFreshConversation() {
+        if RecordController.shared.owns(runtimeID) {
+            Task { @MainActor in
+                let outcome = await RecordController.shared.stop(store: self)
+                await commitRecordNotes(outcome.plan)
+                self.performStartFreshConversation()
+            }
+            return
+        }
+        performStartFreshConversation()
+    }
+
+    private func performStartFreshConversation() {
         finishPendingTranscriptRestore()
         disarmSessionLoops(persist: true)
         transcriptLoadGeneration &+= 1
@@ -3793,7 +3837,8 @@ final class ChatStore {
         for (index, item) in existing.enumerated()
         where !excludedIDs.contains(item.id)
             && item.sourceEntryId == nil
-            && (item.kind == .system || item.kind == .workspaceRun) {
+            && (item.kind == .system || item.kind == .workspaceRun
+                || (item.kind == .record && item.sourceEntryId == nil)) {
             let anchor = existing[..<index].reversed().compactMap { prior -> Int? in
                 guard let entryID = prior.sourceEntryId else { return nil }
                 return lastProjectedIndex[entryID]
@@ -3923,6 +3968,13 @@ final class ChatStore {
                 sourceEntryId: record.entryID,
                 sourceBranchable: false
             )
+        case .recordNotes:
+            return ChatItem(
+                kind: .record,
+                text: record.text,
+                sourceEntryId: record.entryID,
+                sourceBranchable: false
+            )
         }
     }
 
@@ -3952,6 +4004,7 @@ final class ChatStore {
         case .thought: .thought
         case .tool: .tool
         case .workspaceRelay: .workspaceRun
+        case .recordNotes: .record
         }
     }
 
@@ -4279,7 +4332,8 @@ final class ChatStore {
         removingSetupCards: Bool
     ) {
         let restoredItems = restored.items.filter { item in
-            !removingSetupCards
+            if item.kind == .record, item.sourceEntryId == nil { return false }
+            return !removingSetupCards
                 || !StartupTranscriptPolicy.isSetupCard(item.text, isSystem: item.kind == .system)
         }
         let mergedItems = TranscriptRestoreMerge.merge(
@@ -5499,6 +5553,174 @@ final class ChatStore {
         persist()
     }
 
+    // MARK: - Record
+
+    func handleRecordCommand(_ args: String) {
+        switch RecordPolicy.parseCommand(args) {
+        case .help:
+            items.append(ChatItem(kind: .system, text: RecordPolicy.helpText()))
+            persist(immediate: true)
+            requestFocus()
+        case .toggle:
+            switch RecordPolicy.toggleAction(
+                isRecording: RecordController.shared.isRecording,
+                ownerIsCurrentSession: RecordController.shared.owns(runtimeID)
+            ) {
+            case .start:
+                startRecord()
+            case .stop:
+                stopRecord()
+            case .rejectAlreadyRecording:
+                items.append(ChatItem(kind: .system, text: RecordPolicy.errorMessage(.alreadyRecording)))
+                persist(immediate: true)
+                requestFocus()
+            }
+        case .start:
+            startRecord()
+        case .stop:
+            stopRecord()
+        }
+    }
+
+    func stopRecordFromCard() {
+        stopRecord()
+    }
+
+    func resolveRecordClosePrompt(_ confirm: Bool) {
+        let prompt = recordClosePrompt
+        recordClosePrompt = nil
+        persist(immediate: true)
+        guard confirm, let prompt else { return }
+        Task { @MainActor in
+            let outcome = await RecordController.shared.stop(store: self)
+            await commitRecordNotes(outcome.plan)
+            switch prompt.intent {
+            case .closeSideSession:
+                if onCloseCurrentSession?() != true {
+                    items.append(ChatItem(
+                        kind: .system,
+                        text: "This side session cannot close while Bubble is switching sessions."
+                    ))
+                    persist(immediate: true)
+                }
+            case .startFresh:
+                performStartFreshConversation()
+            }
+        }
+    }
+
+    func beginLiveRecord() {
+        let item = ChatItem(kind: .record, text: "")
+        liveRecordItemID = item.id
+        items.append(item)
+        markTranscriptDelta(.append([item]))
+        persist(immediate: true)
+        onActivityChanged?(hasActiveWork)
+        requestFocus()
+    }
+
+    func updateLiveRecordNotes(_ notes: String) {
+        let preview = RecordPolicy.liveCaptionPreview(notes)
+        guard let id = liveRecordItemID, let index = transcriptItemIndex(id) else { return }
+        items[index].text = preview
+        markTranscriptDelta(.update(items[index]))
+        persist()
+    }
+
+    func endLiveRecord() {
+        if let id = liveRecordItemID, let index = transcriptItemIndex(id) {
+            items.remove(at: index)
+            markTranscriptDelta(.remove([id]))
+            persist(immediate: true)
+        }
+        liveRecordItemID = nil
+        onActivityChanged?(hasActiveWork)
+    }
+
+    func failLiveRecord(_ error: Error) {
+        items.append(ChatItem(kind: .system, text: friendly(error)))
+        persist(immediate: true)
+        requestFocus()
+    }
+
+    private func startRecord() {
+        Task { @MainActor in
+            do {
+                try await RecordController.shared.start(store: self)
+            } catch {
+                items.append(ChatItem(kind: .system, text: friendly(error)))
+                persist(immediate: true)
+            }
+            requestFocus()
+        }
+    }
+
+    private func stopRecord() {
+        Task { @MainActor in
+            let outcome = await RecordController.shared.stop(store: self)
+            if let plan = outcome.plan {
+                await commitRecordNotes(plan)
+            } else if outcome.durationSeconds >= 1 {
+                OverlayLog.write("record stop produced no notes duration=\(outcome.durationSeconds)")
+                items.append(ChatItem(
+                    kind: .system,
+                    text: RecordPolicy.noNotesMessage(durationSeconds: outcome.durationSeconds)
+                ))
+                persist(immediate: true)
+            }
+            requestFocus()
+        }
+    }
+
+    private func flushPendingRecordNotes() {
+        guard let plan = pendingRecordFlush else { return }
+        pendingRecordFlush = nil
+        Task { @MainActor in
+            await commitRecordNotes(plan)
+        }
+    }
+
+    private func commitRecordNotes(_ plan: RecordFlushPlan?) async {
+        guard let plan else { return }
+        if RecordPolicy.shouldQueueFlush(isBusy: isBusy || injecting) {
+            pendingRecordFlush = plan
+            return
+        }
+        if let relative = plan.relativeFilePath {
+            writeRecordNotesFile(relative, contents: plan.notes)
+        }
+        do {
+            if !isConnected {
+                await connect()
+            }
+            let snapshot = try await client.appendRecordNotes(
+                plan.displayText,
+                details: [
+                    "durationSeconds": plan.durationSeconds,
+                    "file": plan.relativeFilePath as Any,
+                ]
+            )
+            applyConversationTree(snapshot, replacingTranscript: true)
+        } catch {
+            items.append(ChatItem(kind: .record, text: plan.displayText))
+            items.append(ChatItem(kind: .system, text: friendly(error)))
+            persist(immediate: true)
+        }
+    }
+
+    private func writeRecordNotesFile(_ relative: String, contents: String) {
+        let url = OverlayPaths.workspace.appendingPathComponent(relative)
+        do {
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try contents.write(to: url, atomically: true, encoding: .utf8)
+        } catch {
+            OverlayLog.write("record notes file failed: \(error.localizedDescription)")
+        }
+    }
+
     // MARK: - Session loops
 
     func toggleLoopList() {
@@ -5777,6 +5999,7 @@ final class ChatStore {
     private func continueIdleWork() {
         guard !isBusy, !injecting, !isStartingSession, !isSwitchingBranch, !isFiringSessionLoop else { return }
         flushPendingInjection()
+        flushPendingRecordNotes()
         guard !isBusy, !injecting else { return }
         startNextWaitingPrompt()
         guard !isBusy else { return }

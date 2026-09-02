@@ -30,6 +30,14 @@ struct BubbleNativeActionCheck {
             BubbleNativeAction.slashCommand(action: "unknown", argument: nil) == nil,
             "the model cannot invoke commands outside Bubble's advertised action set"
         )
+        expect(
+            BubbleNativeAction.slashCommand(action: "start_record", argument: nil) == "/record start",
+            "natural-language Record requests reuse /record start"
+        )
+        expect(
+            BubbleNativeAction.slashCommand(action: "stop_record", argument: nil) == "/record stop",
+            "natural-language stop Record requests reuse /record stop"
+        )
         let config = try String(
             contentsOfFile: "Sources/Bubble/BubbleConfig.swift",
             encoding: .utf8

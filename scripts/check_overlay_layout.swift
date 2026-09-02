@@ -650,6 +650,15 @@ struct OverlayLayoutCheck {
             "an idle Escape still dismisses Bubble"
         )
 
+        expect(
+            RecordCardLayoutPolicy.liveLineLimit == 4,
+            "live Record cards keep four caption lines"
+        )
+        expect(
+            RecordCardLayoutPolicy.height(text: "one\ntwo", live: true) > 36,
+            "live Record cards include chrome and caption lines"
+        )
+
         print("PASS: overlay layout policy")
     }
 }

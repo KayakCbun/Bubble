@@ -61,6 +61,8 @@ require(patched.contains("_bubble/session/select_leaf"), "exact leaf selection m
 require(patched.contains("async selectLeaf(targetId)"), "exact leaf selection reaches Pi RPC")
 require(patched.contains("_bubble/session/append_workspace_result"), "workspace results have a direct ACP append method")
 require(patched.contains("async appendWorkspaceResult(text, details)"), "workspace result append reaches Pi RPC")
+require(patched.contains("_bubble/session/append_record_notes"), "record notes have a direct ACP append method")
+require(patched.contains("async appendRecordNotes(text, details)"), "record notes append reaches Pi RPC")
 require(patched.contains("_bubble/session/recover_dead_rpc"), "dead Pi RPC recovery is marked")
 require(patched.contains("isAlive()"), "Pi RPC liveness is observable")
 require(patched.contains("existing?.proc?.isAlive?.()"), "live sessions are reused")
@@ -72,6 +74,29 @@ require(patched.contains("message?.role !== \"custom\""), "only Pi custom messag
 require(patched.contains("sessionUpdate: \"agent_message_chunk\""), "custom image blocks become assistant content chunks")
 let patchedAgain = try BubblePiAcpPatch.patch(source: patched)
 require(patchedAgain == patched, "patch is idempotent")
+
+let staleRecordAdapter = patched
+    .replacingOccurrences(of: "async appendRecordNotes(text, details)", with: "async appendWorkspaceResult(text, details)")
+    .replacingOccurrences(of: #" && method !== "_bubble/session/append_record_notes""#, with: "")
+    .replacingOccurrences(
+        of: #"""
+    if (method === "_bubble/session/append_record_notes") {
+      const text = typeof params.text === "string" ? params.text : "";
+      if (!text.trim()) throw RequestError3.invalidParams("text is required");
+      const details = params.details && typeof params.details === "object" ? params.details : undefined;
+      await session.proc.appendRecordNotes(text, details);
+    }
+"""#,
+        with: ""
+    )
+require(!staleRecordAdapter.contains("_bubble/session/append_record_notes")
+        || staleRecordAdapter.contains("appendRecordNotes") == false,
+        "stale adapter fixture dropped the Record notes method")
+let upgradedRecordAdapter = try BubblePiAcpPatch.patch(source: staleRecordAdapter)
+require(upgradedRecordAdapter.contains("async appendRecordNotes(text, details)"),
+        "a previously patched adapter gains Record notes without reinstalling Pi")
+require(upgradedRecordAdapter.contains("_bubble/session/append_record_notes"),
+        "a previously patched adapter exposes the Record notes ACP method")
 
 let legacyPatched = patched
     .replacingOccurrences(of: " && method !== \"_bubble/session/select_leaf\"", with: "")
@@ -113,6 +138,8 @@ require(patchedRPC.contains("case \"bubble_select_leaf\""), "Pi RPC exact leaf c
 require(patchedRPC.contains("session.bubbleSelectLeaf(targetId)"), "Pi RPC delegates exact selection to the session lifecycle")
 require(patchedRPC.contains("case \"bubble_append_workspace_result\""), "Pi RPC accepts direct workspace results")
 require(patchedRPC.contains("session.bubbleAppendWorkspaceResult(text, details)"), "Pi RPC persists workspace results through AgentSession")
+require(patchedRPC.contains("case \"bubble_append_record_notes\""), "Pi RPC accepts record notes")
+require(patchedRPC.contains("session.bubbleAppendRecordNotes(text, details)"), "Pi RPC persists record notes through AgentSession")
 let repatchedRPC = try BubblePiRuntimePatch.patch(source: patchedRPC)
 require(repatchedRPC == patchedRPC, "Pi runtime patch is idempotent")
 let legacyRPC = patchedRPC.replacingOccurrences(of: "const result = await session.bubbleSelectLeaf(targetId);", with: "session.sessionManager.branch(targetId);")
@@ -135,6 +162,9 @@ require(patchedAgent.contains("async bubbleAppendWorkspaceResult(text, details)"
 require(patchedAgent.contains("customType: \"bubble_workspace_result\""), "workspace results use a recognizable context message type")
 require(patchedAgent.contains("display: true"), "workspace results render as assistant replies")
 require(patchedAgent.contains("triggerTurn: false"), "workspace result append does not invoke the main model again")
+require(patchedAgent.contains("async bubbleAppendRecordNotes(text, details)"), "AgentSession can append record notes")
+require(patchedAgent.contains("customType: \"bubble_record_notes\""), "record notes use a recognizable context message type")
+require(patchedAgent.contains("triggerTurn: false"), "record notes append does not invoke the main model again")
 let repatchedAgent = try BubblePiRuntimePatch.patchAgentSession(source: patchedAgent)
 require(repatchedAgent == patchedAgent, "AgentSession patch is idempotent")
 

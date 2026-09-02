@@ -248,6 +248,19 @@ enum TranscriptChunkBoundaryPolicy {
     }
 }
 
+enum RecordCardLayoutPolicy {
+    static let liveLineLimit = 4
+    static let chromeHeight: CGFloat = 36
+    static let lineHeight: CGFloat = 18
+    static let padding: CGFloat = 24
+
+    static func height(text: String, live: Bool) -> CGFloat {
+        let lines = max(1, text.split(whereSeparator: \.isNewline).count)
+        let visible = live ? min(lines, liveLineLimit) : min(lines, 18)
+        return chromeHeight + CGFloat(visible) * lineHeight + padding
+    }
+}
+
 enum TranscriptEstimatedHeightPolicy {
     static func height(for text: String) -> CGFloat {
         let lineCount = max(1, text.split(whereSeparator: \.isNewline).count)

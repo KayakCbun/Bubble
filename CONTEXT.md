@@ -58,4 +58,12 @@ _Avoid_: subagent card, nested tool group
 A repeating task bound to one Bubble session. Created with `/loop` or `loop_create`. Hide keeps it firing; closing or quitting the session pauses it; `/resume` that session re-arms it. Ticks wait for the current turn and queued user follow-ups, then fire one due loop as a user-shaped model message rendered as a 定时触发 strip.
 _Avoid_: cron job, alarm, pi-loop
 
+**Record**:
+A mixed-audio capture bound to one Bubble session. Overlay shows live captions while it runs. One Record at a time on the Mac. Hide keeps it running; closing or quitting that session stops it and flushes notes. `/record` starts; `/record` again or `/record stop` stops.
+_Avoid_: recording session, transcript, loop, workspace run
+
+**Record notes**:
+The transcribed text. Overlay-only while the Record is running. On stop, Bubble appends them as a displayed context message and does not ask the model to reply.
+_Avoid_: transcript, summary, injection brief
+
 Main sessions persist in `~/.bubble/session-id`. Conversation branch selections persist separately per session so a read-only branch switch survives relaunch.

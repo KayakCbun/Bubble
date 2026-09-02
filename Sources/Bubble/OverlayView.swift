@@ -989,6 +989,9 @@ struct OverlayView: View {
             // every thought token.
             kind = .thought
             text = item.text
+        case .message(let item) where item.kind == .record:
+            kind = .other
+            text = item.text
         case .tool(let item):
             // Tool rows have a presentation id (`tool-<item id>`) that is
             // different from their ChatStore source id. A compact visible-
@@ -1078,6 +1081,7 @@ struct OverlayView: View {
             lastTurnDurationBucket: Int(max(0, store.lastTurnDuration).rounded()),
             resumeSessionID: store.resumeDestination.prompt?.sessionID,
             loopCloseIntent: store.loopClosePrompt.map { "\($0.intent)-\($0.count)" },
+            recordCloseIntent: store.recordClosePrompt.map { "\($0.intent)" },
             queuedCount: store.queuedMessages.count,
             queuedLastID: store.queuedMessages.last?.id.uuidString,
             queuedLastText: store.queuedMessages.last?.text
@@ -1373,6 +1377,12 @@ struct OverlayView: View {
         if case .message(let item) = row.source, item.loopId != nil {
             estimatedHeight += 22
         }
+        if case .message(let item) = row.source, item.kind == .record {
+            estimatedHeight = RecordCardLayoutPolicy.height(
+                text: item.text,
+                live: item.sourceEntryId == nil
+            )
+        }
         return OverlayTranscriptSurfaceEntry(
             snapshot: appKitTranscriptSnapshot(
                 id: row.id,
@@ -1529,6 +1539,25 @@ struct OverlayView: View {
                 }
             ))
         }
+        if let prompt = store.recordClosePrompt {
+            entries.append(OverlayTranscriptSurfaceEntry(
+                snapshot: appKitTranscriptSnapshot(
+                    id: "record-close",
+                    kind: .system,
+                    text: prompt.message,
+                    estimatedHeight: 92,
+                    fingerprint: "\(prompt.intent)",
+                    isCompleted: false
+                ),
+                render: { [self] in
+                    AnyView(RecordCloseCard(
+                        prompt: prompt,
+                        confirm: { store.resolveRecordClosePrompt(true) },
+                        cancel: { store.resolveRecordClosePrompt(false) }
+                    ))
+                }
+            ))
+        }
         for message in store.queuedMessages {
             entries.append(OverlayTranscriptSurfaceEntry(
                 snapshot: appKitTranscriptSnapshot(
@@ -1636,7 +1665,7 @@ struct OverlayView: View {
             case .user: return .user
             case .assistant: return .assistant
             case .thought, .system: return .system
-            case .workspaceRun: return .other
+            case .workspaceRun, .record: return .other
             case .tool: return .tool
             }
         case .tool:
@@ -1653,6 +1682,9 @@ struct OverlayView: View {
             return TranscriptRowCompletionPolicy.workspaceCardIsCompleted(
                 status: item.workspaceStatus
             )
+        }
+        if case .message(let item) = row.source, item.kind == .record {
+            return item.sourceEntryId != nil
         }
         if case .tool(let item) = row.source {
             return ["completed", "failed", "cancelled"].contains(item.toolStatus ?? "")
@@ -2510,6 +2542,8 @@ struct OverlayView: View {
                 quoteCard(item.text)
             case .workspaceRun:
                 workspaceRunCard(item)
+            case .record:
+                recordCard(item)
             default:
                 EmptyView()
             }
@@ -2557,6 +2591,64 @@ struct OverlayView: View {
                 .fill(OverlaySurface.hairline)
                 .frame(height: 0.5)
         }
+    }
+
+    private func recordCard(_ item: ChatItem) -> some View {
+        let live = item.sourceEntryId == nil
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(live ? Color.red : Color.secondary.opacity(0.7))
+                    .frame(width: 8, height: 8)
+                Text(live ? "录音中" : "录音笔记")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.tertiary)
+                if live, let startedAt = RecordController.shared.startedAt {
+                    Text("·")
+                        .foregroundStyle(.tertiary)
+                    TimelineView(.periodic(from: startedAt, by: RecordPolicy.liveElapsedTickSeconds)) { timeline in
+                        Text(RecordPolicy.elapsedClockLabel(since: startedAt, now: timeline.date))
+                            .font(.system(size: 11, weight: .medium, design: .rounded))
+                            .foregroundStyle(.tertiary)
+                            .monospacedDigit()
+                    }
+                    Spacer(minLength: 8)
+                    Button("停止") {
+                        store.stopRecordFromCard()
+                    }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.primary)
+                } else {
+                    Spacer(minLength: 0)
+                }
+            }
+            if !item.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Text(item.text)
+                    .font(.system(size: OverlayMetrics.fontSize - 1))
+                    .foregroundStyle(.secondary)
+                    .lineSpacing(OverlaySurface.proseLineSpacing - 1)
+                    .multilineTextAlignment(.leading)
+                    .lineLimit(live ? RecordPolicy.liveCaptionLineLimit : nil)
+                    .bubbleTextSelection()
+            } else if live {
+                Text("正在听系统声音和麦克风…")
+                    .font(.system(size: OverlayMetrics.fontSize - 1))
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.primary.opacity(0.035))
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(OverlaySurface.hairline, lineWidth: 1)
+        }
+        .accessibilityLabel(live ? "录音中 \(item.text)" : "录音笔记 \(item.text)")
     }
 
     private func loopTriggerStrip(_ item: ChatItem) -> some View {
@@ -4183,6 +4275,50 @@ private struct SessionLoopCloseCard: View {
     }
 }
 
+private struct RecordCloseCard: View {
+    let prompt: RecordClosePrompt
+    let confirm: () -> Void
+    let cancel: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(prompt.title)
+                    .font(.system(size: 13, weight: .semibold))
+                Text(prompt.message)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+            }
+            HStack(spacing: 8) {
+                ResumeDestinationButton(
+                    title: prompt.confirmTitle,
+                    symbol: "stop.circle",
+                    emphasized: true,
+                    action: confirm
+                )
+                Button("取消", action: cancel)
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 6)
+                    .contentShape(Rectangle())
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: 500, alignment: .leading)
+        .background {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(OverlaySurface.userCardFill.opacity(0.82))
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(OverlaySurface.hairline, lineWidth: 1)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(prompt.message)
+    }
+}
+
 private struct TranscriptPinButton: View {
     var pinned: Bool
     var onToggle: () -> Void
@@ -4646,6 +4782,7 @@ private struct OverlayTranscriptStructureKey: Equatable {
     let lastTurnDurationBucket: Int
     let resumeSessionID: String?
     let loopCloseIntent: String?
+    let recordCloseIntent: String?
     let queuedCount: Int
     let queuedLastID: String?
     let queuedLastText: String?
@@ -5343,7 +5480,7 @@ private extension WorkspaceTurnRow {
             kind = .thought
         case .tool:
             kind = .tool
-        case .system, .workspaceRun:
+        case .system, .workspaceRun, .record:
             kind = .other
         }
         self.init(

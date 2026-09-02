@@ -141,7 +141,7 @@ enum BubbleConfig {
 
     Skills or the workspace extension not loading usually means this workspace is untrusted. `~/.pi/agent/trust.json` must include `~/.bubble/workspace`. Logs are `~/.bubble/overlay.log`.
 
-    Overlay-local commands: `/clear`, `/new`, `/loop`, `/model`, `/thinking`, `/agents`, `/open`, `/mounts`, `/clipboard`, `/quit`. `/skill:name`, `/compact`, and the rest go to Pi.
+    Overlay-local commands: `/clear`, `/new`, `/loop`, `/record`, `/model`, `/thinking`, `/agents`, `/open`, `/mounts`, `/clipboard`, `/quit`. `/skill:name`, `/compact`, and the rest go to Pi.
     """
 
     static let controlsSection = """
