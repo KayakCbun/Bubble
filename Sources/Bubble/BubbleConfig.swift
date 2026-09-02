@@ -156,6 +156,8 @@ enum BubbleConfig {
     The user can ask you to repeat a task in this conversation, such as checking a deploy every few minutes. Call `loop_create` with an interval (`5m`, `1h`) or a daily time (`09:00`). Call `loop_list` and `loop_delete` to inspect or stop loops. Loops belong to this session: they pause when the session closes and continue when it is opened again. Do not fake a loop by calling tools over and over in one turn.
     """
 
+    static var slotsSection: String { BubbleSlotCatalog.agentGuide() }
+
     static let defaultAgentsMarkdown = """
     # Bubble
 
@@ -176,6 +178,8 @@ enum BubbleConfig {
     \(controlsSection)
 
     \(loopSection)
+
+    \(slotsSection)
     """
 
     static func load() -> BubbleSettings {
@@ -240,6 +244,11 @@ enum BubbleConfig {
             heading: "## Loops",
             contains: "loop_create",
             body: loopSection
+        )
+        ensureNamedSection(
+            heading: "## Slots",
+            contains: "keep a slot under",
+            body: slotsSection
         )
     }
 

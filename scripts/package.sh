@@ -190,10 +190,14 @@ swiftc -parse-as-library Sources/BubbleMounts/WorkspaceMounts.swift scripts/chec
 swiftc -parse-as-library scripts/check_workspace_completion_order.swift -o /tmp/bubble-check-workspace-completion-order
 /tmp/bubble-check-workspace-completion-order
 
+swiftc -parse-as-library Sources/Bubble/BubbleSlot.swift scripts/check_bubble_slot.swift -o /tmp/bubble-check-slots
+/tmp/bubble-check-slots
+
 swiftc -parse-as-library \
   Sources/Bubble/BubbleNativeAction.swift \
   Sources/Bubble/JSONRPC.swift \
   Sources/Bubble/Paths.swift \
+  Sources/Bubble/BubbleSlot.swift \
   Sources/Bubble/BubbleConfig.swift \
   Sources/Bubble/BubblePiAcpPatch.swift \
   Sources/Bubble/PiSetup.swift \

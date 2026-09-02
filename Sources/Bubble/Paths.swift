@@ -138,6 +138,7 @@ enum OverlayPaths {
         try? fm.createDirectory(at: runtime, withIntermediateDirectories: true)
         try? fm.createDirectory(at: steeringDirectory, withIntermediateDirectories: true)
         try? fm.createDirectory(at: controlsDirectory, withIntermediateDirectories: true)
+        BubbleSlotCatalog.ensureAll(in: root)
         BubbleConfig.ensureAgentsFile()
         BubbleConfig.ensureWorkspaceExtension()
         BubbleConfig.ensureWorkspaceTrust()

@@ -107,7 +107,7 @@ struct SlashCommand: Identifiable, Equatable {
         Type /setup to install Pi and pi-acp into ~/.bubble/runtime.
         Type /login to sign in a provider. Type /resume to switch sessions.
         Type /close to close the current side session. In the main session it hides Bubble.
-        Type /record to caption a meeting on this Mac into the conversation.
+        Type /record to caption a meeting on this Mac into the conversation. Seed ASR lives in ~/.bubble/record.json.
         Type $ or /skill:name to pick a skill.
 
         Slash commands

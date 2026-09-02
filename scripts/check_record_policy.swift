@@ -201,6 +201,10 @@ struct RecordPolicyCheck {
     }
 
     private static func testEngine() {
+        expect(
+            RecordPolicy.helpText().contains("~/.bubble/record.json"),
+            "Record help points at the Record slot"
+        )
         expect(RecordEngine.parse(nil) == .auto, "missing engine is auto")
         expect(RecordEngine.parse("seed-asr") == .seedAsr, "seed-asr is Seed ASR")
         expect(RecordEngine.parse("speech-analyzer") == .speechAnalyzer, "speech-analyzer is Apple Speech")

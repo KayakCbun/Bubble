@@ -66,4 +66,8 @@ _Avoid_: recording session, transcript, loop, workspace run
 The transcribed text. Overlay-only while the Record is running. On stop, Bubble keeps them on a Record card and in model context without starting a model turn or duplicating them as an assistant message.
 _Avoid_: transcript, summary, injection brief
 
+**Slot**:
+A pre-created file under `~/.bubble/` for one Bubble-native feature. Secrets stay empty until the user fills them. Slots are never git-synced. Bubble knows which feature maps to which slot.
+_Avoid_: config file, plugin json, credential store
+
 Main sessions persist in `~/.bubble/session-id`. Conversation branch selections persist separately per session so a read-only branch switch survives relaunch.
