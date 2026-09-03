@@ -161,9 +161,9 @@ enum BubbleConfig {
 
     Bubble can render safe structured answers as native macOS UI through `bubble_render`. Decide on your own when a visual answer communicates the result better. The user does not need to ask for a chart.
 
-    Call `bubble_render` when the answer contains trustworthy structured data suited to comparison, a time trend, part-to-whole composition, a compact KPI summary, or a table. Prefer it once there are at least three comparable values. Do not use it for decoration, a single number, prose-only answers, uncertain estimates, or data you would have to invent.
+    Call `bubble_render` when the answer contains trustworthy structured data suited to comparison, a time trend, magnitude over time, correlation, part-to-whole composition, a compact KPI summary, or a table. Prefer it once there are at least three comparable values. Choose the chart that matches the question: BarChart for comparison, LineChart for a trend, AreaChart for magnitude over time, ScatterChart for correlation, and DonutChart for part-to-whole. Do not use it for decoration, a single number, prose-only answers, uncertain estimates, or data you would have to invent.
 
-    Use only the catalog and props documented by the tool. Keep the normal answer concise after rendering and state the main insight. Never print the raw Spec to the user. If rendering fails, continue with a normal text answer.
+    Charts are clickable by default. Give only related charts and tables the same `filterGroup`; for a linked table, also set `filterColumn` to the column whose values match chart labels. A chart click then filters that table and highlights charts in the same group without affecting unrelated data. Use only the catalog and props documented by the tool. Keep the normal answer concise after rendering and state the main insight. Never print the raw Spec to the user. If rendering fails, continue with a normal text answer.
     """
 
     static var slotsSection: String { BubbleSlotCatalog.agentGuide() }
@@ -523,6 +523,12 @@ const nativeDonutPoint = Type.Object({
   label: Type.String({ minLength: 1, maxLength: 8192 }),
   value: Type.Number({ minimum: 0 }),
 }, { additionalProperties: false });
+const nativeScatterPoint = Type.Object({
+  label: Type.String({ minLength: 1, maxLength: 8192 }),
+  x: Type.Number(),
+  y: Type.Number(),
+  series: Type.Optional(Type.String({ maxLength: 8192 })),
+}, { additionalProperties: false });
 const nativeElement = Type.Union([
   Type.Object({
     type: Type.Literal("Stack"),
@@ -571,6 +577,8 @@ const nativeElement = Type.Union([
     type: Type.Literal("Table"),
     props: Type.Object({
       title: Type.Optional(Type.String({ maxLength: 8192 })),
+      filterColumn: Type.Optional(Type.String({ minLength: 1, maxLength: 8192 })),
+      filterGroup: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
       columns: Type.Array(Type.Object({
         key: Type.String({ minLength: 1, maxLength: 8192 }),
         label: Type.String({ minLength: 1, maxLength: 8192 }),
@@ -580,10 +588,11 @@ const nativeElement = Type.Union([
     children: nativeLeafChildren,
   }, { additionalProperties: false }),
   Type.Object({
-    type: Type.Union([Type.Literal("BarChart"), Type.Literal("LineChart")]),
+    type: Type.Union([Type.Literal("BarChart"), Type.Literal("LineChart"), Type.Literal("AreaChart")]),
     props: Type.Object({
       title: Type.String({ minLength: 1, maxLength: 8192 }),
       unit: Type.Optional(Type.String({ maxLength: 8192 })),
+      filterGroup: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
       points: Type.Array(nativeChartPoint, { minItems: 1, maxItems: 500 }),
     }, { additionalProperties: false }),
     children: nativeLeafChildren,
@@ -593,7 +602,19 @@ const nativeElement = Type.Union([
     props: Type.Object({
       title: Type.String({ minLength: 1, maxLength: 8192 }),
       unit: Type.Optional(Type.String({ maxLength: 8192 })),
+      filterGroup: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
       points: Type.Array(nativeDonutPoint, { minItems: 1, maxItems: 500 }),
+    }, { additionalProperties: false }),
+    children: nativeLeafChildren,
+  }, { additionalProperties: false }),
+  Type.Object({
+    type: Type.Literal("ScatterChart"),
+    props: Type.Object({
+      title: Type.String({ minLength: 1, maxLength: 8192 }),
+      xLabel: Type.String({ minLength: 1, maxLength: 8192 }),
+      yLabel: Type.String({ minLength: 1, maxLength: 8192 }),
+      filterGroup: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
+      points: Type.Array(nativeScatterPoint, { minItems: 1, maxItems: 500 }),
     }, { additionalProperties: false }),
     children: nativeLeafChildren,
   }, { additionalProperties: false }),
@@ -645,9 +666,11 @@ export default function (pi: ExtensionAPI) {
       "Choose bubble_render yourself when the answer has at least three trustworthy comparable values, a time series, proportions, several KPIs, or a compact table.",
       "Do not wait for the user to say chart or visualization. Do not use it for decoration, one scalar, speculative values, or prose that is already clearer.",
       "Use at most one native visualization per answer unless two datasets are genuinely unrelated.",
-      "Use only Stack, Card, Heading, Text, Metric, Table, BarChart, LineChart, and DonutChart. Every referenced child must exist and the graph must be acyclic.",
-      "Chart props are title, optional unit, and points. BarChart and LineChart points are { label, value, optional series }. DonutChart points are { label, non-negative value } with unique labels and no series.",
-      "Table props are optional title, columns [{ key, label }], and rows whose scalar keys match the columns.",
+      "Use only Stack, Card, Heading, Text, Metric, Table, BarChart, LineChart, AreaChart, DonutChart, and ScatterChart. Every referenced child must exist and the graph must be acyclic.",
+      "Choose BarChart for category comparison, LineChart for a trend, AreaChart for magnitude over time, ScatterChart for correlation, and DonutChart for part-to-whole.",
+      "BarChart, LineChart, and AreaChart props are title, optional unit, optional filterGroup, and points { label, value, optional series }. DonutChart uses the same props but points are { label, non-negative value } with unique labels and no series. ScatterChart props are title, xLabel, yLabel, optional filterGroup, and points { label, x, y, optional series }.",
+      "Charts are clickable by default. Give only related charts and tables the same filterGroup. To link a table, also give it a filterColumn whose row values exactly match chart point labels; a click filters and highlights only that group.",
+      "Table props are optional title, optional filterColumn, optional filterGroup, columns [{ key, label }], and rows whose scalar keys match the columns. Always provide filterGroup when filterColumn is present.",
       "Metric props are { label, value, optional detail, optional numeric trend }. Heading props are { text, optional level: 1 | 2 | 3 }. Text props are { text, optional style: \"body\" | \"secondary\" | \"caption\" }. Stack and Card compose child element IDs.",
       "summary is a short accessible description of the main conclusion. After rendering, reply with only the insight or explanation the visual does not already show.",
       "Never invent data to make a visual and never expose the raw Spec in the user-facing answer.",

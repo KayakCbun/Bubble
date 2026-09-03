@@ -22,7 +22,9 @@ enum AgenticUIComponentType: String, Codable, CaseIterable, Sendable {
     case table = "Table"
     case barChart = "BarChart"
     case lineChart = "LineChart"
+    case areaChart = "AreaChart"
     case donutChart = "DonutChart"
+    case scatterChart = "ScatterChart"
 }
 
 enum AgenticUIJSONValue: Codable, Equatable, Sendable {
@@ -150,6 +152,26 @@ struct AgenticUIChartPoint: Equatable, Sendable, Identifiable {
     var id: String { "\(series ?? "")\u{1F}\(label)" }
 }
 
+struct AgenticUIScatterPoint: Equatable, Sendable, Identifiable {
+    var label: String
+    var x: Double
+    var y: Double
+    var series: String?
+
+    var id: String { "\(series ?? "")\u{1F}\(label)" }
+}
+
+struct AgenticUIFilterSelection: Equatable, Sendable {
+    var group: String
+    var label: String
+}
+
+struct AgenticUIHitCandidate: Equatable, Sendable {
+    var label: String
+    var x: Double
+    var y: Double
+}
+
 struct AgenticUITableColumn: Equatable, Sendable {
     var key: String
     var label: String
@@ -181,6 +203,25 @@ struct AgenticUISpec: Codable, Equatable, Sendable {
 
     func tableRows(for elementID: String) -> [[String: AgenticUIJSONValue]] {
         elements[elementID]?.props["rows"]?.array?.compactMap(\.object) ?? []
+    }
+
+    func tableFilterColumn(for elementID: String) -> String? {
+        elements[elementID]?.props["filterColumn"]?.string
+    }
+
+    func filterGroup(for elementID: String) -> String {
+        elements[elementID]?.props["filterGroup"]?.string ?? elementID
+    }
+
+    func scatterPoints(for elementID: String) -> [AgenticUIScatterPoint] {
+        guard let values = elements[elementID]?.props["points"]?.array else { return [] }
+        return values.compactMap { value in
+            guard let object = value.object,
+                  let label = object["label"]?.string,
+                  let x = object["x"]?.number,
+                  let y = object["y"]?.number else { return nil }
+            return AgenticUIScatterPoint(label: label, x: x, y: y, series: object["series"]?.string)
+        }
     }
 }
 
@@ -298,15 +339,24 @@ enum AgenticUICatalog {
                   optionalNumber(element.props["trend"], range: -1_000_000...1_000_000),
                   element.children.isEmpty else { return false }
         case .table:
-            allowed = ["title", "columns", "rows"]
+            allowed = ["title", "columns", "rows", "filterColumn", "filterGroup"]
             guard optionalString(element.props["title"]),
                   validateTable(element, spec: spec, elementID: elementID),
                   element.children.isEmpty else { return false }
-        case .barChart, .lineChart, .donutChart:
-            allowed = ["title", "unit", "points"]
+        case .barChart, .lineChart, .areaChart, .donutChart:
+            allowed = ["title", "unit", "points", "filterGroup"]
             guard requiredString(element.props["title"]),
                   optionalString(element.props["unit"]),
+                  optionalFilterGroup(element.props["filterGroup"]),
                   validateChart(element, spec: spec, elementID: elementID),
+                  element.children.isEmpty else { return false }
+        case .scatterChart:
+            allowed = ["title", "xLabel", "yLabel", "points", "filterGroup"]
+            guard requiredString(element.props["title"]),
+                  requiredString(element.props["xLabel"]),
+                  requiredString(element.props["yLabel"]),
+                  optionalFilterGroup(element.props["filterGroup"]),
+                  validateScatterChart(element, spec: spec, elementID: elementID),
                   element.children.isEmpty else { return false }
         }
         return Set(element.props.keys).isSubset(of: allowed)
@@ -338,6 +388,26 @@ enum AgenticUICatalog {
         return true
     }
 
+    private static func validateScatterChart(
+        _ element: AgenticUIElement,
+        spec: AgenticUISpec,
+        elementID: String
+    ) -> Bool {
+        let points = spec.scatterPoints(for: elementID)
+        guard let rawPoints = element.props["points"]?.array,
+              !points.isEmpty,
+              points.count == rawPoints.count,
+              points.count <= AgenticUILimits.maxChartPoints,
+              points.allSatisfy({ !$0.label.isEmpty && $0.x.isFinite && $0.y.isFinite }),
+              Set(points.map(\.id)).count == points.count,
+              Set(points.compactMap(\.series)).count <= AgenticUILimits.maxChartSeries else { return false }
+        return rawPoints.allSatisfy { rawPoint in
+            guard let object = rawPoint.object else { return false }
+            return Set(object.keys).isSubset(of: ["label", "x", "y", "series"])
+                && optionalString(object["series"])
+        }
+    }
+
     private static func validateTable(
         _ element: AgenticUIElement,
         spec: AgenticUISpec,
@@ -360,6 +430,10 @@ enum AgenticUICatalog {
                   requiredString(object["label"]) else { return false }
         }
         let keys = Set(columns.map(\.key))
+        guard optionalString(element.props["filterColumn"]),
+              optionalFilterGroup(element.props["filterGroup"]),
+              (element.props["filterColumn"] == nil || element.props["filterGroup"] != nil),
+              element.props["filterColumn"]?.string.map(keys.contains) ?? true else { return false }
         return rows.allSatisfy { row in
             Set(row.keys).isSubset(of: keys) && row.values.allSatisfy(scalar)
         }
@@ -388,12 +462,103 @@ enum AgenticUICatalog {
         return number.isFinite && range.contains(number)
     }
 
+    private static func optionalFilterGroup(_ value: AgenticUIJSONValue?) -> Bool {
+        guard let value else { return true }
+        guard let string = value.string else { return false }
+        let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !trimmed.isEmpty && string.count <= 128
+    }
+
     private static func scalar(_ value: AgenticUIJSONValue?) -> Bool {
         guard let value else { return false }
         switch value {
         case .null, .bool, .number, .string: return true
         case .array, .object: return false
         }
+    }
+}
+
+enum AgenticUIInteractionPolicy {
+    static func toggledSelection(
+        current: AgenticUIFilterSelection?,
+        candidate: AgenticUIFilterSelection
+    ) -> AgenticUIFilterSelection? {
+        current?.group == candidate.group && normalized(current?.label) == normalized(candidate.label)
+            ? nil
+            : candidate
+    }
+
+    static func filteredRows(
+        _ rows: [[String: AgenticUIJSONValue]],
+        filterColumn: String?,
+        filterGroup: String,
+        selection: AgenticUIFilterSelection?
+    ) -> [[String: AgenticUIJSONValue]] {
+        guard let filterColumn,
+              let selection,
+              selection.group == filterGroup,
+              !selection.label.isEmpty else { return rows }
+        let matches = rows.filter { normalized($0[filterColumn]?.displayText) == normalized(selection.label) }
+        return matches.isEmpty ? rows : matches
+    }
+
+    static func isSelected(
+        _ label: String,
+        filterGroup: String,
+        selection: AgenticUIFilterSelection?
+    ) -> Bool {
+        guard let selection, selection.group == filterGroup else { return true }
+        return normalized(label) == normalized(selection.label)
+    }
+
+    static func nearestPointLabel(
+        candidates: [AgenticUIHitCandidate],
+        tapX: Double,
+        tapY: Double,
+        maximumDistance: Double
+    ) -> String? {
+        guard let nearest = candidates.min(by: {
+            hypot($0.x - tapX, $0.y - tapY) < hypot($1.x - tapX, $1.y - tapY)
+        }), hypot(nearest.x - tapX, nearest.y - tapY) <= maximumDistance else { return nil }
+        return nearest.label
+    }
+
+    static func magnitudeMarkLabel(
+        candidates: [AgenticUIHitCandidate],
+        baselineY: Double,
+        tapX: Double,
+        tapY: Double,
+        maximumXDistance: Double
+    ) -> String? {
+        candidates
+            .filter { candidate in
+                abs(candidate.x - tapX) <= maximumXDistance
+                    && tapY >= min(candidate.y, baselineY) - 4
+                    && tapY <= max(candidate.y, baselineY) + 4
+            }
+            .min { abs($0.x - tapX) < abs($1.x - tapX) }?
+            .label
+    }
+
+    static func donutLabel(
+        points: [AgenticUIChartPoint],
+        angleFraction: Double,
+        radiusRatio: Double
+    ) -> String? {
+        guard (0...1).contains(angleFraction),
+              (0.55...1).contains(radiusRatio) else { return nil }
+        let total = points.reduce(0) { $0 + $1.value }
+        guard total > 0 else { return nil }
+        let target = angleFraction * total
+        var cumulative = 0.0
+        return points.first { point in
+            cumulative += point.value
+            return point.value > 0 && target < cumulative
+        }?.label
+    }
+
+    private static func normalized(_ value: String?) -> String? {
+        value?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 }
 

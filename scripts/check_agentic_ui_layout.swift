@@ -50,6 +50,60 @@ private enum AgenticUILayoutCheck {
         require(size.height >= 240 && size.height < 500, "the native chart reports a bounded intrinsic height")
         require(size.width.isFinite && size.height.isFinite, "the native chart layout is finite")
 
+        let areaRaw: [String: Any] = [
+            "summary": "Weekly traffic grew steadily.",
+            "spec": [
+                "root": "chart",
+                "elements": [
+                    "chart": [
+                        "type": "AreaChart",
+                        "props": [
+                            "title": "Weekly traffic",
+                            "unit": "requests",
+                            "points": [
+                                ["label": "W1", "value": 120],
+                                ["label": "W2", "value": 180],
+                                ["label": "W3", "value": 240],
+                            ],
+                        ],
+                        "children": [],
+                    ],
+                ],
+            ],
+        ]
+        let scatterRaw: [String: Any] = [
+            "summary": "Deploy frequency and lead time are inversely related.",
+            "spec": [
+                "root": "chart",
+                "elements": [
+                    "chart": [
+                        "type": "ScatterChart",
+                        "props": [
+                            "title": "Delivery performance",
+                            "xLabel": "Deployments per week",
+                            "yLabel": "Lead time (hours)",
+                            "points": [
+                                ["label": "Search", "x": 12, "y": 4.2],
+                                ["label": "Chat", "x": 7, "y": 8.4],
+                            ],
+                        ],
+                        "children": [],
+                    ],
+                ],
+            ],
+        ]
+        for (name, fixture) in [("area", areaRaw), ("scatter", scatterRaw)] {
+            guard let request = AgenticUIRequest.decodeAndValidate(fixture) else {
+                fputs("agentic UI layout check failed: \(name) fixture did not validate\n", stderr)
+                exit(1)
+            }
+            let host = NSHostingView(rootView: AgenticUIView(request: request).frame(width: 620))
+            host.layoutSubtreeIfNeeded()
+            let size = host.fittingSize
+            require(size.height >= 220 && size.height < 400, "the native \(name) chart has a bounded intrinsic height")
+            require(size.width.isFinite && size.height.isFinite, "the native \(name) chart layout is finite")
+        }
+
         print("PASS: SwiftUI and Swift Charts produce a bounded native transcript row")
     }
 }
