@@ -108,7 +108,7 @@ private struct ImageZoomView: View {
             VStack(spacing: 0) {
                 HStack(spacing: 10) {
                     Text("Image")
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(OverlayMetrics.font(size: 13, weight: .semibold))
                     Spacer()
                     Button {
                         scale = 1

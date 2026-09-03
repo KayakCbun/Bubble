@@ -51,7 +51,7 @@ struct MarkdownFileGlyph: View {
             MarkdownPageShape.fold()
                 .fill(Color.white.opacity(0.28))
             Text("MD")
-                .font(.system(size: max(5.5, pointSize * 0.36), weight: .bold, design: .rounded))
+                .font(OverlayMetrics.font(size: max(5.5, pointSize * 0.36), weight: .bold, design: .rounded))
                 .foregroundStyle(Color.white)
                 .tracking(-0.3)
                 .offset(y: pointSize * 0.08)
@@ -630,8 +630,8 @@ enum WorkspaceTranscriptWarmup {
 }
 
 private enum ProseTypography {
-    static let themeVersion = 1
-    static let layoutVersion = 2
+    static let themeVersion = 3
+    static let layoutVersion = 11
 
     static func fingerprint(fontSize: CGFloat, weight: Double) -> ProseTypographyFingerprint {
         ProseTypographyFingerprint(
@@ -666,7 +666,7 @@ struct ProseDocument: View {
                     case .heading(let level, let runs):
                         inlineFlow(
                             runs,
-                            font: .system(
+                            font: OverlayMetrics.font(
                                 size: level <= 1 ? OverlayMetrics.heading1Size : level == 2 ? OverlayMetrics.heading2Size : OverlayMetrics.heading3Size,
                                 weight: .semibold
                             ),
@@ -783,7 +783,7 @@ struct ProseDocument: View {
             case .strong:
                 part.font = font.weight(.semibold)
             case .chip(_, .code):
-                part.font = .system(size: OverlayMetrics.chipSize, weight: .regular, design: .monospaced)
+                part.font = OverlayMetrics.font(size: OverlayMetrics.chipSize, design: .monospaced)
             case .chip:
                 break
             }
@@ -956,7 +956,10 @@ struct InlineChip: View {
                     .foregroundStyle(icon.color)
             }
             Text(displayText)
-                .font(.system(size: OverlayMetrics.chipSize, weight: .regular, design: kind.isMonospaced ? .monospaced : .default))
+                .font(OverlayMetrics.font(
+                    size: OverlayMetrics.chipSize,
+                    design: kind.isMonospaced ? .monospaced : .default
+                ))
                 .foregroundStyle(kind == .url ? Color(red: 0.16, green: 0.42, blue: 0.90) : OverlaySurface.conversationInk)
                 .lineLimit(1)
                 .truncationMode(.middle)

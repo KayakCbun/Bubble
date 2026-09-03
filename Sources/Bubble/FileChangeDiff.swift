@@ -103,7 +103,7 @@ private struct FileChangeDiffView: View {
         VStack(spacing: 0) {
             HStack {
                 Text("\(summary.files.count) changed file\(summary.files.count == 1 ? "" : "s")")
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(OverlayMetrics.font(size: 13, weight: .semibold))
                 if let additions = summary.additions, summary.hasLineStats {
                     Text("+\(additions)")
                         .foregroundStyle(Color(red: 0.18, green: 0.62, blue: 0.32))
@@ -142,7 +142,7 @@ private struct FileChangeDiffView: View {
                                         }
                                     }
                                 }
-                                .font(.system(size: 12))
+                                .font(OverlayMetrics.font(size: 12, weight: .regular))
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 6)
                                 .background(
@@ -158,7 +158,7 @@ private struct FileChangeDiffView: View {
                 .frame(minWidth: 220, idealWidth: 260)
                 ScrollView {
                     Text(diffText(current))
-                        .font(.system(size: 12, design: .monospaced))
+                        .font(OverlayMetrics.font(size: 12, design: .monospaced))
                         .bubbleTextSelection()
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(16)

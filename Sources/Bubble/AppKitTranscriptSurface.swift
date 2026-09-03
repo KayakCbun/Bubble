@@ -864,6 +864,10 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
         mounted[rowID]?.host.configureCount
     }
 
+    func hostFrame(rowID: String) -> NSRect? {
+        mounted[rowID]?.host.frame
+    }
+
     /// Captures the first visible row and its document-to-viewport offset.
     func currentVisibleAnchor() -> TranscriptSurfaceAnchor? {
         guard let index = heightIndex.row(atOffset: contentOffsetY),
@@ -1472,7 +1476,7 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
 
     private func updateDocumentFrame() {
         let width = max(scrollView.contentView.bounds.width, scrollView.bounds.width, 1)
-        let height = max(heightIndex.totalHeight, 1)
+        let height = max(backingPixelAligned(heightIndex.totalHeight), 1)
         document.setFrameSize(NSSize(width: width, height: height))
     }
 
@@ -1637,7 +1641,7 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
                 host = rowFactory(row, key)
                 reused = false
             }
-            host.frame = NSRect(x: 0, y: heightIndex.offset(of: index), width: document.bounds.width, height: heightIndex.height(at: index) ?? 1)
+            host.frame = backingPixelAlignedRowFrame(at: index)
             // Reusable cells stay attached to the document. Re-adding an
             // NSHostingView to a window rebuilds SwiftUI's FocusBridge and
             // the entire key-view loop, which shows up outside the measured
@@ -1772,12 +1776,24 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
     }
 
     private func position(_ host: AppKitTranscriptRowHost, at index: Int) {
-        host.frame = NSRect(
+        host.frame = backingPixelAlignedRowFrame(at: index)
+    }
+
+    private func backingPixelAlignedRowFrame(at index: Int) -> NSRect {
+        let rawOrigin = heightIndex.offset(of: index)
+        let rawHeight = heightIndex.height(at: index) ?? 1
+        let origin = backingPixelAligned(rawOrigin)
+        let end = backingPixelAligned(rawOrigin + rawHeight)
+        return NSRect(
             x: 0,
-            y: heightIndex.offset(of: index),
-            width: document.bounds.width,
-            height: heightIndex.height(at: index) ?? 1
+            y: origin,
+            width: backingPixelAligned(document.bounds.width),
+            height: max(1 / displayScale, end - origin)
         )
+    }
+
+    private func backingPixelAligned(_ value: CGFloat) -> CGFloat {
+        (value * displayScale).rounded(.toNearestOrAwayFromZero) / displayScale
     }
 
     private func unmount(id: String, cell: AppKitTranscriptMountedCell) {

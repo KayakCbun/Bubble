@@ -30,12 +30,63 @@ struct TypographyContractCheck {
             contentsOfFile: "Sources/Bubble/TranscriptProse.swift",
             encoding: .utf8
         )
-        require(
-            overlay.contains("static let bodyWeight: Font.Weight = .regular"),
-            "Bubble body copy has one explicit regular weight token"
+        let surface = try String(
+            contentsOfFile: "Sources/Bubble/OverlaySurface.swift",
+            encoding: .utf8
+        )
+        let transcript = try String(
+            contentsOfFile: "Sources/Bubble/TranscriptSurface.swift",
+            encoding: .utf8
         )
         require(
-            !overlay.contains(".font(.system(size: OverlayMetrics.fontSize, weight: .regular))"),
+            overlay.contains("static let fontSize: CGFloat = 14"),
+            "body copy stays 14pt Regular"
+        )
+        require(
+            overlay.contains("static let bodyWeight: Font.Weight = .regular"),
+            "body copy stays Regular"
+        )
+        require(
+            overlay.contains("static var bodyFont: Font { font(size: fontSize, weight: bodyWeight) }"),
+            "body copy uses the shared OverlayMetrics font token"
+        )
+        require(
+            overlay.contains(".system(size: size, weight: weight, design: design)"),
+            "conversation text uses the native macOS system family"
+        )
+        require(
+            !overlay.contains("Font.custom(")
+                && !overlay.contains("OverlayTypeface"),
+            "the overlay does not route body copy through a bundled custom face"
+        )
+        require(
+            transcript.contains("fontFamily: \".AppleSystemUIFont\""),
+            "transcript cache keys follow the system family"
+        )
+        require(
+            surface.contains("static let opaqueLabel = NSColor(name: \"bubble.opaqueLabel\""),
+            "conversation ink is a solid sRGB label, not a vibrant system color"
+        )
+        require(
+            surface.contains("srgbRed: 0.1529, green: 0.1529, blue: 0.1647, alpha: 1"),
+            "light-mode body copy matches T3 zinc-800, not near-black"
+        )
+        require(
+            !surface.contains("Color(nsColor: .labelColor)")
+                && !surface.contains("Color(nsColor: .secondaryLabelColor)")
+                && !surface.contains("Color.primary.opacity(0.88)"),
+            "semantic or translucent labels wash out on the frosted panel"
+        )
+        require(
+            surface.contains("static let proseLineHeightMultiple: CGFloat = 1.625"),
+            "conversation leading stays open"
+        )
+        require(
+            surface.contains("static let proseLineSpacing: CGFloat = 6"),
+            "native prose keeps the open line box"
+        )
+        require(
+            !overlay.contains(".font(.system(size: OverlayMetrics.fontSize, weight:"),
             "conversation, composer, and palette body copy must not bypass the shared token"
         )
         let palette = section(

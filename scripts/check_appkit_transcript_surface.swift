@@ -224,6 +224,35 @@ private enum AppKitTranscriptSurfaceCheck {
         expect(adapter.metrics.mountedPeak <= 18, "mounted peak respects the configured bound")
         expect(adapter.visibleRowIDs.count < 18, "visible row lookup stays independent of long-session row count")
 
+        let fractionalAdapter = AppKitTranscriptSurfaceAdapter(
+            snapshot: TranscriptSurfaceSnapshot(
+                session: session,
+                rows: [
+                    row("pixel-row-0", height: 20.25),
+                    row("pixel-row-1", height: 20.25)
+                ],
+                followsLatest: false
+            ),
+            overscan: 0,
+            maximumMountedRows: 2,
+            maximumReusableHosts: 0
+        )
+        fractionalAdapter.setViewportSize(NSSize(width: 480, height: 120))
+        for rowID in ["pixel-row-0", "pixel-row-1"] {
+            guard let frame = fractionalAdapter.hostFrame(rowID: rowID) else {
+                failures.append("\(rowID) is mounted for pixel alignment")
+                continue
+            }
+            expect(
+                (frame.minY * 2).rounded() == frame.minY * 2,
+                "\(rowID) origin lands on a 2x backing pixel"
+            )
+            expect(
+                (frame.maxY * 2).rounded() == frame.maxY * 2,
+                "\(rowID) bottom edge lands on a 2x backing pixel"
+            )
+        }
+
         // A newly mounted rich host can report an intrinsic height larger than
         // its producer estimate. The first visible mount must commit that
         // height before the row is painted; otherwise the following row is

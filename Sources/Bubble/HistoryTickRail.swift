@@ -183,19 +183,19 @@ struct HistoryTickRail: View {
     private func previewCard(_ tick: HistoryTick) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(tick.title)
-                .font(.system(size: 14, weight: .semibold))
+                .font(OverlayMetrics.font(size: 14, weight: .semibold))
                 .foregroundStyle(.primary)
                 .lineLimit(1)
             if !tick.body.isEmpty {
                 Text(tick.body)
-                    .font(.system(size: 13, weight: .regular))
+                    .font(OverlayMetrics.font(size: 13, weight: .regular))
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
             }
             if tick.branchCount > 1 {
                 Text("\(tick.branchCount) conversation paths")
-                    .font(.system(size: 10.5, weight: .medium))
+                    .font(OverlayMetrics.font(size: 10.5, weight: .medium))
                     .foregroundStyle(.tertiary)
             }
         }

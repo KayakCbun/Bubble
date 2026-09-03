@@ -115,7 +115,7 @@ private struct MermaidZoomView: View {
             VStack(spacing: 0) {
                 HStack(spacing: 10) {
                     Text("Diagram")
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(OverlayMetrics.font(size: 13, weight: .semibold))
                     Spacer()
                     Button {
                         scale = 1
@@ -184,7 +184,7 @@ private struct MermaidZoomView: View {
             .frame(height: webHeight)
         } else {
             Text(source)
-                .font(.system(size: 13, weight: .regular, design: .monospaced))
+                .font(OverlayMetrics.font(size: 13, design: .monospaced))
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }

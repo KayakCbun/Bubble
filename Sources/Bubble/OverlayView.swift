@@ -36,10 +36,23 @@ enum OverlayMetrics {
     static let codeSize: CGFloat = 12.5
     static let chipSize: CGFloat = 12.5
     static let bodyWeight: Font.Weight = .regular
-    static var bodyFont: Font { .system(size: fontSize, weight: bodyWeight) }
+    static func font(
+        size: CGFloat,
+        weight: Font.Weight = .regular,
+        design: Font.Design = .default
+    ) -> Font {
+        .system(size: size, weight: weight, design: design)
+    }
+    static func nsFont(
+        size: CGFloat,
+        weight: NSFont.Weight = .regular
+    ) -> NSFont {
+        .systemFont(ofSize: size, weight: weight)
+    }
+    static var bodyFont: Font { font(size: fontSize, weight: bodyWeight) }
     static let slashRowHeight: CGFloat = 44
     static let mountPaletteVisibleRows = 9
-    static var ink: Color { Color(nsColor: .textColor) }
+    static var ink: Color { OverlaySurface.conversationInk }
     static var tertiaryInk: Color { Color(nsColor: .tertiaryLabelColor) }
 
     static func transcriptWidth(wide: Bool) -> CGFloat {
@@ -389,7 +402,7 @@ struct OverlayView: View {
                 Image(systemName: "folder")
                     .font(.system(size: 12, weight: .semibold))
                 Text(stage.name)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(OverlayMetrics.font(size: 13, weight: .semibold))
                     .lineLimit(1)
                 Spacer()
             }
@@ -410,7 +423,7 @@ struct OverlayView: View {
                 Image(systemName: "folder")
                     .font(.system(size: 12, weight: .semibold))
                 Text(stage.name)
-                    .font(.system(size: 13, weight: .medium))
+                    .font(OverlayMetrics.font(size: 13, weight: .medium))
                     .lineLimit(1)
                 if let item = store.transcriptItem(stage.cardId),
                    let status = item.workspaceStatus {
@@ -418,7 +431,7 @@ struct OverlayView: View {
                         RunningSweepLabel()
                     } else {
                         Text(status)
-                            .font(.system(size: 11, weight: .medium))
+                            .font(OverlayMetrics.font(size: 11, weight: .medium))
                             .foregroundStyle(.tertiary)
                     }
                 }
@@ -622,7 +635,7 @@ struct OverlayView: View {
                 }
                 PierreFileIcon(path: document.path, size: 14)
                 Text(document.title)
-                    .font(.system(size: 13, weight: .medium))
+                    .font(OverlayMetrics.font(size: 13, weight: .medium))
                     .lineLimit(1)
                 Spacer(minLength: 56)
             }
@@ -635,9 +648,9 @@ struct OverlayView: View {
             if let error = document.error {
                 VStack(alignment: .leading, spacing: 8) {
                     Text(error)
-                        .font(.system(size: OverlayMetrics.fontSize))
+                        .font(OverlayMetrics.font(size: OverlayMetrics.fontSize, weight: .regular))
                     Text(document.path)
-                        .font(.system(size: 11, design: .monospaced))
+                        .font(OverlayMetrics.font(size: 11, design: .monospaced))
                         .foregroundStyle(.tertiary)
                         .bubbleTextSelection()
                 }
@@ -1602,7 +1615,7 @@ struct OverlayView: View {
                     pointSize: 13,
                     weight: 400,
                     lineHeight: 1.5,
-                    styleID: "bubble-transcript-tool-v1"
+                    styleID: "bubble-transcript-tool-system-v3"
                 )
             case .system:
                 return TranscriptTypographyKey(
@@ -1610,7 +1623,7 @@ struct OverlayView: View {
                     pointSize: 13,
                     weight: 400,
                     lineHeight: 1.5,
-                    styleID: "bubble-transcript-system-v1"
+                    styleID: "bubble-transcript-system-v3"
                 )
             default:
                 return TranscriptTypographyKey.default
@@ -1707,7 +1720,7 @@ struct OverlayView: View {
                 Image(systemName: "arrow.up")
                     .font(.system(size: 9.5, weight: .semibold))
                 Text("Load earlier")
-                    .font(.system(size: OverlayMetrics.chipSize, weight: .medium))
+                    .font(OverlayMetrics.font(size: OverlayMetrics.chipSize, weight: .medium))
             }
             .foregroundStyle(.secondary)
             .frame(maxWidth: .infinity)
@@ -1725,7 +1738,7 @@ struct OverlayView: View {
             Text("Later messages stay on the original path")
             Spacer(minLength: 0)
         }
-        .font(.system(size: 10.5, weight: .medium))
+        .font(OverlayMetrics.font(size: 10.5, weight: .medium))
         .foregroundStyle(.tertiary)
         .padding(.vertical, 2)
     }
@@ -1882,13 +1895,13 @@ struct OverlayView: View {
                 Image(systemName: "folder")
                     .font(.system(size: 11, weight: .semibold))
                 Text(brief.name)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(OverlayMetrics.font(size: 12, weight: .medium))
                     .lineLimit(1)
                 if brief.status == .running {
                     RunningSweepLabel()
                 } else {
                     Text(brief.status.rawValue)
-                        .font(.system(size: 11, weight: .medium))
+                        .font(OverlayMetrics.font(size: 11, weight: .medium))
                         .foregroundStyle(.tertiary)
                 }
                 Spacer(minLength: 0)
@@ -2063,7 +2076,7 @@ struct OverlayView: View {
             Image(systemName: "arrow.triangle.branch")
                 .font(.system(size: 11, weight: .semibold))
             Text("Branching from \(branch.title)")
-                .font(.system(size: 12, weight: .medium))
+                .font(OverlayMetrics.font(size: 12, weight: .medium))
                 .lineLimit(1)
                 .truncationMode(.tail)
             Button {
@@ -2120,7 +2133,7 @@ struct OverlayView: View {
                 .font(.system(size: 11, weight: .semibold))
                 .fixedSize()
             Text(OverlayComposer.clipLabel(clip))
-                .font(.system(size: 12, weight: .medium))
+                .font(OverlayMetrics.font(size: 12, weight: .medium))
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
@@ -2601,14 +2614,14 @@ struct OverlayView: View {
                     .fill(live ? Color.red : Color.secondary.opacity(0.7))
                     .frame(width: 8, height: 8)
                 Text(live ? "录音中" : "录音笔记")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(OverlayMetrics.font(size: 11, weight: .medium))
                     .foregroundStyle(.tertiary)
                 if live, let startedAt = RecordController.shared.startedAt {
                     Text("·")
                         .foregroundStyle(.tertiary)
                     TimelineView(.periodic(from: startedAt, by: RecordPolicy.liveElapsedTickSeconds)) { timeline in
                         Text(RecordPolicy.elapsedClockLabel(since: startedAt, now: timeline.date))
-                            .font(.system(size: 11, weight: .medium, design: .rounded))
+                            .font(OverlayMetrics.font(size: 11, weight: .medium, design: .rounded))
                             .foregroundStyle(.tertiary)
                             .monospacedDigit()
                     }
@@ -2617,7 +2630,7 @@ struct OverlayView: View {
                         store.stopRecordFromCard()
                     }
                     .buttonStyle(.plain)
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(OverlayMetrics.font(size: 11, weight: .semibold))
                     .foregroundStyle(.primary)
                 } else {
                     Spacer(minLength: 0)
@@ -2625,7 +2638,7 @@ struct OverlayView: View {
             }
             if !item.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 let body = Text(item.text)
-                    .font(.system(size: OverlayMetrics.fontSize - 1))
+                    .font(OverlayMetrics.font(size: OverlayMetrics.fontSize - 1, weight: .regular))
                     .foregroundStyle(.secondary)
                     .lineSpacing(OverlaySurface.proseLineSpacing - 1)
                     .multilineTextAlignment(.leading)
@@ -2641,7 +2654,7 @@ struct OverlayView: View {
                 }
             } else if live {
                 Text("正在听系统声音和麦克风…")
-                    .font(.system(size: OverlayMetrics.fontSize - 1))
+                    .font(OverlayMetrics.font(size: OverlayMetrics.fontSize - 1, weight: .regular))
                     .foregroundStyle(.tertiary)
             }
         }
@@ -2670,10 +2683,10 @@ struct OverlayView: View {
                     Text(label)
                 }
             }
-            .font(.system(size: 11, weight: .medium))
+            .font(OverlayMetrics.font(size: 11, weight: .medium))
             .foregroundStyle(.tertiary)
             Text(item.text)
-                .font(.system(size: OverlayMetrics.fontSize - 1))
+                .font(OverlayMetrics.font(size: OverlayMetrics.fontSize - 1, weight: .regular))
                 .foregroundStyle(.secondary)
                 .lineSpacing(OverlaySurface.proseLineSpacing - 1)
                 .multilineTextAlignment(.leading)
@@ -2957,14 +2970,14 @@ struct OverlayView: View {
                     .font(.system(size: 10, weight: .semibold))
                     .frame(width: 12)
                 Text(title)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(OverlayMetrics.font(size: 12, weight: .medium))
                     .lineLimit(3)
                 Spacer(minLength: 0)
             }
             .foregroundStyle(.tertiary)
             if !body.isEmpty {
                 Text(body)
-                    .font(.system(size: 12.5, weight: .regular))
+                    .font(OverlayMetrics.font(size: 12.5, weight: .regular))
                     .lineSpacing(OverlaySurface.proseLineSpacing)
                     .foregroundStyle(.secondary.opacity(0.88))
                     .bubbleTextSelection()
@@ -3016,26 +3029,26 @@ struct OverlayView: View {
                         Image(systemName: "folder")
                             .font(.system(size: 11, weight: .semibold))
                         Text(item.workspaceName ?? item.text)
-                            .font(.system(size: 13, weight: .semibold))
+                            .font(OverlayMetrics.font(size: 13, weight: .semibold))
                             .lineLimit(1)
                         if status == "running" {
                             RunningSweepLabel()
                         } else {
                             Text(status)
-                                .font(.system(size: 11, weight: .medium))
+                                .font(OverlayMetrics.font(size: 11, weight: .medium))
                                 .foregroundStyle(.tertiary)
                         }
                         Spacer(minLength: 0)
                     }
                     if !goal.isEmpty {
                         Text(goal)
-                            .font(.system(size: 12.5))
+                            .font(OverlayMetrics.font(size: 12.5, weight: .regular))
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                     }
                     if !body.isEmpty {
                         Text(body)
-                            .font(.system(size: 12.5))
+                            .font(OverlayMetrics.font(size: 12.5, weight: .regular))
                             .foregroundStyle(status == "waiting" ? OverlayMetrics.ink.opacity(0.82) : .secondary)
                             .lineLimit(status == "running" ? 1 : 2)
                     }
@@ -3119,7 +3132,7 @@ struct OverlayView: View {
                             .font(.system(size: 10, weight: .semibold))
                             .frame(width: 10)
                         Text("\(summary.files.count) changed file\(summary.files.count == 1 ? "" : "s")")
-                            .font(.system(size: 13, weight: .semibold))
+                            .font(OverlayMetrics.font(size: 13, weight: .semibold))
                         if summary.hasLineStats {
                             lineStats(additions: summary.additions, deletions: summary.deletions, plus: plus, minus: minus)
                         }
@@ -3130,7 +3143,7 @@ struct OverlayView: View {
                 Spacer(minLength: 8)
                 Button(action: toggle.callAsFunction) {
                     Text(expanded ? "Hide files" : "Show files")
-                        .font(.system(size: 12, weight: .medium))
+                        .font(OverlayMetrics.font(size: 12, weight: .medium))
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
@@ -3141,7 +3154,7 @@ struct OverlayView: View {
                         Image(systemName: "plus.rectangle.on.folder")
                             .font(.system(size: 11, weight: .semibold))
                         Text("Open diff")
-                            .font(.system(size: 12, weight: .medium))
+                            .font(OverlayMetrics.font(size: 12, weight: .medium))
                     }
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)
@@ -3184,12 +3197,12 @@ struct OverlayView: View {
     private func lineStats(additions: Int?, deletions: Int?, plus: Color, minus: Color) -> some View {
         if let additions {
             Text("+\(additions)")
-                .font(.system(size: 12, weight: .medium).monospacedDigit())
+                .font(OverlayMetrics.font(size: 12, weight: .medium).monospacedDigit())
                 .foregroundStyle(plus)
         }
         if let deletions {
             Text("-\(deletions)")
-                .font(.system(size: 12, weight: .medium).monospacedDigit())
+                .font(OverlayMetrics.font(size: 12, weight: .medium).monospacedDigit())
                 .foregroundStyle(minus)
         }
     }
@@ -3301,7 +3314,7 @@ private struct ThoughtBlockHost: View {
                     Text(live ? "Thinking" : "Thoughts")
                     Spacer(minLength: 0)
                 }
-                .font(.system(size: 12, weight: .medium))
+                .font(OverlayMetrics.font(size: 12, weight: .medium))
                 .foregroundStyle(.tertiary)
                 .contentShape(Rectangle())
             }
@@ -3396,7 +3409,7 @@ private struct ThoughtChunkBlockHost: View {
                         Text(live ? "Thinking" : "Thoughts")
                         Spacer(minLength: 0)
                     }
-                    .font(.system(size: 12, weight: .medium))
+                    .font(OverlayMetrics.font(size: 12, weight: .medium))
                     .foregroundStyle(.tertiary)
                     .contentShape(Rectangle())
                 }
@@ -3426,13 +3439,13 @@ private struct ThoughtTextView: View {
         return LazyVStack(alignment: .leading, spacing: 0) {
             if live, ThoughtDisplayPolicy.isTailTruncated(text) {
                 Text("Earlier reasoning stays virtualized while thinking…")
-                    .font(.system(size: 10.5, weight: .regular))
+                    .font(OverlayMetrics.font(size: 10.5, weight: .regular))
                     .foregroundStyle(.tertiary)
                     .padding(.bottom, 4)
             }
             ForEach(Array(displayChunks.enumerated()), id: \.offset) { _, chunk in
                 Text(chunk.isEmpty && live ? "…" : chunk)
-                    .font(.system(size: 12.5, weight: .regular))
+                    .font(OverlayMetrics.font(size: 12.5, weight: .regular))
                     .italic()
                     .lineSpacing(OverlaySurface.proseLineSpacing)
                     .foregroundStyle(.secondary.opacity(0.88))
@@ -3476,7 +3489,7 @@ private struct ToolRowHost: View {
                         RunningSweepLabel()
                     }
                 }
-                .font(.system(size: 12, weight: .medium))
+                .font(OverlayMetrics.font(size: 12, weight: .medium))
                 .foregroundStyle(.tertiary)
                 .contentShape(Rectangle())
             }
@@ -3523,25 +3536,25 @@ private struct ToolDetailsView: View {
         return VStack(alignment: .leading, spacing: 8) {
             if !input.isEmpty {
                 Text("Input")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(OverlayMetrics.font(size: 12, weight: .semibold))
                     .foregroundStyle(.tertiary)
                 Text(input)
-                    .font(.system(size: 12, weight: .regular, design: .monospaced))
+                    .font(OverlayMetrics.font(size: 12, design: .monospaced))
                     .bubbleTextSelection()
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             if !output.isEmpty {
                 Text("Output")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(OverlayMetrics.font(size: 12, weight: .semibold))
                     .foregroundStyle(.tertiary)
                 Text(output)
-                    .font(.system(size: 12, weight: .regular, design: .monospaced))
+                    .font(OverlayMetrics.font(size: 12, design: .monospaced))
                     .bubbleTextSelection()
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             if input.isEmpty && output.isEmpty && (item.imageNames ?? []).isEmpty {
                 Text("No input/output captured for this tool call.")
-                    .font(.system(size: 12, weight: .regular))
+                    .font(OverlayMetrics.font(size: 12, weight: .regular))
                     .foregroundStyle(.tertiary)
             }
         }
@@ -3570,7 +3583,7 @@ private struct CollapsedToolsHost: View {
                     Text("+\(items.count) previous tool call\(items.count == 1 ? "" : "s")")
                     Spacer(minLength: 0)
                 }
-                .font(.system(size: 12, weight: .medium))
+                .font(OverlayMetrics.font(size: 12, weight: .medium))
                 .foregroundStyle(.tertiary)
                 .contentShape(Rectangle())
             }
@@ -3800,7 +3813,7 @@ private struct FileChangeFolderBlock: View {
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(.tertiary)
                         Text(group.folder)
-                            .font(.system(size: 12, weight: .medium))
+                            .font(OverlayMetrics.font(size: 12, weight: .medium))
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                         Spacer(minLength: 8)
@@ -3845,7 +3858,7 @@ private struct FileChangeFileRow: View {
             HStack(spacing: 8) {
                 PierreFileIcon(path: file.path, size: 16)
                 Text(file.fileName)
-                    .font(.system(size: 13))
+                    .font(OverlayMetrics.font(size: 13, weight: .regular))
                     .foregroundStyle(OverlaySurface.conversationInk)
                     .lineLimit(1)
                 Spacer(minLength: 8)
@@ -3875,12 +3888,12 @@ private struct FileChangeLineStats: View {
     var body: some View {
         if let additions {
             Text("+\(additions)")
-                .font(.system(size: 12, weight: .medium).monospacedDigit())
+                .font(OverlayMetrics.font(size: 12, weight: .medium).monospacedDigit())
                 .foregroundStyle(plus)
         }
         if let deletions {
             Text("-\(deletions)")
-                .font(.system(size: 12, weight: .medium).monospacedDigit())
+                .font(OverlayMetrics.font(size: 12, weight: .medium).monospacedDigit())
                 .foregroundStyle(minus)
         }
     }
@@ -3974,7 +3987,7 @@ private struct ScrollToEndChip: View {
                 Image(systemName: "chevron.down")
                     .font(.system(size: 9.5, weight: .semibold))
                 Text("Scroll to end")
-                    .font(.system(size: OverlayMetrics.chipSize, weight: .medium))
+                    .font(OverlayMetrics.font(size: OverlayMetrics.chipSize, weight: .medium))
             }
             .foregroundStyle(OverlayMetrics.ink.opacity(hovered ? 0.82 : 0.48))
             .padding(.horizontal, 11)
@@ -4032,7 +4045,7 @@ private struct BubbleOpeningPlaceholder: View {
                 .frame(width: 46, height: 46)
                 .opacity(0.72)
             Text(text)
-                .font(.system(size: 12, weight: .medium))
+                .font(OverlayMetrics.font(size: 12, weight: .medium))
                 .foregroundStyle(.tertiary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -4047,9 +4060,9 @@ private struct ResumeDestinationCard: View {
         VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Resume session")
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(OverlayMetrics.font(size: 13, weight: .semibold))
                 Text("Open this conversation in a side session, or replace the current session?")
-                    .font(.system(size: 12))
+                    .font(OverlayMetrics.font(size: 12, weight: .regular))
                     .foregroundStyle(.secondary)
             }
 
@@ -4071,7 +4084,7 @@ private struct ResumeDestinationCard: View {
                     choose(.cancel)
                 }
                 .buttonStyle(.plain)
-                .font(.system(size: 11.5, weight: .medium))
+                .font(OverlayMetrics.font(size: 11.5, weight: .medium))
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 6)
                 .contentShape(Rectangle())
@@ -4103,7 +4116,7 @@ private struct ResumeDestinationButton: View {
     var body: some View {
         Button(action: action) {
             Label(title, systemImage: symbol)
-                .font(.system(size: 11.5, weight: .semibold))
+                .font(OverlayMetrics.font(size: 11.5, weight: .semibold))
                 .foregroundStyle(emphasized ? Color.white : OverlayMetrics.ink.opacity(0.78))
                 .padding(.horizontal, 11)
                 .frame(height: 30)
@@ -4166,7 +4179,7 @@ private struct SessionLoopListCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("定时")
-                .font(.system(size: 11, weight: .semibold))
+                .font(OverlayMetrics.font(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
             ForEach(store.sessionLoops) { loop in
                 SessionLoopListRow(
@@ -4208,28 +4221,28 @@ private struct SessionLoopListRow: View {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(loop.title)
-                        .font(.system(size: 12.5, weight: .medium))
+                        .font(OverlayMetrics.font(size: 12.5, weight: .medium))
                         .foregroundStyle(.primary)
                         .lineLimit(2)
                     Text(due
                          ? SessionLoopPolicy.pendingStatus(isBusy: isBusy, hasQueuedUserFollowUp: false)
                          : SessionLoopPolicy.intervalLabel(loop.schedule))
-                        .font(.system(size: 11))
+                        .font(OverlayMetrics.font(size: 11, weight: .regular))
                         .foregroundStyle(.tertiary)
                 }
                 Spacer(minLength: 8)
                 if pendingDelete {
                     Button("确认", action: confirm)
                         .buttonStyle(.plain)
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(OverlayMetrics.font(size: 11, weight: .semibold))
                     Button("取消", action: cancel)
                         .buttonStyle(.plain)
-                        .font(.system(size: 11, weight: .medium))
+                        .font(OverlayMetrics.font(size: 11, weight: .medium))
                         .foregroundStyle(.secondary)
                 } else {
                     Button("停止", action: requestDelete)
                         .buttonStyle(.plain)
-                        .font(.system(size: 11, weight: .medium))
+                        .font(OverlayMetrics.font(size: 11, weight: .medium))
                         .foregroundStyle(.secondary)
                 }
             }
@@ -4248,9 +4261,9 @@ private struct SessionLoopCloseCard: View {
         VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
                 Text(prompt.title)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(OverlayMetrics.font(size: 13, weight: .semibold))
                 Text(prompt.message)
-                    .font(.system(size: 12))
+                    .font(OverlayMetrics.font(size: 12, weight: .regular))
                     .foregroundStyle(.secondary)
             }
             HStack(spacing: 8) {
@@ -4262,7 +4275,7 @@ private struct SessionLoopCloseCard: View {
                 )
                 Button("取消", action: cancel)
                     .buttonStyle(.plain)
-                    .font(.system(size: 11.5, weight: .medium))
+                    .font(OverlayMetrics.font(size: 11.5, weight: .medium))
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 6)
                     .contentShape(Rectangle())
@@ -4292,9 +4305,9 @@ private struct RecordCloseCard: View {
         VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
                 Text(prompt.title)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(OverlayMetrics.font(size: 13, weight: .semibold))
                 Text(prompt.message)
-                    .font(.system(size: 12))
+                    .font(OverlayMetrics.font(size: 12, weight: .regular))
                     .foregroundStyle(.secondary)
             }
             HStack(spacing: 8) {
@@ -4306,7 +4319,7 @@ private struct RecordCloseCard: View {
                 )
                 Button("取消", action: cancel)
                     .buttonStyle(.plain)
-                    .font(.system(size: 11.5, weight: .medium))
+                    .font(OverlayMetrics.font(size: 11.5, weight: .medium))
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 6)
                     .contentShape(Rectangle())
@@ -4361,7 +4374,7 @@ private struct TranscriptWidthButton: View {
             Image(systemName: wide
                 ? "arrow.down.right.and.arrow.up.left"
                 : "arrow.up.left.and.arrow.down.right")
-                .font(.system(size: 11, weight: .semibold))
+                .font(OverlayMetrics.font(size: 11, weight: .semibold))
                 .frame(width: 28, height: 28)
                 .contentShape(Rectangle())
         }
@@ -5506,7 +5519,7 @@ private struct QuoteToChatChip: View {
     var body: some View {
         Button(action: action) {
             Text("Add to chat")
-                .font(.system(size: 12, weight: .medium))
+                .font(OverlayMetrics.font(size: 12, weight: .medium))
                 .foregroundStyle(OverlaySurface.conversationInk)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 8)
@@ -5929,10 +5942,10 @@ private struct ComposerBar: View {
                 Image(systemName: "folder")
                     .font(.system(size: 11, weight: .semibold))
                 Text(brief.name)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(OverlayMetrics.font(size: 12, weight: .medium))
                     .lineLimit(1)
                 Text(brief.status.rawValue)
-                    .font(.system(size: 11, weight: .medium))
+                    .font(OverlayMetrics.font(size: 11, weight: .medium))
                     .foregroundStyle(brief.status == .running ? OverlayMetrics.ink : OverlayMetrics.tertiaryInk)
                 Spacer(minLength: 0)
             }
@@ -5977,7 +5990,7 @@ private struct ComposerBar: View {
             Image(systemName: "arrow.triangle.branch")
                 .font(.system(size: 11, weight: .semibold))
             Text("Branching from \(branch.title)")
-                .font(.system(size: 12, weight: .medium))
+                .font(OverlayMetrics.font(size: 12, weight: .medium))
                 .lineLimit(1)
                 .truncationMode(.tail)
             Button {
@@ -6036,7 +6049,7 @@ private struct ComposerBar: View {
                 .font(.system(size: 11, weight: .semibold))
                 .fixedSize()
             Text(OverlayComposer.clipLabel(clip))
-                .font(.system(size: 12, weight: .medium))
+                .font(OverlayMetrics.font(size: 12, weight: .medium))
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)

@@ -10,7 +10,17 @@ enum OverlayMetrics {
     static let heading2Size: CGFloat = 14
     static let heading3Size: CGFloat = 13
     static let chipSize: CGFloat = 12
-    static var bodyFont: Font { .system(size: fontSize) }
+    static func font(
+        size: CGFloat,
+        weight: Font.Weight = .regular,
+        design: Font.Design = .default
+    ) -> Font {
+        .system(size: size, weight: weight, design: design)
+    }
+    static func nsFont(size: CGFloat, weight: NSFont.Weight = .regular) -> NSFont {
+        .systemFont(ofSize: size, weight: weight)
+    }
+    static var bodyFont: Font { font(size: fontSize) }
     static var ink: Color { Color(nsColor: .textColor) }
 }
 

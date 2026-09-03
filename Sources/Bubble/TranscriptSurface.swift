@@ -305,13 +305,13 @@ final class TranscriptInteractionStore {
 /// Font.  That keeps cache keys usable by the model/rendering boundary and in
 /// command-line deterministic checks.
 struct TranscriptTypographyKey: Equatable, Hashable, Sendable {
-    static let defaultLayoutVersion: UInt64 = 1
+    static let defaultLayoutVersion: UInt64 = 11
     static let `default` = TranscriptTypographyKey(
         fontFamily: ".AppleSystemUIFont",
         pointSize: 14,
         weight: 400,
         lineHeight: 1.625,
-        styleID: "bubble-transcript-body"
+        styleID: "bubble-transcript-body-system-v11"
     )
 
     let fontFamily: String

@@ -87,7 +87,11 @@ private struct SessionTabButton: View {
     var body: some View {
         Button(action: select) {
             Text("\(tab.ordinal)")
-                .font(.system(size: 11, weight: selected ? .semibold : .medium, design: .rounded))
+                .font(OverlayMetrics.font(
+                    size: 11,
+                    weight: selected ? .semibold : .medium,
+                    design: .rounded
+                ))
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .contentShape(Rectangle())
         }
@@ -215,11 +219,11 @@ private struct SessionTabPreviewCard: View {
                     .fill(selected ? Color.accentColor : Color.secondary.opacity(0.55))
                     .frame(width: 6, height: 6)
                 Text("Session \(ordinal)")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(OverlayMetrics.font(size: 11, weight: .semibold))
                     .foregroundStyle(.secondary)
             }
             Text(preview)
-                .font(.system(size: 13, weight: .medium))
+                .font(OverlayMetrics.font(size: 13, weight: .medium))
                 .foregroundStyle(.primary)
                 .lineLimit(2)
                 .fixedSize(horizontal: false, vertical: true)

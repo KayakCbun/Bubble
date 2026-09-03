@@ -6,7 +6,7 @@ import BubbleDiagramSupport
 import WebKit
 
 private enum MarkdownContentPreparation {
-    static let layoutVersion = 2
+    static let layoutVersion = 11
 
     static func content(_ markdown: String, completed: Bool) -> MarkdownContent {
         guard completed else { return MarkdownContent(markdown) }
@@ -77,7 +77,7 @@ struct MessageBody: View {
                 MermaidView(source: MessagePart.normalizeMermaid(source), streaming: streaming)
             case .math(let expression):
                 Text(MarkdownMath.nativeExpression(expression) ?? expression)
-                    .font(.system(size: OverlayMetrics.fontSize + 2, design: .serif))
+                    .font(OverlayMetrics.font(size: OverlayMetrics.fontSize + 2, design: .serif))
                     .foregroundStyle(OverlaySurface.conversationInk)
                     .bubbleTextSelection()
                     .frame(maxWidth: .infinity, alignment: .center)
@@ -811,7 +811,7 @@ struct CodeBlockView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Text(virtualizedChunk ? "\(displayLanguage) · section" : displayLanguage)
-                    .font(.system(size: 11, weight: .regular, design: .monospaced))
+                    .font(OverlayMetrics.font(size: 11, design: .monospaced))
                     .foregroundStyle(.tertiary)
                 Spacer(minLength: 8)
                 codeChromeButton(wrap ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right") {
@@ -829,11 +829,11 @@ struct CodeBlockView: View {
                     VStack(alignment: .leading, spacing: 6) {
                         if tail.startIndex != source.startIndex {
                             Text("Earlier code stays virtualized while this block streams…")
-                                .font(.system(size: 10.5, weight: .regular))
+                                .font(OverlayMetrics.font(size: 10.5, weight: .regular))
                                 .foregroundStyle(.tertiary)
                         }
                         Text(String(tail))
-                            .font(.system(size: OverlayMetrics.codeSize, weight: .regular, design: .monospaced))
+                            .font(OverlayMetrics.font(size: OverlayMetrics.codeSize, design: .monospaced))
                             .foregroundStyle(OverlayMetrics.ink.opacity(0.88))
                             .bubbleTextSelection()
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -844,7 +844,7 @@ struct CodeBlockView: View {
                 } else {
                     ScrollView(.horizontal, showsIndicators: false) {
                         Text(source)
-                            .font(.system(size: OverlayMetrics.codeSize, weight: .regular, design: .monospaced))
+                            .font(OverlayMetrics.font(size: OverlayMetrics.codeSize, design: .monospaced))
                             .foregroundStyle(OverlayMetrics.ink.opacity(0.88))
                             .bubbleTextSelection()
                             .fixedSize(horizontal: true, vertical: true)
@@ -881,7 +881,7 @@ struct CodeBlockView: View {
     private func codeChunks(_ chunks: [String]) -> some View {
         ForEach(Array(chunks.enumerated()), id: \.offset) { _, chunk in
             Text(chunk.hasSuffix("\n") ? String(chunk.dropLast()) : chunk)
-                .font(.system(size: OverlayMetrics.codeSize, weight: .regular, design: .monospaced))
+                .font(OverlayMetrics.font(size: OverlayMetrics.codeSize, design: .monospaced))
                 .foregroundStyle(OverlayMetrics.ink.opacity(0.88))
                 .bubbleTextSelection()
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -966,13 +966,13 @@ struct MermaidView: View {
                     .allowsHitTesting(false)
             } else if streaming, image == nil {
                 Text("Drawing diagram…")
-                    .font(.system(size: 12, weight: .regular))
+                    .font(OverlayMetrics.font(size: 12))
                     .foregroundStyle(.tertiary)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 8)
             } else {
                 Text(source)
-                    .font(.system(size: 12, weight: .regular, design: .monospaced))
+                    .font(OverlayMetrics.font(size: 12, design: .monospaced))
                     .bubbleTextSelection()
                     .padding(10)
                     .frame(maxWidth: .infinity, alignment: .leading)
