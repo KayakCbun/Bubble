@@ -44,6 +44,7 @@ let package = Package(
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("SwiftUI"),
+                .linkedFramework("Charts"),
                 .linkedFramework("ApplicationServices"),
                 .linkedFramework("WebKit"),
                 .linkedFramework("Network"),

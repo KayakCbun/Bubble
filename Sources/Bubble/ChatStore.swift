@@ -37,6 +37,7 @@ struct ChatItem: Identifiable, Codable, Equatable, @unchecked Sendable {
     var workspaceSessionId: String?
     var imageNames: [String]?
     var assistantImagePlacements: [AssistantImagePlacement]?
+    var agenticUI: AgenticUIRequest?
     var deliveryState: MessageDeliveryState?
     var sourceEntryId: String?
     var sourceBranchable: Bool?
@@ -66,6 +67,7 @@ struct ChatItem: Identifiable, Codable, Equatable, @unchecked Sendable {
         workspaceSessionId: String? = nil,
         imageNames: [String]? = nil,
         assistantImagePlacements: [AssistantImagePlacement]? = nil,
+        agenticUI: AgenticUIRequest? = nil,
         deliveryState: MessageDeliveryState? = nil,
         sourceEntryId: String? = nil,
         sourceBranchable: Bool? = nil,
@@ -94,6 +96,7 @@ struct ChatItem: Identifiable, Codable, Equatable, @unchecked Sendable {
         self.workspaceSessionId = workspaceSessionId
         self.imageNames = imageNames
         self.assistantImagePlacements = assistantImagePlacements
+        self.agenticUI = agenticUI
         self.deliveryState = deliveryState
         self.sourceEntryId = sourceEntryId
         self.sourceBranchable = sourceBranchable
@@ -228,6 +231,7 @@ final class ChatStore {
     var streamingAssistantId: UUID?
     private var pendingAssistantChunk = ""
     private var forceNewAssistantRow = false
+    private var agenticUIBlocksThisTurn = 0
     private var pendingThoughtChunk = ""
     private var streamFlushQueued = false
     private var lastStreamFlushUptime: TimeInterval = 0
@@ -2344,6 +2348,7 @@ final class ChatStore {
         isBusy = true
         streamingAssistantId = nil
         streamingThoughtId = nil
+        agenticUIBlocksThisTurn = 0
         turnStartedAt = Date()
         status = "thinking"
         runNonce += 1
@@ -2638,6 +2643,9 @@ final class ChatStore {
             if injecting {
                 OverlayLog.write("workspace relay used a tool, aborting tools")
                 client.cancel()
+                return
+            }
+            if AgenticUITransportPolicy.isRenderToolUpdate(update) {
                 return
             }
             if isWorkspaceRunTool(update) {
@@ -3795,6 +3803,7 @@ final class ChatStore {
                     rich.toolKind = projected.toolKind ?? rich.toolKind
                     rich.toolOutput = projected.toolOutput ?? rich.toolOutput
                     rich.imageNames = projected.imageNames ?? rich.imageNames
+                    rich.agenticUI = projected.agenticUI ?? rich.agenticUI
                     rich.sourceEntryId = record.entryID
                     rich.sourceBranchable = prior.loopId == nil ? record.branchable : false
                     rich.deliveryState = nil
@@ -3944,6 +3953,7 @@ final class ChatStore {
                 text: record.text,
                 imageNames: restored.names,
                 assistantImagePlacements: restored.placements,
+                agenticUI: record.agenticUI,
                 sourceEntryId: record.entryID,
                 sourceBranchable: record.branchable
             )
@@ -4468,7 +4478,9 @@ final class ChatStore {
                TranscriptStream.canMergeAdjacent(
                 previous: result[last].kind.rawValue,
                 next: item.kind.rawValue
-               ) {
+               ),
+               result[last].agenticUI == nil,
+               item.agenticUI == nil {
                 result[last].text = TranscriptStream.joinText(result[last].text, item.text)
                 result[last].imageNames = Self.mergedImageNames(
                     result[last].imageNames,
@@ -4479,6 +4491,8 @@ final class ChatStore {
             if let last = result.indices.last,
                result[last].kind == .assistant,
                item.kind == .assistant,
+               result[last].agenticUI == nil,
+               item.agenticUI == nil,
                TranscriptStream.shouldGlueSplitAssistant(result[last].text, item.text) {
                 result[last].text = TranscriptStream.joinText(result[last].text, item.text)
                 result[last].imageNames = Self.mergedImageNames(
@@ -4890,6 +4904,31 @@ final class ChatStore {
             return BubbleControlResult(listLoopsPayload())
         case "loop_delete":
             return try deleteLoopFromControl(params)
+        case "bubble_render":
+            guard agenticUIBlocksThisTurn < 4 else {
+                throw RPCError(code: -22, message: "native UI block limit reached for this turn")
+            }
+            guard let request = AgenticUIRequest.decodeAndValidate(params) else {
+                throw RPCError(code: -22, message: "invalid native UI spec")
+            }
+            flushStreamChunks()
+            streamingAssistantId = nil
+            streamingThoughtId = nil
+            forceNewAssistantRow = true
+            let item = ChatItem(
+                kind: .assistant,
+                text: request.summary,
+                agenticUI: request,
+                sourceBranchable: false
+            )
+            items.append(item)
+            agenticUIBlocksThisTurn += 1
+            markTranscriptDelta(.append([item]))
+            persist(immediate: true)
+            return BubbleControlResult([
+                "status": "rendered",
+                "elements": request.spec.elements.count,
+            ])
         case "bubble_action":
             let action = params.string("action") ?? ""
             let argument = params.string("argument")

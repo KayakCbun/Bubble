@@ -1023,7 +1023,9 @@ struct OverlayView: View {
             text: text,
             sourceIDs: row.sourceItemIDs,
             hasMedia: {
-                if case .message(let item) = row { return !(item.imageNames ?? []).isEmpty }
+                if case .message(let item) = row {
+                    return !(item.imageNames ?? []).isEmpty || item.agenticUI != nil
+                }
                 return false
             }(),
             contentVersion: row.sourceItemIDs.compactMap(UUID.init(uuidString:))
@@ -1032,7 +1034,7 @@ struct OverlayView: View {
                 .compactMap(store.transcriptItemAppend).last,
             isChunkable: {
                 if case .message(let item) = row {
-                    return item.kind == .assistant || item.kind == .thought
+                    return (item.kind == .assistant && item.agenticUI == nil) || item.kind == .thought
                 }
                 return false
             }()
@@ -1395,6 +1397,9 @@ struct OverlayView: View {
                 text: item.text,
                 live: item.sourceEntryId == nil
             )
+        }
+        if case .message(let item) = row.source, item.agenticUI != nil {
+            estimatedHeight = max(estimatedHeight, 300)
         }
         return OverlayTranscriptSurfaceEntry(
             snapshot: appKitTranscriptSnapshot(
@@ -2409,6 +2414,7 @@ struct OverlayView: View {
                 toolOutput: item.toolOutput,
                 imageNames: item.imageNames,
                 imagePlacements: item.assistantImagePlacements,
+                agenticUI: item.agenticUI,
                 workspaceStatus: item.workspaceStatus,
                 workspaceSummary: item.workspaceSummary,
                 loopLabel: item.loopLabel,
@@ -2430,6 +2436,7 @@ struct OverlayView: View {
                 toolOutput: nil,
                 imageNames: nil,
                 imagePlacements: nil,
+                agenticUI: nil,
                 workspaceStatus: nil,
                 workspaceSummary: nil,
                 loopLabel: nil,
@@ -2448,6 +2455,7 @@ struct OverlayView: View {
                 toolOutput: nil,
                 imageNames: nil,
                 imagePlacements: nil,
+                agenticUI: nil,
                 workspaceStatus: nil,
                 workspaceSummary: nil,
                 loopLabel: nil,
@@ -2885,23 +2893,27 @@ struct OverlayView: View {
 
     @ViewBuilder
     private func assistantOrderedContent(_ item: ChatItem, live: Bool) -> some View {
-        let blocks = AssistantMessagePresentation.blocks(
-            text: item.text,
-            imageNames: item.imageNames,
-            placements: item.assistantImagePlacements
-        )
-        VStack(alignment: .leading, spacing: 8) {
-            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
-                switch block {
-                case .text(let text):
-                    MessageBody(text: text, streaming: live)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                case .image(let name):
-                    transcriptImageThumb(name)
+        if let request = item.agenticUI {
+            AgenticUIView(request: request)
+        } else {
+            let blocks = AssistantMessagePresentation.blocks(
+                text: item.text,
+                imageNames: item.imageNames,
+                placements: item.assistantImagePlacements
+            )
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+                    switch block {
+                    case .text(let text):
+                        MessageBody(text: text, streaming: live)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    case .image(let name):
+                        transcriptImageThumb(name)
+                    }
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func assistantChunkRow(item: ChatItem, text: String, copyText: String?, live: Bool) -> some View {
@@ -4397,6 +4409,7 @@ private struct RowRenderKey: Equatable {
     var toolOutput: String?
     var imageNames: [String]?
     var imagePlacements: [AssistantImagePlacement]?
+    var agenticUI: AgenticUIRequest?
     var workspaceStatus: String?
     var workspaceSummary: String?
     var loopLabel: String?

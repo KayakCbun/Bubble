@@ -17,6 +17,7 @@ struct ConversationEntry: Equatable, Sendable {
     var images: [AssistantMessageImage] = []
     var imageOffsets: [Int] = []
     var customType: String?
+    var agenticUI: AgenticUIRequest? = nil
     var order: Int
 
     var isUserMessage: Bool { type == "message" && role == "user" }
@@ -49,6 +50,7 @@ struct ConversationTranscriptRecord: Equatable, Sendable {
     var branchable: Bool
     var images: [AssistantMessageImage] = []
     var imageOffsets: [Int] = []
+    var agenticUI: AgenticUIRequest? = nil
 }
 
 struct ConversationTreeSnapshot: Equatable, Sendable {
@@ -122,6 +124,14 @@ struct ConversationTreeSnapshot: Equatable, Sendable {
                     guard !entry.text.isEmpty else { return [] }
                     return [Self.record(.recordNotes, entry: entry, text: entry.text, branchable: false)]
                 }
+                if let agenticUI = entry.agenticUI {
+                    return [Self.record(
+                        .assistant,
+                        entry: entry,
+                        text: agenticUI.summary,
+                        branchable: false
+                    )]
+                }
                 var records: [ConversationTranscriptRecord] = []
                 if !entry.thinking.isEmpty {
                     records.append(Self.record(.thought, entry: entry, text: entry.thinking, branchable: true))
@@ -136,6 +146,7 @@ struct ConversationTreeSnapshot: Equatable, Sendable {
                 }
                 return records
             case "toolResult", "bashExecution":
+                if entry.toolName == "bubble_render" { return [] }
                 return [Self.record(.tool, entry: entry, text: entry.text, branchable: false)]
             default:
                 return []
@@ -246,14 +257,18 @@ struct ConversationTreeSnapshot: Equatable, Sendable {
               let type = string(object["type"]) else { return nil }
         let message = object["message"] as? [String: Any] ?? [:]
         let isCustomMessage = type == "custom_message"
+        let customType = string(object["customType"])
+        let agenticUI = customType == "bubble_agentic_ui"
+            ? AgenticUIRequest.decodeAndValidate(object["data"] ?? object["details"])
+            : nil
         let content = isCustomMessage ? (object["content"] ?? message["content"]) : message["content"]
         let imageProjection = imageContent(content)
         return ConversationEntry(
             id: id,
             parentID: string(object["parentId"]),
             type: type,
-            role: isCustomMessage ? "assistant" : string(message["role"]),
-            text: contentText(content),
+            role: (isCustomMessage || agenticUI != nil) ? "assistant" : string(message["role"]),
+            text: agenticUI?.summary ?? contentText(content),
             thinking: thinkingText(content),
             toolName: string(message["toolName"]) ?? string(message["command"]),
             toolCallID: string(message["toolCallId"]),
@@ -261,7 +276,8 @@ struct ConversationTreeSnapshot: Equatable, Sendable {
             hasStructuredContent: hasStructuredContent(content),
             images: imageProjection.images,
             imageOffsets: imageProjection.offsets,
-            customType: string(object["customType"]),
+            customType: customType,
+            agenticUI: agenticUI,
             order: order
         )
     }
@@ -347,7 +363,8 @@ struct ConversationTreeSnapshot: Equatable, Sendable {
             isError: entry.isError,
             branchable: branchable,
             images: entry.images,
-            imageOffsets: entry.imageOffsets
+            imageOffsets: entry.imageOffsets,
+            agenticUI: entry.agenticUI
         )
     }
 

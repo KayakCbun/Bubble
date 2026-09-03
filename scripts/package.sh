@@ -178,7 +178,16 @@ swiftc -parse-as-library Sources/Bubble/PreviewFiles.swift scripts/check_file_pr
 swiftc -parse-as-library Sources/Bubble/CommandTapPolicy.swift scripts/check_command_tap.swift -o /tmp/bubble-check-tap
 /tmp/bubble-check-tap
 
-swiftc -parse-as-library Sources/BubbleMounts/WorkspaceMounts.swift Sources/Bubble/AssistantMessageContent.swift Sources/Bubble/ConversationTree.swift scripts/check_conversation_tree.swift -o /tmp/bubble-check-conversation-tree
+swiftc -parse-as-library Sources/BubbleMounts/WorkspaceMounts.swift Sources/Bubble/AssistantMessageContent.swift Sources/Bubble/AgenticUISpec.swift Sources/Bubble/ConversationTree.swift scripts/check_agentic_ui.swift -o /tmp/bubble-check-agentic-ui
+/tmp/bubble-check-agentic-ui
+
+swiftc -parse-as-library -framework AppKit Sources/Bubble/JSONRPC.swift Sources/Bubble/Paths.swift Sources/Bubble/BubbleNativeAction.swift Sources/Bubble/BubbleSlot.swift Sources/Bubble/BubbleConfig.swift scripts/check_agentic_ui_extension.swift -o /tmp/bubble-check-agentic-ui-extension
+/tmp/bubble-check-agentic-ui-extension
+
+swiftc -parse-as-library -framework AppKit -framework SwiftUI -framework Charts Sources/Bubble/OverlaySurface.swift Sources/Bubble/AgenticUISpec.swift Sources/Bubble/AgenticUIView.swift scripts/check_agentic_ui_layout.swift -o /tmp/bubble-check-agentic-ui-layout
+/tmp/bubble-check-agentic-ui-layout
+
+swiftc -parse-as-library Sources/BubbleMounts/WorkspaceMounts.swift Sources/Bubble/AssistantMessageContent.swift Sources/Bubble/AgenticUISpec.swift Sources/Bubble/ConversationTree.swift scripts/check_conversation_tree.swift -o /tmp/bubble-check-conversation-tree
 /tmp/bubble-check-conversation-tree
 
 swiftc -parse-as-library Sources/Bubble/BubblePiAcpPatch.swift scripts/check_pi_acp_patch.swift -o /tmp/bubble-check-pi-acp-patch

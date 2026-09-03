@@ -156,6 +156,16 @@ enum BubbleConfig {
     The user can ask you to repeat a task in this conversation, such as checking a deploy every few minutes. Call `loop_create` with an interval (`5m`, `1h`) or a daily time (`09:00`). Call `loop_list` and `loop_delete` to inspect or stop loops. Loops belong to this session: they pause when the session closes and continue when it is opened again. Do not fake a loop by calling tools over and over in one turn.
     """
 
+    static let agenticUISection = """
+    ## Native visual answers
+
+    Bubble can render safe structured answers as native macOS UI through `bubble_render`. Decide on your own when a visual answer communicates the result better. The user does not need to ask for a chart.
+
+    Call `bubble_render` when the answer contains trustworthy structured data suited to comparison, a time trend, part-to-whole composition, a compact KPI summary, or a table. Prefer it once there are at least three comparable values. Do not use it for decoration, a single number, prose-only answers, uncertain estimates, or data you would have to invent.
+
+    Use only the catalog and props documented by the tool. Keep the normal answer concise after rendering and state the main insight. Never print the raw Spec to the user. If rendering fails, continue with a normal text answer.
+    """
+
     static var slotsSection: String { BubbleSlotCatalog.agentGuide() }
 
     static let defaultAgentsMarkdown = """
@@ -178,6 +188,8 @@ enum BubbleConfig {
     \(controlsSection)
 
     \(loopSection)
+
+    \(agenticUISection)
 
     \(slotsSection)
     """
@@ -244,6 +256,11 @@ enum BubbleConfig {
             heading: "## Loops",
             contains: "loop_create",
             body: loopSection
+        )
+        ensureNamedSection(
+            heading: "## Native visual answers",
+            contains: "bubble_render",
+            body: agenticUISection
         )
         ensureNamedSection(
             heading: "## Slots",
@@ -515,6 +532,56 @@ export default function (pi: ExtensionAPI) {
     boundSteeringSessionId = "";
     steeringServer?.close();
     steeringServer = undefined;
+  });
+
+  pi.registerTool({
+    name: "bubble_render",
+    label: "Native Visualization",
+    description: "Render a json-render-compatible Spec as native Bubble UI. Proactively use this when verified data is clearer as a comparison, trend, part-to-whole chart, KPI card, or compact table. The user does not need to request a chart.",
+    promptSnippet: "Render structured results as native Bubble UI when a visual answer is materially clearer",
+    promptGuidelines: [
+      "Choose bubble_render yourself when the answer has at least three trustworthy comparable values, a time series, proportions, several KPIs, or a compact table.",
+      "Do not wait for the user to say chart or visualization. Do not use it for decoration, one scalar, speculative values, or prose that is already clearer.",
+      "Use at most one native visualization per answer unless two datasets are genuinely unrelated.",
+      "Use only Stack, Card, Heading, Text, Metric, Table, BarChart, LineChart, and DonutChart. Every referenced child must exist and the graph must be acyclic.",
+      "Chart props are title, optional unit, and points. Each point is { label, value, optional series }. DonutChart values must be non-negative.",
+      "Table props are optional title, columns [{ key, label }], and rows whose scalar keys match the columns.",
+      "summary is a short accessible description of the main conclusion. After rendering, reply with only the insight or explanation the visual does not already show.",
+      "Never invent data to make a visual and never expose the raw Spec in the user-facing answer.",
+    ],
+    parameters: Type.Object({
+      summary: Type.String({ description: "Short accessible description of the visual and its main conclusion", minLength: 1, maxLength: 2048 }),
+      spec: Type.Object({
+        root: Type.String({ description: "Root element key" }),
+        elements: Type.Record(
+          Type.String(),
+          Type.Object({
+            type: Type.Union([
+              Type.Literal("Stack"),
+              Type.Literal("Card"),
+              Type.Literal("Heading"),
+              Type.Literal("Text"),
+              Type.Literal("Metric"),
+              Type.Literal("Table"),
+              Type.Literal("BarChart"),
+              Type.Literal("LineChart"),
+              Type.Literal("DonutChart"),
+            ]),
+            props: Type.Record(Type.String(), Type.Unknown()),
+            children: Type.Optional(Type.Array(Type.String(), { maxItems: 32 })),
+          }),
+          { description: "Flat json-render element map with at most 64 elements" },
+        ),
+      }),
+    }),
+    async execute(_id, params) {
+      const result = await call("bubble_render", params as Record<string, unknown>);
+      pi.appendEntry("bubble_agentic_ui", params);
+      return {
+        content: [{ type: "text" as const, text: "Rendered as native Bubble UI." }],
+        details: result,
+      };
+    },
   });
 
   pi.registerTool({
