@@ -497,6 +497,108 @@ async function textResult(method: string, params: Record<string, unknown>) {
   };
 }
 
+function hasPersistedNativeBlock(ctx: any, blockID: string): boolean {
+  return ctx.sessionManager.getEntries().some((raw: unknown) => {
+    const entry = raw as { type?: string; customType?: string; data?: { blockID?: string } };
+    return entry.type === "custom"
+      && entry.customType === "bubble_agentic_ui"
+      && entry.data?.blockID === blockID;
+  });
+}
+
+const nativeScalar = Type.Union([
+  Type.String({ maxLength: 8192 }),
+  Type.Number(),
+  Type.Boolean(),
+  Type.Null(),
+]);
+const nativeChildren = Type.Optional(Type.Array(Type.String({ maxLength: 128 }), { maxItems: 32 }));
+const nativeLeafChildren = Type.Optional(Type.Array(Type.String(), { maxItems: 0 }));
+const nativeChartPoint = Type.Object({
+  label: Type.String({ minLength: 1, maxLength: 8192 }),
+  value: Type.Number(),
+  series: Type.Optional(Type.String({ maxLength: 8192 })),
+}, { additionalProperties: false });
+const nativeDonutPoint = Type.Object({
+  label: Type.String({ minLength: 1, maxLength: 8192 }),
+  value: Type.Number({ minimum: 0 }),
+}, { additionalProperties: false });
+const nativeElement = Type.Union([
+  Type.Object({
+    type: Type.Literal("Stack"),
+    props: Type.Object({
+      axis: Type.Optional(Type.Union([Type.Literal("vertical"), Type.Literal("horizontal")])),
+      spacing: Type.Optional(Type.Number({ minimum: 0, maximum: 48 })),
+      alignment: Type.Optional(Type.Union([Type.Literal("leading"), Type.Literal("center"), Type.Literal("trailing")])),
+    }, { additionalProperties: false }),
+    children: nativeChildren,
+  }, { additionalProperties: false }),
+  Type.Object({
+    type: Type.Literal("Card"),
+    props: Type.Object({
+      title: Type.Optional(Type.String({ maxLength: 8192 })),
+      subtitle: Type.Optional(Type.String({ maxLength: 8192 })),
+    }, { additionalProperties: false }),
+    children: nativeChildren,
+  }, { additionalProperties: false }),
+  Type.Object({
+    type: Type.Literal("Heading"),
+    props: Type.Object({
+      text: Type.String({ minLength: 1, maxLength: 8192 }),
+      level: Type.Optional(Type.Number({ minimum: 1, maximum: 3 })),
+    }, { additionalProperties: false }),
+    children: nativeLeafChildren,
+  }, { additionalProperties: false }),
+  Type.Object({
+    type: Type.Literal("Text"),
+    props: Type.Object({
+      text: Type.String({ minLength: 1, maxLength: 8192 }),
+      style: Type.Optional(Type.Union([Type.Literal("body"), Type.Literal("secondary"), Type.Literal("caption")])),
+    }, { additionalProperties: false }),
+    children: nativeLeafChildren,
+  }, { additionalProperties: false }),
+  Type.Object({
+    type: Type.Literal("Metric"),
+    props: Type.Object({
+      label: Type.String({ minLength: 1, maxLength: 8192 }),
+      value: nativeScalar,
+      detail: Type.Optional(Type.String({ maxLength: 8192 })),
+      trend: Type.Optional(Type.Number({ minimum: -1000000, maximum: 1000000 })),
+    }, { additionalProperties: false }),
+    children: nativeLeafChildren,
+  }, { additionalProperties: false }),
+  Type.Object({
+    type: Type.Literal("Table"),
+    props: Type.Object({
+      title: Type.Optional(Type.String({ maxLength: 8192 })),
+      columns: Type.Array(Type.Object({
+        key: Type.String({ minLength: 1, maxLength: 8192 }),
+        label: Type.String({ minLength: 1, maxLength: 8192 }),
+      }, { additionalProperties: false }), { minItems: 1, maxItems: 12 }),
+      rows: Type.Array(Type.Record(Type.String(), nativeScalar), { maxItems: 100 }),
+    }, { additionalProperties: false }),
+    children: nativeLeafChildren,
+  }, { additionalProperties: false }),
+  Type.Object({
+    type: Type.Union([Type.Literal("BarChart"), Type.Literal("LineChart")]),
+    props: Type.Object({
+      title: Type.String({ minLength: 1, maxLength: 8192 }),
+      unit: Type.Optional(Type.String({ maxLength: 8192 })),
+      points: Type.Array(nativeChartPoint, { minItems: 1, maxItems: 500 }),
+    }, { additionalProperties: false }),
+    children: nativeLeafChildren,
+  }, { additionalProperties: false }),
+  Type.Object({
+    type: Type.Literal("DonutChart"),
+    props: Type.Object({
+      title: Type.String({ minLength: 1, maxLength: 8192 }),
+      unit: Type.Optional(Type.String({ maxLength: 8192 })),
+      points: Type.Array(nativeDonutPoint, { minItems: 1, maxItems: 500 }),
+    }, { additionalProperties: false }),
+    children: nativeLeafChildren,
+  }, { additionalProperties: false }),
+]);
+
 export default function (pi: ExtensionAPI) {
   pi.registerCommand("bubble-navigate", {
     description: "Move Bubble to a conversation-tree entry",
@@ -544,8 +646,9 @@ export default function (pi: ExtensionAPI) {
       "Do not wait for the user to say chart or visualization. Do not use it for decoration, one scalar, speculative values, or prose that is already clearer.",
       "Use at most one native visualization per answer unless two datasets are genuinely unrelated.",
       "Use only Stack, Card, Heading, Text, Metric, Table, BarChart, LineChart, and DonutChart. Every referenced child must exist and the graph must be acyclic.",
-      "Chart props are title, optional unit, and points. Each point is { label, value, optional series }. DonutChart values must be non-negative.",
+      "Chart props are title, optional unit, and points. BarChart and LineChart points are { label, value, optional series }. DonutChart points are { label, non-negative value } with unique labels and no series.",
       "Table props are optional title, columns [{ key, label }], and rows whose scalar keys match the columns.",
+      "Metric props are { label, value, optional detail, optional numeric trend }. Heading props are { text, optional level: 1 | 2 | 3 }. Text props are { text, optional style: \"body\" | \"secondary\" | \"caption\" }. Stack and Card compose child element IDs.",
       "summary is a short accessible description of the main conclusion. After rendering, reply with only the insight or explanation the visual does not already show.",
       "Never invent data to make a visual and never expose the raw Spec in the user-facing answer.",
     ],
@@ -555,28 +658,17 @@ export default function (pi: ExtensionAPI) {
         root: Type.String({ description: "Root element key" }),
         elements: Type.Record(
           Type.String(),
-          Type.Object({
-            type: Type.Union([
-              Type.Literal("Stack"),
-              Type.Literal("Card"),
-              Type.Literal("Heading"),
-              Type.Literal("Text"),
-              Type.Literal("Metric"),
-              Type.Literal("Table"),
-              Type.Literal("BarChart"),
-              Type.Literal("LineChart"),
-              Type.Literal("DonutChart"),
-            ]),
-            props: Type.Record(Type.String(), Type.Unknown()),
-            children: Type.Optional(Type.Array(Type.String(), { maxItems: 32 })),
-          }),
-          { description: "Flat json-render element map with at most 64 elements" },
+          nativeElement,
+          { description: "Flat json-render element map with at most 64 elements", maxProperties: 64 },
         ),
       }),
     }),
-    async execute(_id, params) {
-      const result = await call("bubble_render", params as Record<string, unknown>);
-      pi.appendEntry("bubble_agentic_ui", params);
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const request = { ...params, blockID: _id } as Record<string, unknown>;
+      const result = await call("bubble_render", request);
+      if (!hasPersistedNativeBlock(ctx, _id)) {
+        pi.appendEntry("bubble_agentic_ui", request);
+      }
       return {
         content: [{ type: "text" as const, text: "Rendered as native Bubble UI." }],
         details: result,

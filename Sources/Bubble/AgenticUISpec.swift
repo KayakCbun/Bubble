@@ -185,6 +185,7 @@ struct AgenticUISpec: Codable, Equatable, Sendable {
 }
 
 struct AgenticUIRequest: Codable, Equatable, Sendable {
+    var blockID: String? = nil
     var summary: String
     var spec: AgenticUISpec
 
@@ -204,6 +205,7 @@ enum AgenticUICatalog {
         let summary = request.summary.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !summary.isEmpty,
               summary.count <= AgenticUILimits.maxSummaryLength,
+              request.blockID.map({ !$0.isEmpty && $0.count <= 256 }) ?? true,
               !request.spec.root.isEmpty,
               request.spec.elements.indices.count <= AgenticUILimits.maxElements,
               request.spec.elements[request.spec.root] != nil else { return false }
@@ -220,12 +222,14 @@ enum AgenticUICatalog {
 
         var visiting = Set<String>()
         var visited = Set<String>()
+        var deepestVisit: [String: Int] = [:]
         guard visit(
             request.spec.root,
             depth: 1,
             spec: request.spec,
             visiting: &visiting,
-            visited: &visited
+            visited: &visited,
+            deepestVisit: &deepestVisit
         ) else { return false }
         return visited.count == request.spec.elements.count
     }
@@ -235,20 +239,29 @@ enum AgenticUICatalog {
         depth: Int,
         spec: AgenticUISpec,
         visiting: inout Set<String>,
-        visited: inout Set<String>
+        visited: inout Set<String>,
+        deepestVisit: inout [String: Int]
     ) -> Bool {
         guard depth <= AgenticUILimits.maxDepth,
               !visiting.contains(id),
               let element = spec.elements[id] else { return false }
-        if visited.contains(id) { return true }
+        if let priorDepth = deepestVisit[id], priorDepth >= depth { return true }
+        deepestVisit[id] = depth
         visiting.insert(id)
+        visited.insert(id)
         for child in element.children {
-            guard visit(child, depth: depth + 1, spec: spec, visiting: &visiting, visited: &visited) else {
+            guard visit(
+                child,
+                depth: depth + 1,
+                spec: spec,
+                visiting: &visiting,
+                visited: &visited,
+                deepestVisit: &deepestVisit
+            ) else {
                 return false
             }
         }
         visiting.remove(id)
-        visited.insert(id)
         return true
     }
 
@@ -318,7 +331,9 @@ enum AgenticUICatalog {
                   optionalString(object["series"]) else { return false }
         }
         if element.type == .donutChart {
-            return points.allSatisfy { $0.value >= 0 } && points.contains { $0.value > 0 }
+            return points.allSatisfy { $0.value >= 0 && $0.series == nil }
+                && Set(points.map(\.label)).count == points.count
+                && points.contains { $0.value > 0 }
         }
         return true
     }
@@ -389,5 +404,12 @@ enum AgenticUITransportPolicy {
         return title.contains("bubble_render")
             || title.contains("native visualization")
             || kind == "bubble_render"
+    }
+}
+
+enum AgenticUIBlockIdentity {
+    static func matches(_ candidate: AgenticUIRequest, _ existing: AgenticUIRequest?) -> Bool {
+        guard let blockID = candidate.blockID, !blockID.isEmpty else { return false }
+        return existing?.blockID == blockID
     }
 }

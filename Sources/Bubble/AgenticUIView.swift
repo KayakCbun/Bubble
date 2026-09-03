@@ -181,12 +181,21 @@ private struct AgenticUIElementView: View {
         let points = spec.chartPoints(for: elementID)
         let series = Set(points.compactMap(\.series))
         return Chart(points) { point in
-            BarMark(
-                x: .value("Category", point.label),
-                y: .value(element.props["unit"]?.string ?? "Value", point.value)
-            )
-            .foregroundStyle(by: .value("Series", point.series ?? element.props["title"]?.string ?? "Value"))
-            .cornerRadius(3)
+            if let series = point.series {
+                BarMark(
+                    x: .value("Category", point.label),
+                    y: .value(element.props["unit"]?.string ?? "Value", point.value)
+                )
+                .foregroundStyle(by: .value("Series", series))
+                .position(by: .value("Series", series), axis: .horizontal)
+                .cornerRadius(3)
+            } else {
+                BarMark(
+                    x: .value("Category", point.label),
+                    y: .value(element.props["unit"]?.string ?? "Value", point.value)
+                )
+                .cornerRadius(3)
+            }
         }
         .chartLegend(series.isEmpty ? .hidden : .visible)
     }
@@ -195,18 +204,30 @@ private struct AgenticUIElementView: View {
         let points = spec.chartPoints(for: elementID)
         let series = Set(points.compactMap(\.series))
         return Chart(points) { point in
-            LineMark(
-                x: .value("Category", point.label),
-                y: .value(element.props["unit"]?.string ?? "Value", point.value),
-                series: .value("Series", point.series ?? "Value")
-            )
-            .interpolationMethod(.catmullRom)
-            .foregroundStyle(by: .value("Series", point.series ?? element.props["title"]?.string ?? "Value"))
-            PointMark(
-                x: .value("Category", point.label),
-                y: .value(element.props["unit"]?.string ?? "Value", point.value)
-            )
-            .foregroundStyle(by: .value("Series", point.series ?? element.props["title"]?.string ?? "Value"))
+            if let series = point.series {
+                LineMark(
+                    x: .value("Category", point.label),
+                    y: .value(element.props["unit"]?.string ?? "Value", point.value),
+                    series: .value("Series", series)
+                )
+                .foregroundStyle(by: .value("Series", series))
+                .lineStyle(by: .value("Series", series))
+                PointMark(
+                    x: .value("Category", point.label),
+                    y: .value(element.props["unit"]?.string ?? "Value", point.value)
+                )
+                .foregroundStyle(by: .value("Series", series))
+                .symbol(by: .value("Series", series))
+            } else {
+                LineMark(
+                    x: .value("Category", point.label),
+                    y: .value(element.props["unit"]?.string ?? "Value", point.value)
+                )
+                PointMark(
+                    x: .value("Category", point.label),
+                    y: .value(element.props["unit"]?.string ?? "Value", point.value)
+                )
+            }
         }
         .chartLegend(series.isEmpty ? .hidden : .visible)
     }

@@ -4905,11 +4905,21 @@ final class ChatStore {
         case "loop_delete":
             return try deleteLoopFromControl(params)
         case "bubble_render":
-            guard agenticUIBlocksThisTurn < 4 else {
-                throw RPCError(code: -22, message: "native UI block limit reached for this turn")
-            }
             guard let request = AgenticUIRequest.decodeAndValidate(params) else {
                 throw RPCError(code: -22, message: "invalid native UI spec")
+            }
+            if let existing = items.first(where: { AgenticUIBlockIdentity.matches(request, $0.agenticUI) }) {
+                guard existing.agenticUI == request else {
+                    throw RPCError(code: -22, message: "native UI block ID conflicts with an existing spec")
+                }
+                return BubbleControlResult([
+                    "status": "existing",
+                    "id": existing.id.uuidString,
+                    "elements": request.spec.elements.count,
+                ])
+            }
+            guard agenticUIBlocksThisTurn < 4 else {
+                throw RPCError(code: -22, message: "native UI block limit reached for this turn")
             }
             flushStreamChunks()
             streamingAssistantId = nil

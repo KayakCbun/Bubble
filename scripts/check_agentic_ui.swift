@@ -86,6 +86,38 @@ private enum AgenticUICheck {
             )) == nil,
             "part-to-whole charts reject negative values"
         )
+        require(
+            AgenticUIRequest.decodeAndValidate(request(
+                component: "DonutChart",
+                points: [
+                    ["label": "same", "value": 1, "series": "one"],
+                    ["label": "same", "value": 2, "series": "two"],
+                ]
+            )) == nil,
+            "donut slices reject series metadata that the native renderer cannot distinguish"
+        )
+
+        let sharedSubtreeTooDeep: [String: Any] = [
+            "summary": "Shared subtrees still obey the depth limit.",
+            "spec": [
+                "root": "root",
+                "elements": [
+                    "root": ["type": "Stack", "props": [:], "children": ["shared", "a"]],
+                    "a": ["type": "Stack", "props": [:], "children": ["b"]],
+                    "b": ["type": "Stack", "props": [:], "children": ["c"]],
+                    "c": ["type": "Stack", "props": [:], "children": ["d"]],
+                    "d": ["type": "Stack", "props": [:], "children": ["e"]],
+                    "e": ["type": "Stack", "props": [:], "children": ["shared"]],
+                    "shared": ["type": "Stack", "props": [:], "children": ["tail1"]],
+                    "tail1": ["type": "Stack", "props": [:], "children": ["tail2"]],
+                    "tail2": ["type": "Text", "props": ["text": "end"], "children": []],
+                ],
+            ],
+        ]
+        require(
+            AgenticUIRequest.decodeAndValidate(sharedSubtreeTooDeep) == nil,
+            "a shared subtree cannot bypass the maximum render depth"
+        )
 
         let tableRequest: [String: Any] = [
             "summary": "Latency is highest in search.",
@@ -117,6 +149,24 @@ private enum AgenticUICheck {
         let data = try! JSONEncoder().encode(valid)
         let restored = try! JSONDecoder().decode(AgenticUIRequest.self, from: data)
         require(restored == valid, "validated UI requests persist without losing their spec")
+
+        var identifiedRequest = request()
+        identifiedRequest["blockID"] = "tool-call-42"
+        let identified = AgenticUIRequest.decodeAndValidate(identifiedRequest)
+        require(identified?.blockID == "tool-call-42", "the stable tool-call ID survives host validation")
+        require(
+            AgenticUIBlockIdentity.matches(identified!, identified),
+            "a retry after a lost response resolves to the existing native block"
+        )
+        var secondRequest = request()
+        secondRequest["blockID"] = "tool-call-43"
+        require(
+            !AgenticUIBlockIdentity.matches(
+                AgenticUIRequest.decodeAndValidate(secondRequest)!,
+                identified
+            ),
+            "a distinct tool call is not suppressed as a retry"
+        )
         require(
             AgenticUITransportPolicy.isRenderToolUpdate(["title": "Native Visualization", "kind": "other"]),
             "the native render tool is hidden from the transcript transport"
@@ -132,12 +182,20 @@ private enum AgenticUICheck {
             "parentId": NSNull(),
             "timestamp": "2026-09-03T10:00:00Z",
             "customType": "bubble_agentic_ui",
-            "data": request(),
+            "data": identifiedRequest,
+        ]
+        let duplicateCustom: [String: Any] = [
+            "type": "custom",
+            "id": "native-ui-retry",
+            "parentId": "native-ui",
+            "timestamp": "2026-09-03T10:00:01Z",
+            "customType": "bubble_agentic_ui",
+            "data": identifiedRequest,
         ]
         let hiddenToolResult: [String: Any] = [
             "type": "message",
             "id": "render-result",
-            "parentId": "native-ui",
+            "parentId": "native-ui-retry",
             "message": [
                 "role": "toolResult",
                 "toolName": "bubble_render",
@@ -145,13 +203,13 @@ private enum AgenticUICheck {
                 "content": [["type": "text", "text": "Rendered natively in Bubble"]],
             ],
         ]
-        let jsonl = [custom, hiddenToolResult].map { entry -> String in
+        let jsonl = [custom, duplicateCustom, hiddenToolResult].map { entry -> String in
             let data = try! JSONSerialization.data(withJSONObject: entry, options: [.sortedKeys])
             return String(data: data, encoding: .utf8)!
         }.joined(separator: "\n")
         let transcript = ConversationTreeSnapshot(jsonl: jsonl)?.transcript
-        require(transcript?.count == 1, "replay restores the UI without a bubble_render tool row")
-        require(transcript?.first?.agenticUI == valid, "the authoritative session entry restores the validated UI")
+        require(transcript?.count == 1, "replay deduplicates a retried UI entry and hides the bubble_render tool row")
+        require(transcript?.first?.agenticUI == identified, "the authoritative session entry restores the validated UI and block identity")
         require(transcript?.first?.branchable == false, "a generated UI block is not an editable assistant branch")
 
         print("PASS: native Agentic UI protocol and catalog validation")

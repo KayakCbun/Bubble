@@ -105,7 +105,12 @@ struct ConversationTreeSnapshot: Equatable, Sendable {
     }
 
     var transcript: [ConversationTranscriptRecord] {
-        activePath.flatMap { entry -> [ConversationTranscriptRecord] in
+        var seenAgenticUIBlockIDs = Set<String>()
+        return activePath.flatMap { entry -> [ConversationTranscriptRecord] in
+            if let blockID = entry.agenticUI?.blockID,
+               !seenAgenticUIBlockIDs.insert(blockID).inserted {
+                return []
+            }
             switch entry.role {
             case "user":
                 if Self.isWorkspaceRelayText(entry.text) {
