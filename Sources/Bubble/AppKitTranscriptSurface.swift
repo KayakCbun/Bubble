@@ -528,7 +528,7 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
     /// Production rendering uses the non-recording reducer.  The recording
     /// wrapper is intentionally confined to Foundation focused checks so a
     /// streamed session cannot retain one command/event array per revision.
-    private let state: TranscriptSurfaceState
+    private var state: TranscriptSurfaceState
     private let rowFactory: AppKitTranscriptRowHostFactory
     private let overscan: CGFloat
     private let maximumMountedRows: Int
@@ -1046,6 +1046,64 @@ final class AppKitTranscriptSurfaceAdapter: NSObject, TranscriptSurfaceAdapter {
             scheduleSettledMeasurements(after: 0)
         }
         return events
+    }
+
+    /// Applies the complete transcript selected by SwiftUI. Unlike ordinary
+    /// commands, this is an explicit ownership transfer to another session;
+    /// stale streaming commands must continue to fail the reducer's strict
+    /// same-session check.
+    @discardableResult
+    func applyAuthoritativeSnapshot(
+        _ snapshot: TranscriptSurfaceSnapshot
+    ) -> [TranscriptSurfaceEvent] {
+        let current = state.snapshot.session
+        let crossesSessionBoundary = current.sessionID != snapshot.session.sessionID
+            || current.generation != snapshot.session.generation
+        guard crossesSessionBoundary else {
+            return apply(.replace(snapshot: snapshot))
+        }
+
+        settledMeasurementWorkItem?.cancel()
+        settledMeasurementWorkItem = nil
+        settledMeasurementGeneration &+= 1
+        phaseLessWheelFallbackWorkItem?.cancel()
+        phaseLessWheelFallbackWorkItem = nil
+        phaseLessWheelGeneration &+= 1
+        awaitsPhaseLessWheelBounds = false
+        lastUserScrollUptime = -.greatestFiniteMagnitude
+        pendingVisibleMeasurements.removeAll(keepingCapacity: true)
+        immediatelyMeasuredVisibleRowIDs.removeAll(keepingCapacity: true)
+        lastVisibleRowIDs.removeAll(keepingCapacity: true)
+        lastNeutralAtEnd = nil
+
+        for (id, cell) in Array(mounted) {
+            unmount(id: id, cell: cell)
+        }
+        for host in reusableHostsByKey.values {
+            host.removeFromSuperview()
+            host.prepareForReuse()
+        }
+        reusableHostsByKey.removeAll(keepingCapacity: true)
+        reusableHostLRU.removeAll(keepingCapacity: true)
+
+        let cacheCapacity = state.heightCache.capacity
+        state = TranscriptSurfaceState(
+            snapshot: TranscriptSurfaceSnapshot(
+                session: snapshot.session,
+                rows: [],
+                followsLatest: snapshot.followsLatest
+            ),
+            interactionStore: TranscriptInteractionStore(),
+            heightCache: TranscriptHeightCache(capacity: cacheCapacity)
+        )
+        rowIndexByID.removeAll(keepingCapacity: true)
+        heightIndex.replace(with: [])
+        userDetachedFromLatest = false
+        followsLatest = snapshot.followsLatest
+        scrollView.contentView.setBoundsOrigin(.zero)
+        updateDocumentFrame()
+
+        return apply(.replace(snapshot: snapshot))
     }
 
     /// Applies one known streaming row without rebuilding the transcript

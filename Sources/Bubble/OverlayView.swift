@@ -5257,9 +5257,7 @@ private struct OverlayTranscriptSurfaceRepresentable: NSViewRepresentable {
                     rows: snapshot.rows,
                     followsLatest: snapshot.followsLatest
                 )
-                if snapshot.session.sessionID == current.sessionID {
-                    _ = adapter.apply(.replace(snapshot: localSnapshot))
-                }
+                _ = adapter.applyAuthoritativeSnapshot(localSnapshot)
                 lastSurfaceSignal = surfaceSignal
                 startDirectMountAuditIfNeeded()
             } else if !replaceSurface {

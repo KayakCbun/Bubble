@@ -224,6 +224,44 @@ private enum AppKitTranscriptSurfaceCheck {
         expect(adapter.metrics.mountedPeak <= 18, "mounted peak respects the configured bound")
         expect(adapter.visibleRowIDs.count < 18, "visible row lookup stays independent of long-session row count")
 
+        let incomingSession = TranscriptSessionHandle(
+            sessionID: "appkit-check-switched",
+            generation: 1,
+            revision: 0
+        )
+        let directSwitchAdapter = AppKitTranscriptSurfaceAdapter(
+            snapshot: TranscriptSurfaceSnapshot(
+                session: session,
+                rows: [],
+                followsLatest: false
+            ),
+            overscan: 0,
+            maximumMountedRows: 2,
+            maximumReusableHosts: 0
+        )
+        directSwitchAdapter.setViewportSize(NSSize(width: 480, height: 120))
+        let incomingSnapshot = TranscriptSurfaceSnapshot(
+            session: incomingSession,
+            rows: [row("direct-switched-session-row", height: 40)],
+            followsLatest: false
+        )
+        let ordinaryCrossSessionEvents = directSwitchAdapter.apply(
+            .replace(snapshot: incomingSnapshot)
+        )
+        expect(
+            ordinaryCrossSessionEvents.contains(where: {
+                if case .staleGenerationIgnored = $0 { return true }
+                return false
+            }) && directSwitchAdapter.snapshot.rows.isEmpty,
+            "ordinary commands still reject stale cross-session writes"
+        )
+        _ = directSwitchAdapter.applyAuthoritativeSnapshot(incomingSnapshot)
+        expect(
+            directSwitchAdapter.snapshot.session.sessionID == incomingSession.sessionID
+                && directSwitchAdapter.visibleMountedRowIDs == ["direct-switched-session-row"],
+            "the first cross-session snapshot mounts visible rows without requiring a second switch"
+        )
+
         let fractionalAdapter = AppKitTranscriptSurfaceAdapter(
             snapshot: TranscriptSurfaceSnapshot(
                 session: session,
